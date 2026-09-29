@@ -75,6 +75,9 @@ from openviking.server.skill_ingest import install_skills
 from openviking.server.temp_upload_store import TempUploadStore
 from openviking.server.upload_token_store import upload_token_store
 from openviking.service.skill_sources import GIT_SKILL_SOURCE_PREFIXES
+from openviking.session.retrieval_wiring import build_retrieval_facade
+from openviking.session.trajectory_index_hook import session_directory
+from openviking.storage.acl import acl_principals
 from openviking.utils.media_limits import MAX_INLINE_TOOL_RESULT_MEDIA_BYTES
 from openviking.utils.search_filters import (
     SearchContextTypeInput,
@@ -83,6 +86,7 @@ from openviking.utils.search_filters import (
 )
 from openviking.utils.skill_processor import SkillProcessor
 from openviking_cli.exceptions import (
+    FailedPreconditionError,
     InvalidArgumentError,
     NotFoundError,
     OpenVikingError,
@@ -91,6 +95,8 @@ from openviking_cli.exceptions import (
 )
 from openviking_cli.retrieve import ContextType
 from openviking_cli.utils import get_logger
+from openviking_cli.utils.config.memory_config import is_causal_mode_enabled
+from openviking_cli.utils.config.open_viking_config import get_openviking_config
 
 logger = get_logger(__name__)
 
@@ -524,6 +530,92 @@ async def search(
         level=level,
     )
     return await _format_search_result(result, service=service, ctx=ctx, read_content=read_content)
+
+
+def _require_causal_session_id(session_id: str) -> str:
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise InvalidArgumentError("session_id is required")
+    return session_id.strip()
+
+
+def _require_causal_limit(limit: Optional[int]) -> None:
+    if limit is None:
+        return
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise InvalidArgumentError("limit must be a positive integer")
+
+
+async def _open_causal_facade(session_id: str):
+    """Load one session and bind its causal read facade.
+
+    The mode gate runs before the session is loaded and before the facade is
+    built. A disabled mode is an error, not an empty hit list.
+    """
+    service = get_service()
+    ctx = _get_ctx()
+    if not is_causal_mode_enabled(get_openviking_config(), session_id=session_id):
+        raise FailedPreconditionError(
+            "causal retrieval is not enabled for this server "
+            "(memory.skill_trajectory_mode is not causal)"
+        )
+    try:
+        session = service.sessions.session(ctx, session_id)
+    except NotFoundError:
+        raise
+    if session is None:
+        raise NotFoundError(session_id, "session")
+    await session.load()
+    if session_directory(session) is None:
+        raise NotFoundError(session_id, "session")
+    viking_fs = getattr(session, "_viking_fs", None)
+    if viking_fs is None:
+        viking_fs = getattr(service, "viking_fs", None)
+    if viking_fs is None:
+        raise FailedPreconditionError("session storage is not available")
+    facade = build_retrieval_facade(session=session, ctx=ctx, viking_fs=viking_fs)
+    return ctx, facade
+
+
+@mcp.tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
+async def retrieve_causal_cards(
+    query: str,
+    session_id: str,
+    limit: Optional[int] = None,
+) -> dict:
+    """Retrieve causal-memory cards for one session.
+
+    Available only when the server's skill trajectory mode is causal. While
+    that mode is off this raises; it does not return an empty card list. The
+    server chooses the retrieval profile. ``limit``, when set, caps how many
+    cards are returned after that profile runs. Cards are visibility-filtered
+    for the caller and do not include raw action or observation text.
+    """
+    if not isinstance(query, str):
+        raise InvalidArgumentError("query must be a string")
+    session_id = _require_causal_session_id(session_id)
+    _require_causal_limit(limit)
+    ctx, facade = await _open_causal_facade(session_id)
+    result = facade.retrieve(query, tuple(acl_principals(ctx)), profile=None)
+    payload = result.to_dict()
+    if limit is not None:
+        payload = {**payload, "cards": payload["cards"][:limit]}
+    return payload
+
+
+@mcp.tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
+async def expand_causal_neighborhood(card_id: str, session_id: str) -> dict:
+    """Expand the influence neighborhood of one claim card in a session.
+
+    Available only when causal mode is enabled. ``card_id`` is a claim card
+    id from ``retrieve_causal_cards``. An unknown id, or an id that is not a
+    claim card, raises. The walk is not persisted.
+    """
+    if not isinstance(card_id, str) or not card_id.strip():
+        raise InvalidArgumentError("card_id is required")
+    session_id = _require_causal_session_id(session_id)
+    _ctx, facade = await _open_causal_facade(session_id)
+    path = facade.expand_claim_neighborhood(card_id=card_id.strip())
+    return path.to_dict()
 
 
 def _hit_uri(ctx_type: str, uri: str) -> str:
@@ -2024,7 +2116,8 @@ async def mcp_lifespan():
     """Run the MCP session manager. Call this inside the FastAPI lifespan."""
     async with mcp.session_manager.run():
         logger.info(
-            "MCP endpoint ready (16 tools: find, search, read, write, edit, list, tree, "
+            "MCP endpoint ready (18 tools: find, search, retrieve_causal_cards, "
+            "expand_causal_neighborhood, read, write, edit, list, tree, "
             "remember, add_resource, add_skill, list_watches, cancel_watch, grep, glob, forget, "
             "health)"
         )

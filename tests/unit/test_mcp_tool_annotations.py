@@ -12,6 +12,8 @@ async def test_mcp_tools_advertise_behavior_annotations():
         "find": (True, False, True, False),
         # Context mode can persist and prune the per-session recall ledger.
         "search": (False, True, False, False),
+        "retrieve_causal_cards": (True, False, True, False),
+        "expand_causal_neighborhood": (True, False, True, False),
         "read": (True, False, True, False),
         "list": (True, False, True, False),
         "tree": (True, False, True, False),

@@ -71,7 +71,12 @@ UNSPECIFIED_PARTICIPANT_ID = "unspecified"
 logger = get_logger(__name__)
 
 
-def _session_dir(session: Any) -> Path | None:
+def session_directory(session: Any) -> Path | None:
+    """Return the on-disk directory for ``session``, or None when it cannot be resolved.
+
+    This is the production resolver. Other callers must use it instead of
+    parsing ``_session_uri`` again.
+    """
     viking_fs = getattr(session, "_viking_fs", None)
     uri = getattr(session, "_session_uri", None)
     if viking_fs is None or not uri:
@@ -83,6 +88,10 @@ def _session_dir(session: Any) -> Path | None:
     if not raw:
         return None
     return Path(raw)
+
+
+def _session_dir(session: Any) -> Path | None:
+    return session_directory(session)
 
 
 def _canonical(value: Any) -> str:
