@@ -1681,6 +1681,42 @@ class CausalExperiencesStore:
             self._drafts.pop(draft.revision.revision_id, None)
         return revision
 
+    def persist_provisional_draft(
+        self,
+        draft: ForkDraft,
+        *,
+        idempotency_key: str,
+    ) -> ForkRevision:
+        """Persist ``draft`` as provisional through ``upsert_fork_node``.
+
+        Same disk path as ``commit_provisional`` after the server-check gate:
+        status becomes provisional, then ``upsert_fork_node`` writes the
+        revision. The caller supplies ``idempotency_key``. The same key and
+        the same payload return the stored revision. The same key with
+        different content conflicts and does not write another revision.
+        This method does not apply ``ServerChecks``. Grounding is recorded
+        in the intervention index.
+        """
+        self._require_causal_write()
+        if not isinstance(draft, ForkDraft):
+            raise ValueError("draft must be a ForkDraft")
+        provisional_payload = draft.revision.to_dict()
+        provisional_payload["status"] = ForkStatus.PROVISIONAL
+        provisional_payload["content_hash"] = ""
+        provisional = ForkNodeRevision.from_dict(provisional_payload)
+        result = self.upsert_fork_node(
+            provisional.to_dict(),
+            idempotency_key=idempotency_key,
+        )
+        stored = self.get_revision(result["fork_node_id"], result["revision_id"])
+        if stored is None:
+            raise ValueError("provisional revision missing after commit")
+        revision = ForkNodeRevision.from_dict(stored)
+        self._index_intervention(revision)
+        with self._lock:
+            self._drafts.pop(draft.revision.revision_id, None)
+        return revision
+
     def append_validated(
         self, fork_node_id: str, evidence: dict[str, Any]
     ) -> ForkRevision | ValidationOutcome:
