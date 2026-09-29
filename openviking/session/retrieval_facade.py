@@ -12,6 +12,15 @@ exploitation did not take. Segment/atom cards stay on the fact channel.
 Dependency-pattern hits expand inside one frozen view at read time and do
 not write a stored object.
 
+Initial rank inside each corpus is BM25. ``RetrievalProfile.rank_mode`` may
+select the hybrid tier, which mixes that score with a real vector from the
+injected embedder. A missing embedder, or a vector whose dimension is 0,
+keeps this call on BM25 and still returns the BM25 hits. The projection
+``embedding_stub`` is not a vector. ``FEATURE_SPEC_VERSION`` stays on the
+result. While ``FACT_LANE_PAUSED`` is set, ``retrieve`` does not call the
+segment/atom adapter and does not give those empty seats to another corpus.
+The query cap remains ``CAUSAL_MEMORY_CAP``.
+
 Online retrieval applies principal ACL inside each adapter before the quota
 is spent, then clamps the reranked list back to the causal-memory cap.
 Offline management reads are not part of this path and online code must not
@@ -25,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -32,21 +42,26 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from openviking.session.ao_ledger_reader import list_ao_ledger
+from openviking.session.bm25 import BM25Index
 from openviking.session.causal_bridges import (
     PATH_MAX_ENTITIES,
     PATH_MAX_HYPOTHESIS_HOPS,
     check_path_budget,
 )
 from openviking.session.causal_experiences import (
+    FORK_CANDIDATE_ROLE,
     INDEX_FILENAME,
     NAMESPACE_DIRNAME,
-    FORK_CANDIDATE_ROLE,
     CausalExperiencesStore,
     ForkStatus,
     branch_retrieval_channel,
 )
 from openviking.session.influence_projection import InfluenceProjection, ProjectionRegistry
-from openviking.session.influence_view import InfluenceClaim, InfluenceViewRevision
+from openviking.session.influence_view import (
+    RELATION_INFLUENCE,
+    InfluenceClaim,
+    InfluenceViewRevision,
+)
 
 FEATURE_SPEC_VERSION = "ranker-feature-spec-v1"
 SELECTION_POLICY_VERSION = "provisional-selection-v1"
@@ -58,6 +73,14 @@ DEFAULT_PROJECTION_QUOTA = 4
 DEFAULT_SEGMENT_ATOM_QUOTA = 2
 VERIFIED_SLOTS = 8
 PROVISIONAL_SLOTS = 4
+FACT_LANE_PAUSED = True
+RANK_MODE_BM25 = "bm25"
+RANK_MODE_HYBRID = "hybrid"
+RANK_MODES = frozenset((RANK_MODE_BM25, RANK_MODE_HYBRID))
+# Above one half so a real vector can move a weaker BM25 hit ahead of a
+# stronger one. Equal min-max weights tie a pure two-document reversal.
+HYBRID_BM25_WEIGHT = 0.25
+HYBRID_VECTOR_WEIGHT = 0.75
 
 CardKind = Literal[
     "fork",
@@ -69,6 +92,8 @@ CardKind = Literal[
 ]
 CardChannel = Literal["verified", "provisional", "fact"]
 SelectionMode = Literal["exploitation", "exploration"]
+RankMode = Literal["bm25", "hybrid"]
+EmbedFn = Callable[[str], Sequence[float]]
 
 CARD_KINDS = frozenset(
     ("fork", "branch", "block_projection", "claim_projection", "segment", "atom")
@@ -259,14 +284,25 @@ class RetrievalProfile:
     projection: int = DEFAULT_PROJECTION_QUOTA
     segment_atom: int = DEFAULT_SEGMENT_ATOM_QUOTA
     provisional_slots: int = PROVISIONAL_SLOTS
+    rank_mode: RankMode = RANK_MODE_BM25
 
-    def to_dict(self) -> dict[str, int]:
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "rank_mode", _coerce_rank_mode(self.rank_mode))
+
+    def to_dict(self) -> dict[str, int | str]:
         return {
             "fork_branch": self.fork_branch,
             "projection": self.projection,
             "segment_atom": self.segment_atom,
             "provisional_slots": self.provisional_slots,
+            "rank_mode": self.rank_mode,
         }
+
+
+def _coerce_rank_mode(value: Any) -> RankMode:
+    if not isinstance(value, str) or value not in RANK_MODES:
+        raise ValueError(f"rank_mode must be one of {sorted(RANK_MODES)}, got {value!r}")
+    return value  # type: ignore[return-value]
 
 
 def _quota_int(value: Any, field: str) -> int:
@@ -293,11 +329,13 @@ def coerce_profile(value: RetrievalProfile | Mapping[str, Any] | None) -> Retrie
             provisional_slots=_quota_int(
                 payload.get("provisional_slots", PROVISIONAL_SLOTS), "provisional_slots"
             ),
+            rank_mode=_coerce_rank_mode(payload.get("rank_mode", RANK_MODE_BM25)),
         )
     fork_branch = _quota_int(profile.fork_branch, "fork_branch")
     projection = _quota_int(profile.projection, "projection")
     segment_atom = _quota_int(profile.segment_atom, "segment_atom")
     provisional_slots = _quota_int(profile.provisional_slots, "provisional_slots")
+    rank_mode = _coerce_rank_mode(profile.rank_mode)
     total = fork_branch + projection + segment_atom
     if total > CAUSAL_MEMORY_CAP:
         raise QuotaError(
@@ -309,6 +347,7 @@ def coerce_profile(value: RetrievalProfile | Mapping[str, Any] | None) -> Retrie
         projection=projection,
         segment_atom=segment_atom,
         provisional_slots=provisional_slots,
+        rank_mode=rank_mode,
     )
 
 
@@ -363,6 +402,7 @@ class RetrievalResult:
     feature_version: str
     truncated_by_rerank_clamp: bool = False
     selection_audit: SelectionAudit | None = None
+    rank_tier: str = RANK_MODE_BM25
 
     def to_dict(self) -> dict[str, Any]:
         audit = None if self.selection_audit is None else self.selection_audit.to_dict()
@@ -371,6 +411,7 @@ class RetrievalResult:
             "feature_version": self.feature_version,
             "truncated_by_rerank_clamp": self.truncated_by_rerank_clamp,
             "selection_audit": audit,
+            "rank_tier": self.rank_tier,
         }
 
 
@@ -413,19 +454,194 @@ def default_acl_filter(card: RetrievalCard, principal_labels: Sequence[str]) -> 
     return bool(principal.intersection(card.acl_labels))
 
 
-def _text_hits(query: RetrievalQuery, *parts: str) -> bool:
-    """Case-insensitive substring match (``str.casefold`` on both sides).
+class _RankPlan:
+    """Requested tier for one retrieve call. ``actual`` may fall back to BM25."""
 
-    An empty query text matches every haystack.
+    def __init__(self, requested: str, embedder: EmbedFn | None) -> None:
+        self.requested = _coerce_rank_mode(requested)
+        self.embedder = embedder
+        self.actual = RANK_MODE_BM25
+        self.query_vector: list[float] | None = None
+        self.downgraded = False
+
+    def prepare(self, query_text: str) -> None:
+        """Choose the tier actually used. Empty queries and dim-0 vectors stay BM25."""
+        self.actual = RANK_MODE_BM25
+        self.query_vector = None
+        self.downgraded = False
+        if self.requested != RANK_MODE_HYBRID or not query_text or self.embedder is None:
+            return
+        vector = _real_vector(self.embedder(query_text))
+        if vector is None:
+            return
+        self.actual = RANK_MODE_HYBRID
+        self.query_vector = vector
+
+
+def _prepare_rank_plan(query: RetrievalQuery, plan: _RankPlan | None) -> _RankPlan:
+    if plan is not None:
+        return plan
+    owned = _RankPlan(RANK_MODE_BM25, None)
+    owned.prepare(query.text)
+    return owned
+
+
+def _document_text(*parts: str) -> str:
+    return "\n".join(parts)
+
+
+def _pending_score() -> dict[str, Any]:
+    return {"bm25": 0.0, "lexical": 0.0, "rank_tier": RANK_MODE_BM25}
+
+
+def _real_vector(value: object) -> list[float] | None:
+    """A usable vector has dimension > 0. The projection stub does not qualify."""
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        return None
+    if len(value) == 0:
+        return None
+    coords: list[float] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            return None
+        number = float(item)
+        if not math.isfinite(number):
+            return None
+        coords.append(number)
+    return coords
+
+
+def _cosine(left: Sequence[float], right: Sequence[float]) -> float | None:
+    if len(left) != len(right) or not left:
+        return None
+    dot = 0.0
+    left_sq = 0.0
+    right_sq = 0.0
+    for left_value, right_value in zip(left, right, strict=True):
+        dot += left_value * right_value
+        left_sq += left_value * left_value
+        right_sq += right_value * right_value
+    if left_sq == 0.0 or right_sq == 0.0:
+        return 0.0
+    return dot / (math.sqrt(left_sq) * math.sqrt(right_sq))
+
+
+def _minmax(values: Sequence[float]) -> list[float]:
+    if not values:
+        return []
+    low = min(values)
+    high = max(values)
+    if high == low:
+        return [1.0] * len(values)
+    span = high - low
+    return [(value - low) / span for value in values]
+
+
+def _score_breakdown(
+    bm25: float,
+    plan: _RankPlan,
+    *,
+    tier: str,
+    vector: float | None = None,
+    combined: float | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"bm25": bm25, "lexical": bm25, "rank_tier": tier}
+    if plan.requested != tier:
+        payload["requested_rank_tier"] = plan.requested
+    if vector is not None:
+        payload["vector"] = vector
+        payload["bm25_weight"] = HYBRID_BM25_WEIGHT
+        payload["vector_weight"] = HYBRID_VECTOR_WEIGHT
+    if combined is not None:
+        payload["combined"] = combined
+    return payload
+
+
+def _order_by(scores: Sequence[float]) -> list[int]:
+    positions = list(range(len(scores)))
+    positions.sort(key=lambda pos: scores[pos], reverse=True)
+    return positions
+
+
+def _similarities(
+    plan: _RankPlan, documents: Sequence[str], kept: Sequence[int]
+) -> list[float] | None:
+    embedder = plan.embedder
+    query_vector = plan.query_vector
+    if embedder is None or query_vector is None:
+        return None
+    scored: list[float] = []
+    for index in kept:
+        document_vector = _real_vector(embedder(documents[index]))
+        if document_vector is None:
+            return None
+        similarity = _cosine(query_vector, document_vector)
+        if similarity is None:
+            return None
+        scored.append(similarity)
+    return scored
+
+
+def _rank_hits(
+    cards: Sequence[RetrievalCard],
+    documents: Sequence[str],
+    query: RetrievalQuery,
+    plan: _RankPlan,
+) -> list[RetrievalCard]:
+    """Order cards by BM25, or by a BM25/vector mix when this call has real vectors.
+
+    An empty query keeps every card at the same score and in the given order.
+    A non-empty query drops BM25 zeros. Hybrid fusion does not bring them back.
     """
+    if len(cards) != len(documents):
+        raise ValueError("cards and documents must be the same length")
+    if not cards:
+        return []
+    bm25_scores = BM25Index(documents).scores(query.text)
     if not query.text:
-        return True
-    haystack = "\n".join(parts).casefold()
-    return query.text.casefold() in haystack
-
-
-def _score(query: RetrievalQuery) -> dict[str, Any]:
-    return {"lexical": 1 if not query.text else 1}
+        return [
+            replace(card, score_breakdown=_score_breakdown(0.0, plan, tier=RANK_MODE_BM25))
+            for card in cards
+        ]
+    kept = [index for index, score in enumerate(bm25_scores) if score > 0.0]
+    similarities: list[float] | None = None
+    if plan.actual == RANK_MODE_HYBRID:
+        similarities = _similarities(plan, documents, kept)
+        if similarities is None:
+            plan.actual = RANK_MODE_BM25
+            plan.query_vector = None
+            plan.downgraded = True
+    if similarities is None:
+        bm25_kept = [bm25_scores[index] for index in kept]
+        return [
+            replace(
+                cards[kept[pos]],
+                score_breakdown=_score_breakdown(bm25_kept[pos], plan, tier=RANK_MODE_BM25),
+            )
+            for pos in _order_by(bm25_kept)
+        ]
+    bm25_kept = [bm25_scores[index] for index in kept]
+    norm_bm25 = _minmax(bm25_kept)
+    norm_vector = _minmax(similarities)
+    combined = [
+        HYBRID_BM25_WEIGHT * bm25_norm + HYBRID_VECTOR_WEIGHT * vector_norm
+        for bm25_norm, vector_norm in zip(norm_bm25, norm_vector, strict=True)
+    ]
+    ranked: list[RetrievalCard] = []
+    for pos in _order_by(combined):
+        ranked.append(
+            replace(
+                cards[kept[pos]],
+                score_breakdown=_score_breakdown(
+                    bm25_kept[pos],
+                    plan,
+                    tier=RANK_MODE_HYBRID,
+                    vector=similarities[pos],
+                    combined=combined[pos],
+                ),
+            )
+        )
+    return ranked
 
 
 def _channel_for_fork_status(status: str | None) -> CardChannel | None:
@@ -485,12 +701,21 @@ class ForkBranchAdapter:
         query: RetrievalQuery | Mapping[str, Any] | None,
         limit: int,
         principal_labels: Sequence[str] = (),
+        *,
+        rank_plan: _RankPlan | None = None,
     ) -> list[RetrievalCard]:
-        """ACL-filter fork and branch cards, then keep at most ``limit`` visible ones."""
+        """ACL-filter fork and branch cards, then keep at most ``limit`` visible ones.
+
+        Document text is the serialized latest revision, the same blob previously
+        passed to the substring hit test. ACL drops a revision before it enters
+        the BM25 corpus or spends quota.
+        """
         parsed = coerce_query(query)
         cap = _limit(limit)
         principal = _principal_set(principal_labels)
+        plan = _prepare_rank_plan(parsed, rank_plan)
         cards: list[RetrievalCard] = []
+        documents: list[str] = []
         for fork_node_id in self._fork_ids():
             loaded = self._store.get_fork_node(fork_node_id)
             if loaded is None:
@@ -504,31 +729,31 @@ class ForkBranchAdapter:
             if channel is None:
                 continue
             status = str(latest["status"])
-            blob = json.dumps(latest, ensure_ascii=False, sort_keys=True)
-            if not _text_hits(parsed, blob):
-                continue
             raw_workspace = latest.get("workspace_id")
             if not isinstance(raw_workspace, str) or not raw_workspace:
                 continue
             labels = _normalize_labels((raw_workspace,))
             if not _labels_visible(labels, principal):
                 continue
+            blob = json.dumps(latest, ensure_ascii=False, sort_keys=True)
             revision_id = str(latest.get("revision_id") or "")
-            fork_card = RetrievalCard(
-                kind="fork",
-                channel=channel,
-                in_channel_rank=0,
-                status_label=_status_label_for_fork(status),
-                source_pointer={
-                    "corpus": self.name,
-                    "fork_node_id": fork_node_id,
-                    "revision_id": revision_id,
-                },
-                payload_ref=f"fork:{fork_node_id}@{revision_id}",
-                score_breakdown=_score(parsed),
-                acl_labels=labels,
+            cards.append(
+                RetrievalCard(
+                    kind="fork",
+                    channel=channel,
+                    in_channel_rank=0,
+                    status_label=_status_label_for_fork(status),
+                    source_pointer={
+                        "corpus": self.name,
+                        "fork_node_id": fork_node_id,
+                        "revision_id": revision_id,
+                    },
+                    payload_ref=f"fork:{fork_node_id}@{revision_id}",
+                    score_breakdown=_pending_score(),
+                    acl_labels=labels,
+                )
             )
-            cards.append(fork_card)
+            documents.append(blob)
             branches = latest.get("branches") if isinstance(latest.get("branches"), list) else []
             ordered = sorted(
                 (item for item in branches if isinstance(item, dict)),
@@ -555,13 +780,12 @@ class ForkBranchAdapter:
                             "evidence_status": branch.get("evidence_status"),
                         },
                         payload_ref=f"branch:{fork_node_id}@{revision_id}/{branch_id}",
-                        score_breakdown=_score(parsed),
+                        score_breakdown=_pending_score(),
                         acl_labels=labels,
                     )
                 )
-            if len(cards) >= cap:
-                break
-        return cards[:cap]
+                documents.append(blob)
+        return _rank_hits(cards, documents, parsed, plan)[:cap]
 
     def _fork_ids(self) -> list[str]:
         index_path = self._root / NAMESPACE_DIRNAME / INDEX_FILENAME
@@ -663,10 +887,10 @@ class InfluenceProjectionAdapter:
     them.
 
     ``content_resolver`` maps an AO id to that AO's body text. Resolved text
-    is concatenated into the hit test only. It is not written onto the
+    is concatenated into the BM25 document only. It is not written onto the
     returned card or its source pointer. A missing resolver, an unbound view,
-    or an empty resolution leaves matching on the summary, card id, and
-    semantic type.
+    or an empty resolution leaves the document as the summary, card id, and
+    semantic type. Neighborhood walks only ``relation_type=influence``.
     """
 
     name = "projection"
@@ -693,31 +917,28 @@ class InfluenceProjectionAdapter:
         query: RetrievalQuery | Mapping[str, Any] | None,
         limit: int,
         principal_labels: Sequence[str] = (),
+        *,
+        rank_plan: _RankPlan | None = None,
     ) -> list[RetrievalCard]:
         """ACL via ``ProjectionRegistry.search``, then keep at most ``limit`` hits.
 
         Does not call ``ProjectionRegistry.to_dict``. That dump, along with
         ``materialize_strength(None)``, ``events()``, and ``list_bridges``, is
-        an offline management path and must not be used online.
+        an offline management path and must not be used online. ``embedding_stub``
+        is not read; dimension 0 there is not a vector tier.
         """
         parsed = coerce_query(query)
         cap = _limit(limit)
+        plan = _prepare_rank_plan(parsed, rank_plan)
         pattern = parsed.dependency_pattern
         raw_cards = list(self._registry.search(principal_labels=principal_labels))
         cards: list[RetrievalCard] = []
+        documents: list[str] = []
         for card in raw_cards:
             fields = _claim_fields(card, self._views)
             if card.kind == "claim" and pattern is not None:
                 if fields is None or not _pattern_matches(fields, pattern):
                     continue
-            if not _text_hits(
-                parsed,
-                card.summary,
-                card.card_id,
-                card.semantic_type,
-                *self._resolved_match_parts(card),
-            ):
-                continue
             kind: CardKind = "claim_projection" if card.kind == "claim" else "block_projection"
             pointer: dict[str, Any] = {
                 "corpus": self.name,
@@ -737,16 +958,22 @@ class InfluenceProjectionAdapter:
                     status_label=card.status,
                     source_pointer=pointer,
                     payload_ref=card.card_id,
-                    score_breakdown=_score(parsed),
+                    score_breakdown=_pending_score(),
                     acl_labels=card.acl_labels,
                 )
             )
-            if len(cards) >= cap:
-                break
-        return cards[:cap]
+            documents.append(
+                _document_text(
+                    card.summary,
+                    card.card_id,
+                    card.semantic_type,
+                    *self._resolved_match_parts(card),
+                )
+            )
+        return _rank_hits(cards, documents, parsed, plan)[:cap]
 
     def _resolved_match_parts(self, card: InfluenceProjection) -> tuple[str, ...]:
-        """Body snippets for the hit test. Never copied onto the card."""
+        """Body snippets for the BM25 document. Never copied onto the card."""
         resolver = self._content_resolver
         if resolver is None:
             return ()
@@ -768,10 +995,14 @@ class InfluenceProjectionAdapter:
         claim_id: str,
         max_entities: int = PATH_MAX_ENTITIES,
     ) -> AssembledPath:
-        """Assemble a bounded path along claim edges of one frozen view.
+        """Assemble a bounded path along influence edges of one frozen view.
 
-        The walk stops at ``max_entities`` (never above ``PATH_MAX_ENTITIES``)
-        and when the next block is already on the path. Nothing is persisted.
+        Claims whose ``relation_type`` is not influence, including ``skip``,
+        are left off the adjacency before the walk. A skip seed still places
+        both endpoint blocks in the start set, and its own edge is not
+        returned. The walk is bidirectional, stops at ``max_entities`` (never
+        above ``PATH_MAX_ENTITIES``), and stops when the next block is already
+        on the path. Nothing is persisted.
         """
         if isinstance(max_entities, bool) or not isinstance(max_entities, int):
             raise ValueError("max_entities must be an int")
@@ -809,14 +1040,17 @@ class InfluenceProjectionAdapter:
             return True
 
         _try_add(seed.source_block_id)
-        added_target = _try_add(seed.target_block_id)
-        if seed.source_block_id in seen and seed.target_block_id in seen:
+        _try_add(seed.target_block_id)
+        both_present = seed.source_block_id in seen and seed.target_block_id in seen
+        if both_present and seed.relation_type == RELATION_INFLUENCE:
             edges.append((seed.claim_id, seed.source_block_id, seed.target_block_id))
-        elif not added_target and seed.target_block_id not in seen:
+        elif seed.target_block_id not in seen:
             truncated = True
 
         adjacency: dict[str, list[InfluenceClaim]] = {}
         for claim in claims:
+            if claim.relation_type != RELATION_INFLUENCE:
+                continue
             adjacency.setdefault(claim.source_block_id, []).append(claim)
             adjacency.setdefault(claim.target_block_id, []).append(claim)
         for bucket in adjacency.values():
@@ -895,18 +1129,23 @@ class SegmentAtomAdapter:
         query: RetrievalQuery | Mapping[str, Any] | None,
         limit: int,
         principal_labels: Sequence[str] = (),
+        *,
+        rank_plan: _RankPlan | None = None,
     ) -> list[RetrievalCard]:
-        """Drop unlabeled or non-intersecting facts, then keep at most ``limit``."""
+        """Drop unlabeled or non-intersecting facts, then keep at most ``limit``.
+
+        The facade does not call this while the fact lane is paused. The
+        document is the action/observation blob plus the AO id.
+        """
         parsed = coerce_query(query)
         cap = _limit(limit)
         principal = _principal_set(principal_labels)
+        plan = _prepare_rank_plan(parsed, rank_plan)
         cards: list[RetrievalCard] = []
+        documents: list[str] = []
         for item in self._items():
             action = item.get("action") if isinstance(item.get("action"), dict) else {}
             observation = item.get("observation") if isinstance(item.get("observation"), dict) else {}
-            blob = json.dumps({"action": action, "observation": observation}, ensure_ascii=False)
-            if not _text_hits(parsed, blob, str(item.get("ao_id") or "")):
-                continue
             record_kind = action.get("record_kind")
             kind: CardKind = "segment" if record_kind == "segment" else "atom"
             raw_labels = action.get("acl_labels")
@@ -916,6 +1155,7 @@ class SegmentAtomAdapter:
             if not _labels_visible(labels, principal):
                 continue
             ao_id = str(item.get("ao_id") or "")
+            blob = json.dumps({"action": action, "observation": observation}, ensure_ascii=False)
             cards.append(
                 RetrievalCard(
                     kind=kind,
@@ -930,13 +1170,12 @@ class SegmentAtomAdapter:
                         "captured_state": item.get("captured_state"),
                     },
                     payload_ref=f"{kind}:{self._session_id}/{ao_id}",
-                    score_breakdown=_score(parsed),
+                    score_breakdown=_pending_score(),
                     acl_labels=labels,
                 )
             )
-            if len(cards) >= cap:
-                break
-        return cards[:cap]
+            documents.append(_document_text(blob, ao_id))
+        return _rank_hits(cards, documents, parsed, plan)[:cap]
 
     def _items(self) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
@@ -1109,6 +1348,8 @@ class HybridRetrievalFacade:
         acl_filter: AclFilter | None = None,
         feature_version: str = FEATURE_SPEC_VERSION,
         seed: str | int | None = None,
+        fact_lane_paused: bool | None = None,
+        embedder: EmbedFn | None = None,
     ) -> None:
         self.fork_branch = fork_branch
         self.projection = projection
@@ -1117,6 +1358,13 @@ class HybridRetrievalFacade:
         self.acl_filter = acl_filter if acl_filter is not None else default_acl_filter
         self.feature_version = _require_str(feature_version, "feature_version")
         self.seed = _normalize_seed(seed)
+        if fact_lane_paused is None:
+            self.fact_lane_paused = FACT_LANE_PAUSED
+        elif isinstance(fact_lane_paused, bool):
+            self.fact_lane_paused = fact_lane_paused
+        else:
+            raise ValueError("fact_lane_paused must be a bool or None")
+        self.embedder = embedder
 
     def retrieve(
         self,
@@ -1126,26 +1374,31 @@ class HybridRetrievalFacade:
     ) -> RetrievalResult:
         """Filter inside each adapter, then clamp reranked cards back to 12.
 
-        ``materialize_strength(None)``, ``events()``, ``list_bridges``, and
-        ``ProjectionRegistry.to_dict`` are offline management paths. This
-        method does not call them.
+        While the fact lane is paused this does not call ``segment_atom.search``
+        and does not backfill those seats. ``materialize_strength(None)``,
+        ``events()``, ``list_bridges``, and ``ProjectionRegistry.to_dict`` are
+        offline management paths. This method does not call them.
         """
         parsed = coerce_query(query)
         budgets = coerce_profile(profile)
         _principal_set(principal_labels)
         seed = self.seed if self.seed is not None else _derive_query_seed(parsed)
-        fork_cards = self._visible(
-            self.fork_branch.search(parsed, budgets.fork_branch, principal_labels),
-            principal_labels,
+        plan = _RankPlan(
+            budgets.rank_mode,
+            self.embedder if budgets.rank_mode == RANK_MODE_HYBRID else None,
         )
-        projection_cards = self._visible(
-            self.projection.search(parsed, budgets.projection, principal_labels),
-            principal_labels,
+        plan.prepare(parsed.text)
+        fork_cards, projection_cards, fact_cards = self._lane_cards(
+            parsed, budgets, principal_labels, plan
         )
-        fact_cards = self._visible(
-            self.segment_atom.search(parsed, budgets.segment_atom, principal_labels),
-            principal_labels,
-        )
+        if plan.downgraded:
+            plan.actual = RANK_MODE_BM25
+            plan.query_vector = None
+            plan.embedder = None
+            plan.downgraded = False
+            fork_cards, projection_cards, fact_cards = self._lane_cards(
+                parsed, budgets, principal_labels, plan
+            )
         stateful, audit = _allocate_stateful(
             [*fork_cards, *projection_cards],
             provisional_slots=budgets.provisional_slots,
@@ -1160,6 +1413,8 @@ class HybridRetrievalFacade:
             "feature_version": self.feature_version,
             "query": parsed.to_dict(),
             "profile": budgets.to_dict(),
+            "rank_tier": plan.actual,
+            "requested_rank_tier": plan.requested,
         }
         reranked = self._call_rerank(selected, context)
         truncated = len(reranked) > CAUSAL_MEMORY_CAP
@@ -1169,7 +1424,38 @@ class HybridRetrievalFacade:
             feature_version=self.feature_version,
             truncated_by_rerank_clamp=truncated,
             selection_audit=audit,
+            rank_tier=plan.actual,
         )
+
+    def _lane_cards(
+        self,
+        query: RetrievalQuery,
+        budgets: RetrievalProfile,
+        principal_labels: Sequence[str],
+        plan: _RankPlan,
+    ) -> tuple[list[RetrievalCard], list[RetrievalCard], list[RetrievalCard]]:
+        fork_cards = self._visible(
+            self.fork_branch.search(
+                query, budgets.fork_branch, principal_labels, rank_plan=plan
+            ),
+            principal_labels,
+        )
+        projection_cards = self._visible(
+            self.projection.search(
+                query, budgets.projection, principal_labels, rank_plan=plan
+            ),
+            principal_labels,
+        )
+        if self.fact_lane_paused:
+            fact_cards: list[RetrievalCard] = []
+        else:
+            fact_cards = self._visible(
+                self.segment_atom.search(
+                    query, budgets.segment_atom, principal_labels, rank_plan=plan
+                ),
+                principal_labels,
+            )
+        return fork_cards, projection_cards, fact_cards
 
     def expand_claim_neighborhood(
         self,

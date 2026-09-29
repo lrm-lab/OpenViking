@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 
 import pytest
 
 from openviking.session.ao_ledger import AOLedger
+from openviking.session.bm25 import DEFAULT_B, DEFAULT_K1, BM25Index
 from openviking.session.causal_bridges import PATH_MAX_ENTITIES, check_path_budget
 from openviking.session.causal_experiences import (
     SEVEN_SECTION_KEYS,
@@ -19,16 +21,21 @@ from openviking.session.causal_experiences import (
 )
 from openviking.session.influence_projection import ProjectionRegistry
 from openviking.session.influence_view import (
+    PURPOSE_POST_RUN_INDEX,
+    RELATION_INFLUENCE,
+    RELATION_SKIP,
     AORange,
     CoverageManifest,
     InfluenceBlock,
     InfluenceClaim,
     InfluenceViewDraft,
-    PURPOSE_POST_RUN_INDEX,
     SegmentRef,
     SourceRef,
 )
 from openviking.session.retrieval_facade import (
+    CAUSAL_MEMORY_CAP,
+    DEFAULT_SEGMENT_ATOM_QUOTA,
+    FACT_LANE_PAUSED,
     FEATURE_SPEC_VERSION,
     NO_ELIGIBLE_EXPLORATION_REASON,
     SELECTION_POLICY_VERSION,
@@ -78,6 +85,20 @@ def _sections() -> dict[str, str]:
     return {key: f"{key} body" for key in SEVEN_SECTION_KEYS}
 
 
+def _text_sections(text: str) -> dict[str, str]:
+    sections = _sections()
+    sections["task_and_goals"] = text
+    return sections
+
+
+def _append_text(ledger: AOLedger, text: str, *, record_kind: str = "atom") -> str:
+    record = ledger.append(
+        {"tool": "read_file", "record_kind": record_kind, "acl_labels": ["team-a"]},
+        {"kind": "text", "summary": text},
+    )
+    return record.ao_id
+
+
 def _evidence_ref() -> dict[str, object]:
     return {
         "ao_id": "ao-e1",
@@ -103,6 +124,7 @@ def _commit_fork(
     workspace: str,
     status: str,
     branches: list[dict[str, object]] | None = None,
+    sections: dict[str, str] | None = None,
 ) -> str:
     draft = store.submit_fork_draft(
         {
@@ -113,7 +135,7 @@ def _commit_fork(
                 "source_session_id": "sess-1",
                 "anchor_sequence": 10,
             },
-            "seven_sections": _sections(),
+            "seven_sections": sections or _sections(),
             "contemporaneous_basis": [_evidence_ref()],
             "hindsight_attribution": [],
             "used_skills": [],
@@ -141,7 +163,13 @@ def _ref(sequence: int, *, session_id: str = "sess-1") -> SourceRef:
     )
 
 
-def _block(block_id: str, sequence: int, *, session_id: str = "sess-1") -> InfluenceBlock:
+def _block(
+    block_id: str,
+    sequence: int,
+    *,
+    session_id: str = "sess-1",
+    summary: str | None = None,
+) -> InfluenceBlock:
     ref = _ref(sequence, session_id=session_id)
     return InfluenceBlock(
         block_id=block_id,
@@ -150,7 +178,7 @@ def _block(block_id: str, sequence: int, *, session_id: str = "sess-1") -> Influ
         segment_ref=SegmentRef(segment_id="seg-a", session_id=session_id),
         ao_start_seq=sequence,
         ao_end_seq=sequence,
-        summary=f"summary-{block_id}",
+        summary=summary if summary is not None else f"summary-{block_id}",
         input="",
         output="",
         authorship="agent-a",
@@ -214,6 +242,8 @@ def _facade(
     *,
     views: list | None = None,
     seed: str | int | None = None,
+    fact_lane_paused: bool | None = None,
+    embedder=None,
 ) -> HybridRetrievalFacade:
     projection = InfluenceProjectionAdapter(registry, views=views)
     return HybridRetrievalFacade(
@@ -221,6 +251,8 @@ def _facade(
         projection,
         SegmentAtomAdapter(session_dir, session_id),
         seed=seed,
+        fact_lane_paused=fact_lane_paused,
+        embedder=embedder,
     )
 
 
@@ -322,17 +354,46 @@ def test_corpus_quotas_and_profile_over_cap(tmp_path: Path) -> None:
         _append_ao(ledger, labels=["team-a"])
 
     facade = _facade(root, store, registry, session_dir, "sess-facts", views=[revision])
+    assert facade.fact_lane_paused is FACT_LANE_PAUSED is True
+    assert DEFAULT_SEGMENT_ATOM_QUOTA == 2
+    assert CAUSAL_MEMORY_CAP == 12
     result = facade.retrieve({}, _PRINCIPAL, RetrievalProfile())
     forks = [card for card in result.cards if card.kind == "fork"]
     projections = [card for card in result.cards if card.kind.endswith("_projection")]
     facts = [card for card in result.cards if card.kind in {"segment", "atom"}]
+    assert len(fork_ids) == 8
     assert len(forks) == 6
     assert [card.source_pointer["fork_node_id"] for card in forks] == fork_ids[:6]
     assert len(projections) == 4
-    assert len(facts) == 2
-    assert {card.kind for card in facts} == {"atom"}
+    assert facts == []
+    assert len(result.cards) == 10
+    assert len(result.cards) <= 10
+    assert all(card.channel != "fact" for card in result.cards)
+    assert result.rank_tier == "bm25"
     assert result.feature_version == FEATURE_SPEC_VERSION == facade.feature_version
     assert RetrievalCard.from_dict(result.cards[0].to_dict()) == result.cards[0]
+
+    resumed = _facade(
+        root,
+        store,
+        registry,
+        session_dir,
+        "sess-facts",
+        views=[revision],
+        fact_lane_paused=False,
+    )
+    resumed_result = resumed.retrieve({}, _PRINCIPAL, RetrievalProfile())
+    resumed_forks = [card for card in resumed_result.cards if card.kind == "fork"]
+    resumed_projections = [
+        card for card in resumed_result.cards if card.kind.endswith("_projection")
+    ]
+    resumed_facts = [card for card in resumed_result.cards if card.kind in {"segment", "atom"}]
+    assert len(resumed_forks) == 6
+    assert len(resumed_projections) == 4
+    assert len(resumed_facts) == 2
+    assert {card.kind for card in resumed_facts} == {"atom"}
+    assert {card.channel for card in resumed_facts} == {"fact"}
+    assert len(resumed_result.cards) == 12
 
     with pytest.raises(QuotaError) as raised:
         facade.retrieve(
@@ -475,10 +536,23 @@ def test_acl_filters_non_intersecting_labels(tmp_path: Path) -> None:
     assert all(item.get("fork_node_id") != hidden_fork for item in pointers)
     assert any(item.get("view_revision_id") == "rev-vis" for item in pointers)
     assert all(item.get("view_revision_id") != "rev-hid" for item in pointers)
-    assert any(item.get("ao_id") == visible_ao for item in pointers)
-    assert all(item.get("ao_id") != hidden_ao for item in pointers)
+    assert all(item.get("ao_id") not in {visible_ao, hidden_ao} for item in pointers)
+    assert all(card.kind not in {"segment", "atom"} for card in result.cards)
     assert result.cards
     assert all(set(card.acl_labels) & set(_PRINCIPAL) for card in result.cards)
+
+    resumed = _facade(
+        root,
+        store,
+        registry,
+        session_dir,
+        "sess-acl",
+        views=[visible_rev, hidden_rev],
+        fact_lane_paused=False,
+    )
+    resumed_pointers = [card.source_pointer for card in resumed.retrieve({}, _PRINCIPAL).cards]
+    assert any(item.get("ao_id") == visible_ao for item in resumed_pointers)
+    assert all(item.get("ao_id") != hidden_ao for item in resumed_pointers)
 
 
 def test_dependency_pattern_and_bounded_neighborhood(tmp_path: Path) -> None:
@@ -626,7 +700,7 @@ def test_fact_channel_does_not_consume_state_slots(tmp_path: Path) -> None:
     ledger = AOLedger(session_dir, "sess-facts")
     segment_id = _append_ao(ledger, labels=["team-a"], record_kind="segment")
     atom_id = _append_ao(ledger, labels=["team-a"], record_kind="atom")
-    facade = _facade(root, store, registry, session_dir, "sess-facts")
+    facade = _facade(root, store, registry, session_dir, "sess-facts", fact_lane_paused=False)
     result = facade.retrieve(
         {},
         _PRINCIPAL,
@@ -923,7 +997,7 @@ def test_query_derived_seed_and_default_selection_mode(tmp_path: Path) -> None:
     session_dir = root / "sess-facts"
     ledger = AOLedger(session_dir, "sess-facts")
     _append_ao(ledger, labels=["team-a"])
-    facade = _facade(root, store, registry, session_dir, "sess-facts")
+    facade = _facade(root, store, registry, session_dir, "sess-facts", fact_lane_paused=False)
     profile = RetrievalProfile(fork_branch=0, projection=0, segment_atom=1)
     empty = facade.retrieve({}, _PRINCIPAL, profile)
     alpha = facade.retrieve({"text": "alpha"}, _PRINCIPAL, profile)
@@ -951,7 +1025,15 @@ def test_query_derived_seed_and_default_selection_mode(tmp_path: Path) -> None:
     facts = [card for card in empty.cards if card.channel == "fact"]
     assert len(facts) == 1
     assert facts[0].selection_mode == "exploitation"
-    seeded = _facade(root, store, registry, session_dir, "sess-facts", seed="explicit-seed")
+    seeded = _facade(
+        root,
+        store,
+        registry,
+        session_dir,
+        "sess-facts",
+        seed="explicit-seed",
+        fact_lane_paused=False,
+    )
     seeded_alpha = seeded.retrieve({"text": "alpha"}, _PRINCIPAL, profile)
     seeded_beta = seeded.retrieve({"text": "beta"}, _PRINCIPAL, profile)
     assert seeded_alpha.selection_audit is not None
@@ -1003,7 +1085,7 @@ def test_text_match_is_case_insensitive(tmp_path: Path) -> None:
         {"tool": "read_file", "record_kind": "atom", "acl_labels": ["team-a"]},
         {"kind": "text", "summary": "caroline wrote the note"},
     )
-    facade = _facade(root, store, registry, session_dir, "sess-case")
+    facade = _facade(root, store, registry, session_dir, "sess-case", fact_lane_paused=False)
     profile = RetrievalProfile(fork_branch=0, projection=0, segment_atom=2)
     expected = {upper.ao_id, lower.ao_id}
 
@@ -1038,7 +1120,15 @@ def test_content_resolver_matches_block_body_without_changing_facts(tmp_path: Pa
         return ""
 
     profile = RetrievalProfile(fork_branch=0, projection=4, segment_atom=2)
-    plain = _facade(root, store, registry, session_dir, "sess-res", views=[revision])
+    plain = _facade(
+        root,
+        store,
+        registry,
+        session_dir,
+        "sess-res",
+        views=[revision],
+        fact_lane_paused=False,
+    )
     assert plain.retrieve("caroline", _PRINCIPAL, profile).cards == ()
     plain_facts = plain.retrieve("notebook", _PRINCIPAL, profile)
     assert [card.kind for card in plain_facts.cards] == ["atom"]
@@ -1049,13 +1139,18 @@ def test_content_resolver_matches_block_body_without_changing_facts(tmp_path: Pa
     by_summary = projection.search("summary-b-body", 4, _PRINCIPAL)
     assert len(by_body) == 1
     assert by_body[0].kind == "block_projection"
-    assert by_body[0].to_dict() == by_summary[0].to_dict()
+    body_payload = by_body[0].to_dict()
+    summary_payload = by_summary[0].to_dict()
+    assert body_payload.pop("score_breakdown")["bm25"] > 0
+    assert summary_payload.pop("score_breakdown")["bm25"] > 0
+    assert body_payload == summary_payload
     assert "cafe" not in json.dumps(by_body[0].to_dict(), ensure_ascii=False)
 
     facade = HybridRetrievalFacade(
         ForkBranchAdapter(root, store),
         projection,
         SegmentAtomAdapter(session_dir, "sess-res"),
+        fact_lane_paused=False,
     )
     found = facade.retrieve("caroline", _PRINCIPAL, profile)
     assert [card.kind for card in found.cards] == ["block_projection"]
@@ -1104,3 +1199,391 @@ def test_content_resolver_matches_claim_via_linked_block_refs(tmp_path: Path) ->
     assert "patch" not in json.dumps(claims[0].to_dict(), ensure_ascii=False)
     bare = InfluenceProjectionAdapter(registry, views=[revision])
     assert bare.search("caroline", 10, _PRINCIPAL) == []
+
+
+class _ExplodingFacts:
+    name = "segment_atom"
+
+    def search(self, *args, **kwargs):
+        raise AssertionError("segment_atom.search must not run while the fact lane is paused")
+
+
+def test_fact_lane_pause_skips_search_and_does_not_backfill(tmp_path: Path) -> None:
+    root = tmp_path / "pause"
+    store = _store(root)
+    matching = [
+        _commit_fork(
+            store,
+            ao_id=f"ao-z-{index}",
+            workspace="team-a",
+            status="validated",
+            sections=_text_sections("zephyr"),
+        )
+        for index in range(8)
+    ]
+    registry = ProjectionRegistry(root / "projections.json")
+    session_dir = root / "sess"
+    AOLedger(session_dir, "sess")
+    facade = HybridRetrievalFacade(
+        ForkBranchAdapter(root, store),
+        InfluenceProjectionAdapter(registry),
+        _ExplodingFacts(),  # type: ignore[arg-type]
+    )
+    assert facade.fact_lane_paused is True
+    result = facade.retrieve(
+        {},
+        _PRINCIPAL,
+        RetrievalProfile(fork_branch=6, projection=4, segment_atom=2),
+    )
+    forks = [card for card in result.cards if card.kind == "fork"]
+    assert [card.source_pointer["fork_node_id"] for card in forks] == matching[:6]
+    assert len(forks) == 6
+    assert len(matching) == 8
+    assert all(card.kind not in {"segment", "atom"} for card in result.cards)
+    assert all(card.channel != "fact" for card in result.cards)
+    assert len(result.cards) <= 10
+    assert result.feature_version == FEATURE_SPEC_VERSION
+    assert CAUSAL_MEMORY_CAP == 12
+
+
+def test_bm25_term_and_document_frequency_change_rank() -> None:
+    assert DEFAULT_K1 == 1.2
+    assert DEFAULT_B == 0.75
+    frequency = BM25Index(["apple apple apple", "apple"], k1=1.2, b=0.75)
+    scores = frequency.scores("apple")
+    heavy = math.log(1 + (2 - 2 + 0.5) / (2 + 0.5)) * (3 * 2.2) / (
+        3 + 1.2 * (1 - 0.75 + 0.75 * (3 / 2))
+    )
+    light = math.log(1 + (2 - 2 + 0.5) / (2 + 0.5)) * (1 * 2.2) / (
+        1 + 1.2 * (1 - 0.75 + 0.75 * (1 / 2))
+    )
+    assert scores[0] == pytest.approx(heavy)
+    assert scores[1] == pytest.approx(light)
+    assert scores[0] > scores[1]
+
+    rarity = BM25Index(["rare", "common", "common", "common"])
+    mixed = rarity.scores("rare common")
+    assert mixed[0] > mixed[1]
+    assert mixed[1] == pytest.approx(mixed[2]) == pytest.approx(mixed[3])
+    assert rarity.scores("absent") == [0.0, 0.0, 0.0, 0.0]
+    assert rarity.scores("") == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_bm25_retrieval_orders_hits_and_keeps_per_corpus_quotas(tmp_path: Path) -> None:
+    root = tmp_path / "bm25"
+    store = _store(root)
+    quiet = _commit_fork(
+        store,
+        ao_id="ao-quiet",
+        workspace="team-a",
+        status="validated",
+        sections=_text_sections("unrelated ledger note"),
+    )
+    weak_fork = _commit_fork(
+        store,
+        ao_id="ao-weak-fork",
+        workspace="team-a",
+        status="validated",
+        sections=_text_sections("zephyr"),
+    )
+    strong_fork = _commit_fork(
+        store,
+        ao_id="ao-strong-fork",
+        workspace="team-a",
+        status="validated",
+        sections=_text_sections("zephyr " * 40),
+    )
+    weak_block = _block("b-weak", 1, summary="zephyr")
+    strong_block = _block("b-strong", 2, summary="zephyr " * 40)
+    revision = _freeze([weak_block, strong_block], [], revision_id="rev-bm25")
+    registry = ProjectionRegistry(root / "projections.json")
+    registry.register(revision, acl_labels=_PRINCIPAL)
+    session_dir = root / "sess-bm25"
+    ledger = AOLedger(session_dir, "sess-bm25")
+    first = _append_text(ledger, "alpha note")
+    second = _append_text(ledger, "beta note")
+    third = _append_text(ledger, "gamma note")
+    weak_fact = _append_text(ledger, "zephyr")
+    strong_fact = _append_text(ledger, "zephyr " * 40)
+    for _ in range(3):
+        _append_text(ledger, "commonword")
+    rare_fact = _append_text(ledger, "rareword commonword")
+    facade = _facade(
+        root,
+        store,
+        registry,
+        session_dir,
+        "sess-bm25",
+        views=[revision],
+        fact_lane_paused=False,
+    )
+
+    empty = facade.retrieve(
+        "",
+        _PRINCIPAL,
+        RetrievalProfile(fork_branch=0, projection=0, segment_atom=3),
+    )
+    assert [card.source_pointer["ao_id"] for card in empty.cards] == [first, second, third]
+    assert {card.score_breakdown["bm25"] for card in empty.cards} == {0.0}
+    assert empty.rank_tier == "bm25"
+
+    shared = facade.retrieve(
+        "alpha",
+        _PRINCIPAL,
+        RetrievalProfile(fork_branch=0, projection=0, segment_atom=3),
+    )
+    assert [card.source_pointer["ao_id"] for card in shared.cards] == [first]
+    assert shared.cards[0].score_breakdown["bm25"] > 0
+    assert shared.cards[0].score_breakdown["lexical"] == shared.cards[0].score_breakdown["bm25"]
+    assert shared.cards[0].score_breakdown["rank_tier"] == "bm25"
+
+    assert (
+        facade.retrieve(
+            "carol",
+            _PRINCIPAL,
+            RetrievalProfile(fork_branch=0, projection=0, segment_atom=4),
+        ).cards
+        == ()
+    )
+    caroline = _append_text(ledger, "caroline met melanie")
+    folded = facade.retrieve(
+        "CAROLINE",
+        _PRINCIPAL,
+        RetrievalProfile(fork_branch=0, projection=0, segment_atom=4),
+    )
+    assert [card.source_pointer["ao_id"] for card in folded.cards] == [caroline]
+    assert (
+        facade.retrieve(
+            "quinquereme",
+            _PRINCIPAL,
+            RetrievalProfile(fork_branch=0, projection=0, segment_atom=4),
+        ).cards
+        == ()
+    )
+
+    by_frequency = facade.retrieve(
+        "zephyr",
+        _PRINCIPAL,
+        RetrievalProfile(fork_branch=1, projection=1, segment_atom=1),
+    )
+    assert [card.kind for card in by_frequency.cards] == ["fork", "block_projection", "atom"]
+    assert by_frequency.cards[0].source_pointer["fork_node_id"] == strong_fork
+    assert by_frequency.cards[0].source_pointer["fork_node_id"] != weak_fork
+    assert quiet not in {card.source_pointer.get("fork_node_id") for card in by_frequency.cards}
+    assert by_frequency.cards[1].source_pointer["block_or_claim_id"] == "b-strong"
+    assert by_frequency.cards[2].source_pointer["ao_id"] == strong_fact
+    assert by_frequency.cards[2].source_pointer["ao_id"] != weak_fact
+
+    rare_first = facade.retrieve(
+        "rareword commonword",
+        _PRINCIPAL,
+        RetrievalProfile(fork_branch=0, projection=0, segment_atom=4),
+    )
+    rare_ids = [card.source_pointer["ao_id"] for card in rare_first.cards]
+    assert rare_ids[0] == rare_fact
+    assert len(rare_ids) == 4
+
+    forks_only = facade.retrieve(
+        "zephyr",
+        _PRINCIPAL,
+        RetrievalProfile(fork_branch=1, projection=0, segment_atom=0),
+    )
+    assert [card.kind for card in forks_only.cards] == ["fork"]
+    assert forks_only.cards[0].source_pointer["fork_node_id"] == strong_fork
+
+
+def test_hybrid_tier_mixes_real_vectors_or_stays_on_bm25(tmp_path: Path) -> None:
+    root = tmp_path / "hybrid"
+    store = _store(root)
+    registry = ProjectionRegistry(root / "projections.json")
+    session_dir = root / "sess-hybrid"
+    ledger = AOLedger(session_dir, "sess-hybrid")
+    heavy = _append_text(ledger, "bm25-heavy " + "zephyr " * 30)
+    aligned = _append_text(ledger, "vector-hit zephyr")
+    bait = _append_text(ledger, "perfect vector bait")
+    profile = {
+        "fork_branch": 0,
+        "projection": 0,
+        "segment_atom": 3,
+        "rank_mode": "hybrid",
+    }
+
+    def embed(text: str) -> list[float]:
+        folded = text.casefold()
+        if "bm25-heavy" in folded:
+            return [0.0, 1.0]
+        if folded.strip() == "zephyr":
+            return [1.0, 0.0]
+        return [1.0, 0.0]
+
+    fused = _facade(
+        root,
+        store,
+        registry,
+        session_dir,
+        "sess-hybrid",
+        fact_lane_paused=False,
+        embedder=embed,
+    ).retrieve("zephyr", _PRINCIPAL, profile)
+    fused_ids = [card.source_pointer["ao_id"] for card in fused.cards]
+    assert fused_ids[0] == aligned
+    assert heavy in fused_ids
+    assert bait not in fused_ids
+    assert fused.rank_tier == "hybrid"
+    assert fused.cards[0].score_breakdown["rank_tier"] == "hybrid"
+    assert fused.cards[0].score_breakdown["bm25"] > 0
+    assert "lexical" in fused.cards[0].score_breakdown
+    assert fused.cards[0].score_breakdown["vector"] > fused.cards[1].score_breakdown["vector"]
+    assert "combined" in fused.cards[0].score_breakdown
+
+    dim0 = _facade(
+        root,
+        store,
+        registry,
+        session_dir,
+        "sess-hybrid",
+        fact_lane_paused=False,
+        embedder=lambda _text: [],
+    ).retrieve("zephyr", _PRINCIPAL, profile)
+    dim0_ids = [card.source_pointer["ao_id"] for card in dim0.cards]
+    assert dim0_ids
+    assert dim0_ids[0] == heavy
+    assert bait not in dim0_ids
+    assert dim0.rank_tier == "bm25"
+    assert dim0.cards[0].score_breakdown["rank_tier"] == "bm25"
+    assert dim0.cards[0].score_breakdown["requested_rank_tier"] == "hybrid"
+    assert "vector" not in dim0.cards[0].score_breakdown
+
+    unavailable = _facade(
+        root,
+        store,
+        registry,
+        session_dir,
+        "sess-hybrid",
+        fact_lane_paused=False,
+    ).retrieve("zephyr", _PRINCIPAL, profile)
+    assert unavailable.rank_tier == "bm25"
+    assert [card.source_pointer["ao_id"] for card in unavailable.cards][0] == heavy
+    assert unavailable.cards
+
+    block = _block("b-stub", 1, summary="zephyr projection")
+    stub_revision = _freeze([block], [], revision_id="rev-stub")
+    stub_registry = ProjectionRegistry(root / "stub.json")
+    stub_registry.register(stub_revision, acl_labels=_PRINCIPAL)
+    stubbed = HybridRetrievalFacade(
+        ForkBranchAdapter(root, store),
+        InfluenceProjectionAdapter(stub_registry, views=[stub_revision]),
+        SegmentAtomAdapter(session_dir, "sess-hybrid"),
+    ).retrieve(
+        "zephyr",
+        _PRINCIPAL,
+        {"fork_branch": 0, "projection": 2, "segment_atom": 2, "rank_mode": "hybrid"},
+    )
+    assert stubbed.cards
+    assert stubbed.rank_tier == "bm25"
+    assert [card.kind for card in stubbed.cards] == ["block_projection"]
+    assert stubbed.cards[0].score_breakdown["rank_tier"] == "bm25"
+    assert "vector" not in stubbed.cards[0].score_breakdown
+
+
+def test_rank_mode_has_no_vector_only_tier(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="rank_mode"):
+        RetrievalProfile(rank_mode="vector")  # type: ignore[arg-type]
+    root = tmp_path / "mode"
+    store = _store(root)
+    session_dir = root / "sess"
+    AOLedger(session_dir, "sess")
+    facade = _facade(root, store, ProjectionRegistry(root / "projections.json"), session_dir, "sess")
+    with pytest.raises(ValueError, match="rank_mode"):
+        facade.retrieve({}, _PRINCIPAL, {"rank_mode": "vector"})
+
+
+def test_neighborhood_walks_influence_edges_only(tmp_path: Path) -> None:
+    blocks = [_block(f"n{index}", index) for index in range(1, 6)]
+    blocks.extend(_block(f"p{index}", 5 + index) for index in range(1, 4))
+    claims = [
+        InfluenceClaim(
+            claim_id="e-12",
+            source_block_id="n1",
+            target_block_id="n2",
+            carried_artifact="patch",
+            downstream_effect="applied",
+            relation_type=RELATION_INFLUENCE,
+        ),
+        InfluenceClaim(
+            claim_id="e-skip",
+            source_block_id="n2",
+            target_block_id="n3",
+            carried_artifact="gap",
+            downstream_effect="omitted",
+            relation_type=RELATION_SKIP,
+        ),
+        InfluenceClaim(
+            claim_id="e-34",
+            source_block_id="n3",
+            target_block_id="n4",
+            carried_artifact="rate",
+            downstream_effect="rose",
+            relation_type=RELATION_INFLUENCE,
+        ),
+        InfluenceClaim(
+            claim_id="e-skip2",
+            source_block_id="n4",
+            target_block_id="n5",
+            carried_artifact="tail",
+            downstream_effect="unread",
+            relation_type=RELATION_SKIP,
+        ),
+        InfluenceClaim(
+            claim_id="e-p12",
+            source_block_id="p1",
+            target_block_id="p2",
+            carried_artifact="upstream",
+            downstream_effect="kept",
+            relation_type=RELATION_INFLUENCE,
+        ),
+        InfluenceClaim(
+            claim_id="e-p23",
+            source_block_id="p2",
+            target_block_id="p3",
+            carried_artifact="downstream",
+            downstream_effect="kept",
+            relation_type=RELATION_INFLUENCE,
+        ),
+    ]
+    revision = _freeze(blocks, claims, revision_id="rev-skip", enforce_checks=False)
+    root = tmp_path / "walk"
+    store = _store(root)
+    session_dir = root / "sess"
+    AOLedger(session_dir, "sess")
+    adapter = InfluenceProjectionAdapter(
+        ProjectionRegistry(root / "projections.json"), views=[revision]
+    )
+    facade = HybridRetrievalFacade(
+        ForkBranchAdapter(root, store),
+        adapter,
+        SegmentAtomAdapter(session_dir, "sess"),
+    )
+
+    stopped = facade.expand_claim_neighborhood("rev-skip", "e-12")
+    assert stopped.entities[:2] == ("n1", "n2")
+    assert "n3" not in stopped.entities
+    assert "n5" not in stopped.entities
+    assert {edge[0] for edge in stopped.edges} == {"e-12"}
+
+    seeded = adapter.expand_claim_neighborhood("rev-skip", "e-skip")
+    assert seeded.entities[:2] == ("n2", "n3")
+    assert "n1" in seeded.entities
+    assert "n4" in seeded.entities
+    assert "n5" not in seeded.entities
+    edge_ids = {edge[0] for edge in seeded.edges}
+    assert edge_ids == {"e-12", "e-34"}
+    assert "e-skip" not in edge_ids
+    assert "e-skip2" not in edge_ids
+
+    upstream = facade.expand_claim_neighborhood("rev-skip", "e-p23")
+    assert "p1" in upstream.entities
+    assert "p2" in upstream.entities
+    assert "p3" in upstream.entities
+    assert {edge[0] for edge in upstream.edges} == {"e-p12", "e-p23"}
+    assert len(upstream.entities) <= PATH_MAX_ENTITIES
