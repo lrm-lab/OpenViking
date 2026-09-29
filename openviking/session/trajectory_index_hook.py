@@ -9,6 +9,12 @@ mode pages the real AO ledger, enqueues one ``IndexJob``, and drives
 synthetic one-AO fallback is not the production path. Failures are logged and
 swallowed so commit itself still succeeds.
 
+``extraction_provider`` defaults to ``None``. The build is then the
+deterministic ledger fallback (``construction_mode=fallback``), unchanged
+from the commit hook that only knew that path. When a provider is injected,
+the build freezes that payload as ``construction_mode=adaptive``. The
+provider is not read from config and this hook does not call a model.
+
 On-disk layout, under the session directory:
 
 * ``views.json`` — ``ViewSupersedeIndex``
@@ -30,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from openviking.session.ao_ledger_reader import MAX_PAGE_LIMIT, list_ao_ledger
+from openviking.session.extraction_write import ExtractionProvider, extraction_index_builder
 from openviking.session.influence_view import PURPOSE_POST_RUN_INDEX, ViewSupersedeIndex
 from openviking.session.trajectory_index import (
     PRIORITY_SUCCEEDED,
@@ -191,7 +198,12 @@ def _policy(config: Any) -> WorkspacePolicy:
     )
 
 
-def _index_commit(session: Any, task_id: str, config: Any) -> None:
+def _index_commit(
+    session: Any,
+    task_id: str,
+    config: Any,
+    extraction_provider: ExtractionProvider | None = None,
+) -> None:
     if not isinstance(task_id, str) or not task_id.strip():
         return
     task_run_id = task_id.strip()
@@ -210,7 +222,14 @@ def _index_commit(session: Any, task_id: str, config: Any) -> None:
         return
 
     watermark = _stable_snapshot_watermark(session_id, ao_records)
-    frozen_at = datetime.now(timezone.utc).isoformat()
+    job = IndexJob(
+        job_id=f"post-run:{session_id}:{task_run_id}",
+        session_id=session_id,
+        task_run_id=task_run_id,
+        priority=COMMIT_INDEX_PRIORITY,
+        outcome_status=COMMIT_INDEX_OUTCOME_STATUS,
+        enqueued_at=datetime.now(timezone.utc).isoformat(),
+    )
 
     def fallback_session(job: IndexJob) -> dict[str, Any]:
         if job.session_id != session_id or job.task_run_id != task_run_id:
@@ -226,29 +245,38 @@ def _index_commit(session: Any, task_id: str, config: Any) -> None:
             "ao_records": ao_records,
         }
 
+    service_kwargs: dict[str, Any] = {}
+    if extraction_provider is not None:
+        service_kwargs["builder"] = extraction_index_builder(
+            extraction_provider, frozen_at=job.enqueued_at
+        )
     service = TrajectoryIndexService(
         session_dir / TRAJECTORY_INDEX_FILENAME,
         ViewSupersedeIndex(session_dir / VIEWS_FILENAME),
         fallback_session=fallback_session,
+        **service_kwargs,
     )
-    service.enqueue(
-        IndexJob(
-            job_id=f"post-run:{session_id}:{task_run_id}",
-            session_id=session_id,
-            task_run_id=task_run_id,
-            priority=COMMIT_INDEX_PRIORITY,
-            outcome_status=COMMIT_INDEX_OUTCOME_STATUS,
-            enqueued_at=frozen_at,
-        )
-    )
+    service.enqueue(job)
     service.process_next(_policy(config))
 
 
-def maybe_index_session_trajectory(session: Any, task_id: str, *, config: Any = None) -> None:
-    """Causal-only Phase 1 hook. Legacy is a single boolean check and returns."""
+def maybe_index_session_trajectory(
+    session: Any,
+    task_id: str,
+    *,
+    config: Any = None,
+    extraction_provider: ExtractionProvider | None = None,
+) -> None:
+    """Causal-only Phase 1 hook. Legacy is a single boolean check and returns.
+
+    ``extraction_provider`` defaults to ``None``, which keeps the deterministic
+    ledger fallback. A provider is called only from the index builder, as
+    ``(session_id, task_run_id, outcome_status)``, and must return an
+    ``ExtractionPayload``.
+    """
     try:
         if not is_causal_mode_enabled(config, session_id=getattr(session, "session_id", None)):
             return
-        _index_commit(session, task_id, config)
+        _index_commit(session, task_id, config, extraction_provider=extraction_provider)
     except Exception:
         logger.warning("trajectory index hook failed", exc_info=True)
