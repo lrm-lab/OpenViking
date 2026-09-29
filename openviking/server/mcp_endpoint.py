@@ -607,14 +607,19 @@ async def expand_causal_neighborhood(card_id: str, session_id: str) -> dict:
     """Expand the influence neighborhood of one claim card in a session.
 
     Available only when causal mode is enabled. ``card_id`` is a claim card
-    id from ``retrieve_causal_cards``. An unknown id, or an id that is not a
-    claim card, raises. The walk is not persisted.
+    id from ``retrieve_causal_cards``. The walk is filtered to the caller's
+    principals. An id the caller cannot see raises the same error as an
+    unknown id. A visible id that is not a claim card also raises. The walk
+    is not persisted.
     """
     if not isinstance(card_id, str) or not card_id.strip():
         raise InvalidArgumentError("card_id is required")
     session_id = _require_causal_session_id(session_id)
-    _ctx, facade = await _open_causal_facade(session_id)
-    path = facade.expand_claim_neighborhood(card_id=card_id.strip())
+    ctx, facade = await _open_causal_facade(session_id)
+    path = facade.expand_claim_neighborhood(
+        card_id=card_id.strip(),
+        principal_labels=tuple(acl_principals(ctx)),
+    )
     return path.to_dict()
 
 

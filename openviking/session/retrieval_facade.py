@@ -29,8 +29,11 @@ and fact cards keep an empty ``text``. Rank documents for fork and branch
 stay the serialized revision, so ``score_breakdown`` does not gain a text term.
 
 ``expand_claim_neighborhood(card_id=...)`` is the Memory Agent entry. It
-resolves the claim projection back to a frozen view revision and claim id.
-Diagnostic agents not calling it is an agent-side fence.
+resolves the claim projection back to a frozen view revision and claim id,
+and that resolution fails closed on ``principal_labels``. The default empty
+sequence sees no card. A card the principal cannot see raises the same
+``unknown card id`` error as an id that is not indexed. Diagnostic agents
+not calling it is an agent-side fence.
 
 ``retrieve_historical_subgraphs(view_revision_id, subgraph_id, principal_labels)``
 is the diagnostic read. The server resolves that subgraph on the named frozen
@@ -1072,9 +1075,10 @@ class InfluenceProjectionAdapter:
     card stores them only inside its summary). Neighborhood expansion walks
     claim edges of that same view and never writes the registry. Online search
     calls ``ProjectionRegistry.search`` with ``principal_labels`` and never
-    ``to_dict``. ``materialize_strength(None)``, ``events()``, and
-    ``list_bridges`` are offline management paths; online code must not call
-    them.
+    ``to_dict``. Card-id neighborhood expansion uses the same intersection:
+    the default principal sees nothing, and an invisible card is an unknown
+    id. ``materialize_strength(None)``, ``events()``, and ``list_bridges``
+    are offline management paths; online code must not call them.
 
     ``content_resolver`` maps an AO id to that AO's body text. Resolved text
     is concatenated into the BM25 document only. It is not written onto the
@@ -1186,6 +1190,7 @@ class InfluenceProjectionAdapter:
         max_entities: int = PATH_MAX_ENTITIES,
         *,
         card_id: str | None = None,
+        principal_labels: Sequence[str] = (),
     ) -> AssembledPath:
         """Assemble a bounded path along influence edges of one frozen view.
 
@@ -1196,8 +1201,12 @@ class InfluenceProjectionAdapter:
         ``card_id`` is the public argument. The server resolves that claim
         projection to its frozen view revision and claim id, then walks
         the same path as the compatibility ``(view_revision_id, claim_id)``
-        form. An unknown card id, or a card that is not a claim projection,
-        raises ``ValueError`` and is not guessed into another walk.
+        form. Resolution intersects ``principal_labels`` with the card's
+        labels. The default ``()`` sees nothing. A missing id and an id the
+        principal cannot see raise the same ``ValueError`` (``unknown card
+        id``). A visible card that is not a claim projection names its kind
+        and is not guessed into another walk. The compatibility form does
+        not resolve a card id and does not apply this principal.
 
         Claims whose ``relation_type`` is not influence, including ``skip``,
         are left off the adjacency before the walk. A skip seed still places
@@ -1211,7 +1220,9 @@ class InfluenceProjectionAdapter:
                 raise ValueError(
                     "card_id cannot be combined with view_revision_id or claim_id"
                 )
-            view_revision_id, claim_id = self._resolve_claim_card(card_id)
+            view_revision_id, claim_id = self._resolve_claim_card(
+                card_id, principal_labels
+            )
         elif not view_revision_id or not claim_id:
             raise ValueError("pass card_id, or both view_revision_id and claim_id")
         if isinstance(max_entities, bool) or not isinstance(max_entities, int):
@@ -1318,10 +1329,20 @@ class InfluenceProjectionAdapter:
             truncated=truncated,
         )
 
-    def _resolve_claim_card(self, card_id: str) -> tuple[str, str]:
-        """Reverse-lookup a claim projection. Does not accept block, fork, or branch ids."""
+    def _resolve_claim_card(
+        self, card_id: str, principal_labels: Sequence[str] = ()
+    ) -> tuple[str, str]:
+        """Reverse-lookup a claim projection visible to ``principal_labels``.
+
+        Does not accept block, fork, or branch ids. The card is loaded, then
+        its labels are intersected with the principal. The default principal
+        is empty and sees nothing. A missing id and an id that does not meet
+        the principal raise the same ``unknown card id`` error, before the
+        kind is named. A visible card of another kind still names that kind.
+        """
+        principal = _principal_set(principal_labels)
         found = self._registry.get(card_id)
-        if found is None:
+        if found is None or not _labels_visible(found.acl_labels, principal):
             raise ValueError(f"unknown card id {card_id!r}")
         if found.kind != "claim":
             raise ValueError(
@@ -2051,6 +2072,7 @@ class HybridRetrievalFacade:
         max_entities: int = PATH_MAX_ENTITIES,
         *,
         card_id: str | None = None,
+        principal_labels: Sequence[str] = (),
     ) -> AssembledPath:
         """Claim-neighborhood expand for the Memory Agent.
 
@@ -2059,15 +2081,19 @@ class HybridRetrievalFacade:
 
         ``card_id`` is the public argument: the server resolves that claim
         projection's frozen view revision and claim id, then walks influence
-        edges only. ``(view_revision_id, claim_id)`` remains for internal and
-        compatibility callers. An unknown card id, or a card that is not a
-        claim projection, raises ``ValueError``. Nothing is persisted.
+        edges only. Resolution fails closed on ``principal_labels``; the
+        default ``()`` sees no card, and an invisible id raises the same
+        ``unknown card id`` error as a missing id. ``(view_revision_id,
+        claim_id)`` remains for internal and compatibility callers and does
+        not apply this principal. A visible card that is not a claim
+        projection raises ``ValueError``. Nothing is persisted.
         """
         return self.projection.expand_claim_neighborhood(
             view_revision_id,
             claim_id,
             max_entities=max_entities,
             card_id=card_id,
+            principal_labels=principal_labels,
         )
 
     def retrieve_historical_subgraphs(

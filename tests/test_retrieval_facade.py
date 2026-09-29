@@ -1840,9 +1840,15 @@ def test_expand_claim_neighborhood_by_card_id(tmp_path: Path) -> None:
         "text",
     }
 
-    expanded = facade.expand_claim_neighborhood(card_id=claim_card.payload_ref)
+    expanded = facade.expand_claim_neighborhood(
+        card_id=claim_card.payload_ref, principal_labels=_PRINCIPAL
+    )
     direct = facade.expand_claim_neighborhood("rev-skip", "e-skip")
     assert expanded == direct
+    owned = facade.projection.expand_claim_neighborhood(
+        card_id=claim_card.payload_ref, principal_labels=_PRINCIPAL
+    )
+    assert owned == expanded
     assert expanded.entities[:2] == ("n2", "n3")
     assert "n1" in expanded.entities
     assert "n4" in expanded.entities
@@ -1856,9 +1862,29 @@ def test_expand_claim_neighborhood_by_card_id(tmp_path: Path) -> None:
     assert len(block_cards) == 1
     assert block_cards[0].text == ""
     with pytest.raises(ValueError, match="not a claim projection"):
-        facade.expand_claim_neighborhood(card_id=block_cards[0].payload_ref)
-    with pytest.raises(ValueError, match="unknown card id"):
-        facade.expand_claim_neighborhood(card_id="claim-card-00000000")
+        facade.expand_claim_neighborhood(
+            card_id=block_cards[0].payload_ref, principal_labels=_PRINCIPAL
+        )
+    missing_id = "claim-card-00000000"
+    with pytest.raises(ValueError) as missing:
+        facade.expand_claim_neighborhood(card_id=missing_id, principal_labels=_PRINCIPAL)
+    with pytest.raises(ValueError) as hidden:
+        facade.expand_claim_neighborhood(
+            card_id=claim_card.payload_ref, principal_labels=("outsider",)
+        )
+    with pytest.raises(ValueError) as hidden_block:
+        facade.expand_claim_neighborhood(
+            card_id=block_cards[0].payload_ref, principal_labels=("outsider",)
+        )
+    with pytest.raises(ValueError) as default_denied:
+        facade.expand_claim_neighborhood(card_id=claim_card.payload_ref)
+    assert str(missing.value) == f"unknown card id {missing_id!r}"
+    assert str(hidden.value) == f"unknown card id {claim_card.payload_ref!r}"
+    assert str(hidden_block.value) == f"unknown card id {block_cards[0].payload_ref!r}"
+    assert str(default_denied.value) == f"unknown card id {claim_card.payload_ref!r}"
+    assert str(hidden.value).replace(claim_card.payload_ref, "ID") == str(missing.value).replace(
+        missing_id, "ID"
+    )
     with pytest.raises(ValueError, match="unknown card id"):
         facade.expand_claim_neighborhood(card_id="fork:fk-1@rev-1")
     with pytest.raises(ValueError, match="card_id"):

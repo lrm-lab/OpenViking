@@ -270,21 +270,28 @@ async def test_expand_claim_card_and_foreign_card_id(causal_world):
     assert "subtask" not in text
     assert AO_SENTINEL not in text
 
-    # expand_claim_neighborhood does not take principal labels. Another caller
-    # who loads this same session still receives the neighborhood.
+    # Another caller's principals do not meet the owner label. The neighborhood
+    # raises the same unknown-id error as a missing card, and retrieve stays empty.
     token = mcp_endpoint._mcp_ctx.set(_ctx(INTRUDER_ID))
     try:
-        shared = await mcp_endpoint.expand_causal_neighborhood(card_id, SESSION_ID)
+        with pytest.raises(ValueError) as hidden_expand:
+            await mcp_endpoint.expand_causal_neighborhood(card_id, SESSION_ID)
+        hidden_cards = await mcp_endpoint.retrieve_causal_cards("patch", SESSION_ID)
     finally:
         mcp_endpoint._mcp_ctx.reset(token)
-    assert shared == neighborhood
+    assert str(hidden_expand.value) == f"unknown card id {card_id!r}"
+    assert hidden_cards["cards"] == []
 
     # A card id that is not in this session's registry raises. An empty session
     # is that case for the owner's card.
     with pytest.raises(ValueError, match="unknown card id"):
         await mcp_endpoint.expand_causal_neighborhood(card_id, EMPTY_ID)
-    with pytest.raises(ValueError, match="unknown card id"):
-        await mcp_endpoint.expand_causal_neighborhood("claim-card-someone-else", SESSION_ID)
+    absent_id = "claim-card-someone-else"
+    with pytest.raises(ValueError) as absent:
+        await mcp_endpoint.expand_causal_neighborhood(absent_id, SESSION_ID)
+    assert str(hidden_expand.value).replace(card_id, "ID") == str(absent.value).replace(
+        absent_id, "ID"
+    )
 
 
 @pytest.mark.asyncio
