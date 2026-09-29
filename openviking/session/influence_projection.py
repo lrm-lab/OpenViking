@@ -425,6 +425,18 @@ class ProjectionRegistry:
         matched.sort(key=lambda card: (card.created_at, card.card_id))
         return tuple(matched)
 
+    def get(self, card_id: str) -> InfluenceProjection | None:
+        """Return the active card for ``card_id``, or None when it is not indexed.
+
+        This is the reverse lookup from a retrieval card id back to the frozen
+        view revision and block or claim id on ``source_pointer``. Removed
+        cards are not returned.
+        """
+        key = _require_str(card_id, "card_id")
+        with self._lock:
+            entry = self._entries.get(key)
+            return None if entry is None else entry.card
+
     def promote_to_verified(
         self,
         view_revision_id: str,

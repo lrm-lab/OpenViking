@@ -22,6 +22,16 @@ result. While ``FACT_LANE_PAUSED`` is set, ``retrieve`` does not call the
 segment/atom adapter and does not give those empty seats to another corpus.
 The query cap remains ``CAUSAL_MEMORY_CAP``.
 
+Fork cards carry the latest revision's seven sections on ``RetrievalCard.text``.
+Branch cards carry a bounded action synopsis built from AO-ledger synopses
+for ``ao_sequence``. Guidance and raw AO text stay off the card. Projection
+and fact cards keep an empty ``text``. Rank documents for fork and branch
+stay the serialized revision, so ``score_breakdown`` does not gain a text term.
+
+``expand_claim_neighborhood(card_id=...)`` is the Memory Agent entry. It
+resolves the claim projection back to a frozen view revision and claim id.
+Diagnostic agents not calling it is an agent-side fence.
+
 Online retrieval applies principal ACL inside each adapter before the quota
 is spent, then clamps the reranked list back to the causal-memory cap.
 Offline management reads are not part of this path and online code must not
@@ -42,6 +52,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from openviking.session.ao_ledger import AOLedger, LEDGER_FILENAME
 from openviking.session.ao_ledger_reader import list_ao_ledger
 from openviking.session.bm25 import BM25Index
 from openviking.session.causal_bridges import (
@@ -53,6 +64,7 @@ from openviking.session.causal_experiences import (
     FORK_CANDIDATE_ROLE,
     INDEX_FILENAME,
     NAMESPACE_DIRNAME,
+    SEVEN_SECTION_KEYS,
     CausalExperiencesStore,
     ForkStatus,
     branch_retrieval_channel,
@@ -88,6 +100,13 @@ RANK_MODES = frozenset((RANK_MODE_BM25, RANK_MODE_HYBRID))
 HYBRID_FUSION_POLICY_VERSION = "hybrid-fusion-pending-v0"
 HYBRID_BM25_WEIGHT = 0.25
 HYBRID_VECTOR_WEIGHT = 0.75
+# Branch cards carry a short action synopsis, not guidance or raw AO text.
+# The first N ``ao_sequence`` ids are resolved against the session AO ledger.
+# Each synopsis line and the joined summary are clipped. Rank blobs stay the
+# serialized fork revision, so this text is not a score feature.
+BRANCH_SYNOPSIS_LIMIT = 8
+BRANCH_SYNOPSIS_LINE_CHARS = 180
+BRANCH_SUMMARY_CHARS = 720
 
 CardKind = Literal[
     "fork",
@@ -166,7 +185,13 @@ def _normalize_labels(value: Sequence[str] | None) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class RetrievalCard:
-    """Cross-corpus envelope. ``kind`` keeps each corpus identity intact."""
+    """Cross-corpus envelope. ``kind`` keeps each corpus identity intact.
+
+    ``text`` is display body and is part of card content (``to_dict`` /
+    equality). Fork cards carry the seven-section snapshot. Branch cards
+    carry a bounded action synopsis. Projection and fact cards leave it
+    empty; their match text stays off the card.
+    """
 
     kind: CardKind
     channel: CardChannel
@@ -177,6 +202,7 @@ class RetrievalCard:
     score_breakdown: dict[str, Any]
     acl_labels: tuple[str, ...] = ()
     selection_mode: SelectionMode = "exploitation"
+    text: str = ""
 
     def __post_init__(self) -> None:
         if self.kind not in CARD_KINDS:
@@ -204,6 +230,8 @@ class RetrievalCard:
         object.__setattr__(self, "source_pointer", pointer)
         object.__setattr__(self, "score_breakdown", breakdown)
         object.__setattr__(self, "acl_labels", _normalize_labels(self.acl_labels))
+        if not isinstance(self.text, str):
+            raise ValueError("text must be a str")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -216,6 +244,7 @@ class RetrievalCard:
             "score_breakdown": _json_copy(self.score_breakdown, "score_breakdown"),
             "acl_labels": list(self.acl_labels),
             "selection_mode": self.selection_mode,
+            "text": self.text,
         }
 
     @classmethod
@@ -224,6 +253,9 @@ class RetrievalCard:
         labels = payload.get("acl_labels", [])
         if not isinstance(labels, list):
             raise ValueError("acl_labels must be a list")
+        raw_text = payload.get("text", "")
+        if not isinstance(raw_text, str):
+            raise ValueError("text must be a str")
         return cls(
             kind=payload.get("kind"),  # type: ignore[arg-type]
             channel=payload.get("channel"),  # type: ignore[arg-type]
@@ -234,6 +266,7 @@ class RetrievalCard:
             score_breakdown=_require_mapping(payload.get("score_breakdown"), "score_breakdown"),
             acl_labels=tuple(str(item) for item in labels),
             selection_mode=payload.get("selection_mode", "exploitation"),
+            text=raw_text,
         )
 
 
@@ -665,6 +698,64 @@ def _status_label_for_fork(status: str) -> str:
     return status
 
 
+def _clip_text(value: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    if len(value) <= limit:
+        return value
+    if limit <= 3:
+        return value[:limit]
+    return value[: limit - 3] + "..."
+
+
+def _fork_retrieval_text(sections: Any) -> str:
+    """Seven-section snapshot in ``SEVEN_SECTION_KEYS`` order. Not guidance."""
+    if not isinstance(sections, Mapping):
+        return ""
+    lines: list[str] = []
+    for key in SEVEN_SECTION_KEYS:
+        value = sections.get(key)
+        if isinstance(value, str) and value:
+            lines.append(f"{key}: {value}")
+    return "\n".join(lines)
+
+
+def _synopsis_from_observation(observation: Mapping[str, Any]) -> str:
+    """Title plus summary only. ``sample`` is a raw excerpt and stays off the card."""
+    title = observation.get("title")
+    title_text = title.strip() if isinstance(title, str) else ""
+    summary = observation.get("summary")
+    body = ""
+    if isinstance(summary, str):
+        body = summary.strip()
+    elif isinstance(summary, list):
+        lines = [item.strip() for item in summary if isinstance(item, str) and item.strip()]
+        body = "; ".join(lines)
+    if title_text and body:
+        return f"{title_text}: {body}"
+    return title_text or body
+
+
+def _branch_retrieval_text(branch: Mapping[str, Any], synopses: Mapping[str, str]) -> str:
+    """Join the first N ledger synopses. Fall back when none of them resolve."""
+    branch_id = str(branch.get("branch_id") or "")
+    status = branch.get("evidence_status")
+    status_text = status if isinstance(status, str) else ""
+    sequence = branch.get("ao_sequence")
+    parts: list[str] = []
+    if isinstance(sequence, list):
+        for ao_id in sequence[:BRANCH_SYNOPSIS_LIMIT]:
+            if not isinstance(ao_id, str) or not ao_id:
+                continue
+            synopsis = synopses.get(ao_id, "")
+            if not synopsis:
+                continue
+            parts.append(_clip_text(synopsis, BRANCH_SYNOPSIS_LINE_CHARS))
+    if not parts:
+        return f"{branch_id} {status_text}".strip()
+    return _clip_text(" | ".join(parts), BRANCH_SUMMARY_CHARS)
+
+
 def _limit(limit: int) -> int:
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
         raise ValueError("limit must be an int >= 0")
@@ -695,13 +786,30 @@ class ForkBranchAdapter:
     Online code must not call ``materialize_strength(None)``, ``events()``,
     ``list_bridges``, or ``ProjectionRegistry.to_dict``. Those are offline
     management dumps and do not apply principal ACL.
+
+    Fork card ``text`` is the latest revision's seven sections. Branch card
+    ``text`` is a bounded synopsis of ``ao_sequence`` looked up in the session
+    AO ledger (``session_dir`` + ``session_id``). Guidance and raw AO bodies
+    are not copied onto the card. When that ledger has none of the first
+    ``BRANCH_SYNOPSIS_LIMIT`` ids, the branch text falls back to
+    ``branch_id`` and ``evidence_status``. Rank documents stay the serialized
+    revision either way.
     """
 
     name = "fork_branch"
 
-    def __init__(self, root: str | Path, store: CausalExperiencesStore | None = None) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        store: CausalExperiencesStore | None = None,
+        *,
+        session_dir: str | Path | None = None,
+        session_id: str | None = None,
+    ) -> None:
         self._root = Path(root)
         self._store = store if store is not None else CausalExperiencesStore(self._root)
+        self._session_dir = None if session_dir is None else Path(session_dir)
+        self._session_id = session_id if isinstance(session_id, str) and session_id else None
 
     def search(
         self,
@@ -723,6 +831,7 @@ class ForkBranchAdapter:
         plan = _prepare_rank_plan(parsed, rank_plan)
         cards: list[RetrievalCard] = []
         documents: list[str] = []
+        synopses: dict[str, str] | None = None
         for fork_node_id in self._fork_ids():
             loaded = self._store.get_fork_node(fork_node_id)
             if loaded is None:
@@ -758,6 +867,7 @@ class ForkBranchAdapter:
                     payload_ref=f"fork:{fork_node_id}@{revision_id}",
                     score_breakdown=_pending_score(),
                     acl_labels=labels,
+                    text=_fork_retrieval_text(latest.get("seven_sections")),
                 )
             )
             documents.append(blob)
@@ -770,6 +880,8 @@ class ForkBranchAdapter:
                 branch_id = str(branch.get("branch_id") or "")
                 if not branch_id:
                     continue
+                if synopses is None:
+                    synopses = self._ao_synopses()
                 branch_channel = branch_retrieval_channel(branch, status)
                 if branch_channel not in CARD_CHANNELS or branch_channel == "fact":
                     continue
@@ -789,6 +901,7 @@ class ForkBranchAdapter:
                         payload_ref=f"branch:{fork_node_id}@{revision_id}/{branch_id}",
                         score_breakdown=_pending_score(),
                         acl_labels=labels,
+                        text=_branch_retrieval_text(branch, synopses),
                     )
                 )
                 documents.append(blob)
@@ -815,6 +928,19 @@ class ForkBranchAdapter:
                 seen.add(fork_node_id)
                 ordered.append(fork_node_id)
         return ordered
+
+    def _ao_synopses(self) -> dict[str, str]:
+        """Map AO id to synopsis text. Missing ledger yields an empty map."""
+        if self._session_dir is None or not self._session_id:
+            return {}
+        if not (self._session_dir / LEDGER_FILENAME).is_file():
+            return {}
+        found: dict[str, str] = {}
+        for record in AOLedger(self._session_dir, self._session_id).records():
+            synopsis = _synopsis_from_observation(record.observation)
+            if synopsis:
+                found[record.ao_id] = synopsis
+        return found
 
 
 def _claim_fields(
@@ -998,11 +1124,23 @@ class InfluenceProjectionAdapter:
 
     def expand_claim_neighborhood(
         self,
-        view_revision_id: str,
-        claim_id: str,
+        view_revision_id: str | None = None,
+        claim_id: str | None = None,
         max_entities: int = PATH_MAX_ENTITIES,
+        *,
+        card_id: str | None = None,
     ) -> AssembledPath:
         """Assemble a bounded path along influence edges of one frozen view.
+
+        This entry is for the Memory Agent. OpenViking does not decide
+        whether a diagnostic agent may call it; that fence sits on the
+        agent side.
+
+        ``card_id`` is the public argument. The server resolves that claim
+        projection to its frozen view revision and claim id, then walks
+        the same path as the compatibility ``(view_revision_id, claim_id)``
+        form. An unknown card id, or a card that is not a claim projection,
+        raises ``ValueError`` and is not guessed into another walk.
 
         Claims whose ``relation_type`` is not influence, including ``skip``,
         are left off the adjacency before the walk. A skip seed still places
@@ -1011,6 +1149,14 @@ class InfluenceProjectionAdapter:
         above ``PATH_MAX_ENTITIES``), and stops when the next block is already
         on the path. Nothing is persisted.
         """
+        if card_id is not None:
+            if view_revision_id is not None or claim_id is not None:
+                raise ValueError(
+                    "card_id cannot be combined with view_revision_id or claim_id"
+                )
+            view_revision_id, claim_id = self._resolve_claim_card(card_id)
+        elif not view_revision_id or not claim_id:
+            raise ValueError("pass card_id, or both view_revision_id and claim_id")
         if isinstance(max_entities, bool) or not isinstance(max_entities, int):
             raise ValueError("max_entities must be an int")
         if max_entities < 1:
@@ -1114,6 +1260,17 @@ class InfluenceProjectionAdapter:
             edges=tuple(edges),
             truncated=truncated,
         )
+
+    def _resolve_claim_card(self, card_id: str) -> tuple[str, str]:
+        """Reverse-lookup a claim projection. Does not accept block, fork, or branch ids."""
+        found = self._registry.get(card_id)
+        if found is None:
+            raise ValueError(f"unknown card id {card_id!r}")
+        if found.kind != "claim":
+            raise ValueError(
+                f"card {card_id!r} is a {found.kind} projection, not a claim projection"
+            )
+        return found.source_pointer.view_revision_id, found.source_pointer.block_or_claim_id
 
 
 class SegmentAtomAdapter:
@@ -1466,13 +1623,28 @@ class HybridRetrievalFacade:
 
     def expand_claim_neighborhood(
         self,
-        view_revision_id: str,
-        claim_id: str,
+        view_revision_id: str | None = None,
+        claim_id: str | None = None,
         max_entities: int = PATH_MAX_ENTITIES,
+        *,
+        card_id: str | None = None,
     ) -> AssembledPath:
-        """Read-time assembly. Delegates to the projection adapter and writes nothing."""
+        """Claim-neighborhood expand for the Memory Agent.
+
+        OpenViking only provides this entry. Whether a diagnostic agent may
+        call it is an agent-side fence and is not checked here.
+
+        ``card_id`` is the public argument: the server resolves that claim
+        projection's frozen view revision and claim id, then walks influence
+        edges only. ``(view_revision_id, claim_id)`` remains for internal and
+        compatibility callers. An unknown card id, or a card that is not a
+        claim projection, raises ``ValueError``. Nothing is persisted.
+        """
         return self.projection.expand_claim_neighborhood(
-            view_revision_id, claim_id, max_entities=max_entities
+            view_revision_id,
+            claim_id,
+            max_entities=max_entities,
+            card_id=card_id,
         )
 
     def _visible(

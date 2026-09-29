@@ -33,6 +33,8 @@ from openviking.session.influence_view import (
     SourceRef,
 )
 from openviking.session.retrieval_facade import (
+    BRANCH_SUMMARY_CHARS,
+    BRANCH_SYNOPSIS_LIMIT,
     CAUSAL_MEMORY_CAP,
     DEFAULT_SEGMENT_ATOM_QUOTA,
     FACT_LANE_PAUSED,
@@ -247,7 +249,7 @@ def _facade(
 ) -> HybridRetrievalFacade:
     projection = InfluenceProjectionAdapter(registry, views=views)
     return HybridRetrievalFacade(
-        ForkBranchAdapter(root, store),
+        ForkBranchAdapter(root, store, session_dir=session_dir, session_id=session_id),
         projection,
         SegmentAtomAdapter(session_dir, session_id),
         seed=seed,
@@ -1645,3 +1647,221 @@ def test_neighborhood_walks_influence_edges_only(tmp_path: Path) -> None:
     assert "p3" in upstream.entities
     assert {edge[0] for edge in upstream.edges} == {"e-p12", "e-p23"}
     assert len(upstream.entities) <= PATH_MAX_ENTITIES
+
+
+def test_fork_and_branch_cards_carry_text(tmp_path: Path) -> None:
+    root = tmp_path / "card-text"
+    store = _store(root)
+    session_dir = root / "sess-text"
+    ledger = AOLedger(session_dir, "sess-text")
+    raw_body = "RAW-AO-BODY-7c21"
+    guidance_text = "GUIDANCE-FULL-TEXT-9f3a"
+    first = ledger.append(
+        {"tool": "edit", "arguments": {"body": raw_body}},
+        {
+            "kind": "text",
+            "title": "edit",
+            "summary": ["set timeout to 30"],
+            "sample": raw_body,
+        },
+    )
+    second = ledger.append(
+        {"tool": "test", "arguments": {"body": raw_body}},
+        {"kind": "text", "summary": "rerun the suite", "sample": raw_body},
+    )
+    counted = [
+        ledger.append(
+            {"tool": "step", "arguments": {"body": raw_body}},
+            {"kind": "text", "summary": f"step-{index:02d}", "sample": raw_body},
+        )
+        for index in range(BRANCH_SYNOPSIS_LIMIT + 1)
+    ]
+    long = ledger.append(
+        {"tool": "step", "arguments": {"body": raw_body}},
+        {"kind": "text", "summary": "LONGMARK-" + ("y" * 400), "sample": raw_body},
+    )
+    sections = _sections()
+    sections["open_issues"] = "fork-seven-open-issue-marker"
+    _commit_fork(
+        store,
+        ao_id="ao-anchor",
+        workspace="team-a",
+        status="validated",
+        sections=sections,
+        branches=[
+            {
+                "branch_id": "br-real",
+                "evidence_status": "real",
+                "ao_sequence": [first.ao_id, "ao-not-in-ledger", second.ao_id],
+                "guidance": {"instruction": guidance_text},
+            },
+            {
+                "branch_id": "br-missing",
+                "evidence_status": "imagined_unverified",
+                "ao_sequence": ["ao-not-in-ledger"],
+                "guidance": {"instruction": guidance_text},
+            },
+            {
+                "branch_id": "br-count",
+                "evidence_status": "real",
+                "ao_sequence": [record.ao_id for record in counted],
+                "guidance": {"instruction": guidance_text},
+            },
+            {
+                "branch_id": "br-long",
+                "evidence_status": "real",
+                "ao_sequence": [long.ao_id],
+                "guidance": {"instruction": guidance_text},
+            },
+        ],
+    )
+    registry = ProjectionRegistry(root / "projections.json")
+    facade = _facade(root, store, registry, session_dir, "sess-text")
+    profile = RetrievalProfile(fork_branch=6, projection=0, segment_atom=0)
+    result = facade.retrieve({}, _PRINCIPAL, profile)
+    forks = [card for card in result.cards if card.kind == "fork"]
+    assert len(forks) == 1
+    fork = forks[0]
+    assert fork.text == "\n".join(f"{key}: {sections[key]}" for key in SEVEN_SECTION_KEYS)
+    assert "fork-seven-open-issue-marker" in fork.text
+    fork_dump = json.dumps(fork.to_dict(), ensure_ascii=False)
+    assert guidance_text not in fork_dump
+    assert raw_body not in fork_dump
+    assert RetrievalCard.from_dict(fork.to_dict()) == fork
+    changed = fork.to_dict()
+    changed["text"] = fork.text + "\nextra"
+    assert RetrievalCard.from_dict(changed) != fork
+    content = fork.to_dict()
+    content.pop("score_breakdown")
+    replayed = RetrievalCard.from_dict(fork.to_dict()).to_dict()
+    replayed.pop("score_breakdown")
+    assert content == replayed
+    assert "text" in content
+
+    branches = {card.source_pointer["branch_id"]: card for card in result.cards if card.kind == "branch"}
+    assert branches["br-real"].text == "edit: set timeout to 30 | rerun the suite"
+    assert branches["br-missing"].text == "br-missing imagined_unverified"
+    assert branches["br-count"].text == " | ".join(
+        f"step-{index:02d}" for index in range(BRANCH_SYNOPSIS_LIMIT)
+    )
+    assert f"step-{BRANCH_SYNOPSIS_LIMIT:02d}" not in branches["br-count"].text
+    assert len(branches["br-long"].text) <= BRANCH_SUMMARY_CHARS
+    assert branches["br-long"].text.endswith("...")
+    assert branches["br-long"].text.startswith("LONGMARK-")
+    for card in branches.values():
+        dumped = json.dumps(card.to_dict(), ensure_ascii=False)
+        assert guidance_text not in dumped
+        assert raw_body not in dumped
+        assert "fork-seven-open-issue-marker" not in card.text
+        assert set(card.score_breakdown) == {"bm25", "lexical", "rank_tier"}
+    assert set(fork.score_breakdown) == {"bm25", "lexical", "rank_tier"}
+
+    bare = ForkBranchAdapter(root, store)
+    bare_branches = {
+        card.source_pointer["branch_id"]: card
+        for card in bare.search({}, 6, _PRINCIPAL)
+        if card.kind == "branch"
+    }
+    assert bare_branches["br-real"].text == "br-real real"
+
+
+def test_expand_claim_neighborhood_by_card_id(tmp_path: Path) -> None:
+    blocks = [_block(f"n{index}", index) for index in range(1, 6)]
+    blocks.extend(_block(f"p{index}", 5 + index) for index in range(1, 4))
+    claims = [
+        InfluenceClaim(
+            claim_id="e-12",
+            source_block_id="n1",
+            target_block_id="n2",
+            carried_artifact="patch",
+            downstream_effect="applied",
+            relation_type=RELATION_INFLUENCE,
+        ),
+        InfluenceClaim(
+            claim_id="e-skip",
+            source_block_id="n2",
+            target_block_id="n3",
+            carried_artifact="gap",
+            downstream_effect="omitted",
+            relation_type=RELATION_SKIP,
+        ),
+        InfluenceClaim(
+            claim_id="e-34",
+            source_block_id="n3",
+            target_block_id="n4",
+            carried_artifact="rate",
+            downstream_effect="rose",
+            relation_type=RELATION_INFLUENCE,
+        ),
+        InfluenceClaim(
+            claim_id="e-skip2",
+            source_block_id="n4",
+            target_block_id="n5",
+            carried_artifact="tail",
+            downstream_effect="unread",
+            relation_type=RELATION_SKIP,
+        ),
+    ]
+    revision = _freeze(blocks, claims, revision_id="rev-skip", enforce_checks=False)
+    root = tmp_path / "card-expand"
+    store = _store(root)
+    registry = ProjectionRegistry(root / "projections.json")
+    registry.register(revision, acl_labels=_PRINCIPAL)
+    session_dir = root / "sess"
+    AOLedger(session_dir, "sess")
+    facade = _facade(root, store, registry, session_dir, "sess", views=[revision])
+    profile = RetrievalProfile(fork_branch=0, projection=4, segment_atom=0)
+
+    recalled = facade.retrieve("omitted", _PRINCIPAL, profile)
+    claim_cards = [card for card in recalled.cards if card.kind == "claim_projection"]
+    assert len(claim_cards) == 1
+    claim_card = claim_cards[0]
+    assert claim_card.text == ""
+    assert claim_card.payload_ref == claim_card.source_pointer["card_id"]
+    assert set(claim_card.source_pointer) == {
+        "corpus",
+        "view_revision_id",
+        "block_or_claim_id",
+        "card_id",
+        "session_id",
+        "carried_artifact",
+        "downstream_effect",
+    }
+    assert set(claim_card.to_dict()) == {
+        "kind",
+        "channel",
+        "in_channel_rank",
+        "status_label",
+        "source_pointer",
+        "payload_ref",
+        "score_breakdown",
+        "acl_labels",
+        "selection_mode",
+        "text",
+    }
+
+    expanded = facade.expand_claim_neighborhood(card_id=claim_card.payload_ref)
+    direct = facade.expand_claim_neighborhood("rev-skip", "e-skip")
+    assert expanded == direct
+    assert expanded.entities[:2] == ("n2", "n3")
+    assert "n1" in expanded.entities
+    assert "n4" in expanded.entities
+    assert "n5" not in expanded.entities
+    assert {edge[0] for edge in expanded.edges} == {"e-12", "e-34"}
+    assert "e-skip" not in {edge[0] for edge in expanded.edges}
+    assert "e-skip2" not in {edge[0] for edge in expanded.edges}
+
+    block_hits = facade.retrieve("n1", _PRINCIPAL, profile)
+    block_cards = [card for card in block_hits.cards if card.kind == "block_projection"]
+    assert len(block_cards) == 1
+    assert block_cards[0].text == ""
+    with pytest.raises(ValueError, match="not a claim projection"):
+        facade.expand_claim_neighborhood(card_id=block_cards[0].payload_ref)
+    with pytest.raises(ValueError, match="unknown card id"):
+        facade.expand_claim_neighborhood(card_id="claim:rev-skip:missing")
+    with pytest.raises(ValueError, match="unknown card id"):
+        facade.expand_claim_neighborhood(card_id="fork:fk-1@rev-1")
+    with pytest.raises(ValueError, match="card_id"):
+        facade.expand_claim_neighborhood(
+            "rev-skip", "e-skip", card_id=claim_card.payload_ref
+        )
