@@ -39,7 +39,10 @@ other ``post_run_index`` revisions. Ranking this wave is BM25 on a stand-in
 subgraph text (``SUBGRAPH_TEXT_POLICY_VERSION``); there is no vector tier.
 The read uses ``ViewSupersedeIndex.revisions_for_purpose`` and does not call
 ``ViewSupersedeIndex.to_dict``. It does not write forks and ``retrieve`` does
-not call it.
+not call it. The querying revision's session must have ACL labels visible to
+the principal; a missing label set or a mismatch raises and does not return
+an empty hit list. A revision id that matches nothing, or more than one
+frozen revision, also raises. The lookup does not pick one of several matches.
 
 Online retrieval applies principal ACL inside each adapter before the quota
 is spent, then clamps the reranked list back to the causal-memory cap.
@@ -1556,10 +1559,13 @@ class RetrievalSubgraphAdapter:
 
     ``name`` is ``retrieval_subgraph``. Candidates are filtered with the
     injected ``session_acl`` callback before they enter the BM25 corpus. A
-    session with no labels is invisible. The session id is not used as a
-    label. Fork visibility uses the revision ``workspace_id``, the same label
-    the fork/branch adapter uses. This adapter does not write forks and is
-    not called by ``HybridRetrievalFacade.retrieve``.
+    session with no labels is invisible. The querying revision's session is
+    held to that rule and raises when it has no labels or those labels are
+    not visible to the principal; the call does not return an empty hit list.
+    The session id is not used as a label. Fork visibility uses the revision
+    ``workspace_id``, the same label the fork/branch adapter uses. This
+    adapter does not write forks and is not called by
+    ``HybridRetrievalFacade.retrieve``.
     """
 
     name = "retrieval_subgraph"
@@ -1598,12 +1604,16 @@ class RetrievalSubgraphAdapter:
         """Rank other post-run subgraphs against one failure subgraph.
 
         The subgraph must exist on ``view_revision_id`` and ``is_failure``.
-        Otherwise this raises ``ValueError``. At most
-        ``DIAGNOSTIC_SUBGRAPH_HIT_CAP`` hits are returned. Fewer matches are
-        not backfilled. The querying revision is not a hit.
+        Otherwise this raises ``ValueError``. The querying revision's session
+        must be visible to ``principal_labels``. No labels, or labels that do
+        not meet the principal, raise ``ValueError`` and do not return an
+        empty hit list. At most ``DIAGNOSTIC_SUBGRAPH_HIT_CAP`` hits are
+        returned. Fewer matches are not backfilled. The querying revision is
+        not a hit.
         """
         principal = _principal_set(principal_labels)
         current = self._revision(view_revision_id)
+        self._require_query_session_visible(current.session_id, principal)
         query_subgraph = self._require_failure_subgraph(current, subgraph_id)
         query_text = _subgraph_retrieval_text(current, query_subgraph)
         candidates: list[tuple[InfluenceViewRevision, RetrievalSubgraph]] = []
@@ -1643,9 +1653,28 @@ class RetrievalSubgraphAdapter:
             for revision in self._views.revisions_for_purpose(purpose):
                 if revision.revision_id == identity:
                     matches.append(revision)
-        if len(matches) != 1:
+        if not matches:
             raise ValueError(f"view revision {identity!r} is not in the supersede index")
+        if len(matches) != 1:
+            raise ValueError(
+                f"view revision {identity!r} is not unique in the supersede index"
+            )
         return matches[0]
+
+    def _require_query_session_visible(self, session_id: str, principal: set[str]) -> None:
+        """Raise unless this session's labels are visible to ``principal``.
+
+        Historical candidates already drop a session with no labels. The
+        querying session used to skip that check. Missing labels and a
+        principal mismatch both raise. Neither case returns an empty hit list.
+        """
+        labels = self._session_labels(session_id)
+        if not labels:
+            raise ValueError(f"querying session {session_id!r} has no ACL labels")
+        if not _labels_visible(labels, principal):
+            raise ValueError(
+                f"querying session {session_id!r} is not visible to the principal"
+            )
 
     def _require_failure_subgraph(
         self, revision: InfluenceViewRevision, subgraph_id: str

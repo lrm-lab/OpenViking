@@ -585,3 +585,94 @@ def test_default_position_requires_exactly_one_covering_block() -> None:
     with pytest.raises(ValueError, match="covered by 0"):
         default_failure_grounding_position(missing, "sg-cutover")
 
+
+def test_query_session_without_labels_or_visibility_is_rejected(tmp_path: Path) -> None:
+    index = ViewSupersedeIndex(tmp_path / "views.json")
+    current_blocks = [_block("zzz-current", "b-query", 1, "错误率升高")]
+    index.register(
+        _freeze(
+            "zzz-current",
+            "rev-current",
+            current_blocks,
+            [
+                RetrievalSubgraph(
+                    subgraph_id="sg-query",
+                    block_ids=("b-query",),
+                    claim_ids=(),
+                    failure_marked=True,
+                    failure_evidence_refs=(_evidence("zzz-current", 1),),
+                )
+            ],
+        )
+    )
+    index.register(
+        _freeze(
+            "hist-visible",
+            "rev-hist",
+            [_block("hist-visible", "b-rate", 1, "错误率升高")],
+            [
+                RetrievalSubgraph(
+                    subgraph_id="sg-cutover",
+                    block_ids=("b-rate",),
+                    claim_ids=(),
+                    failure_marked=True,
+                    failure_evidence_refs=(_evidence("hist-visible", 1),),
+                )
+            ],
+        )
+    )
+    root = tmp_path / "store"
+    store = CausalExperiencesStore(root, config=_CAUSAL)
+    forks = ForkBranchAdapter(root, store)
+
+    def unlabeled(session_id: str) -> tuple[str, ...]:
+        if session_id == "zzz-current":
+            return ()
+        return _PRINCIPAL
+
+    def hidden(session_id: str) -> tuple[str, ...]:
+        if session_id == "zzz-current":
+            return ("other-team",)
+        return _PRINCIPAL
+
+    unlabeled_adapter = RetrievalSubgraphAdapter(index, forks, session_acl=unlabeled)
+    with pytest.raises(ValueError, match="no ACL labels"):
+        unlabeled_adapter.retrieve_historical_subgraphs("rev-current", "sg-query", _PRINCIPAL)
+
+    hidden_adapter = RetrievalSubgraphAdapter(index, forks, session_acl=hidden)
+    with pytest.raises(ValueError, match="not visible to the principal"):
+        hidden_adapter.retrieve_historical_subgraphs("rev-current", "sg-query", _PRINCIPAL)
+
+
+def test_revision_lookup_distinguishes_missing_from_not_unique(tmp_path: Path) -> None:
+    index = ViewSupersedeIndex(tmp_path / "views.json")
+    for session_id in ("sess-a", "sess-b"):
+        block = _block(session_id, "b-rate", 1, "错误率升高")
+        index.register(
+            _freeze(
+                session_id,
+                "rev-shared",
+                [block],
+                [
+                    RetrievalSubgraph(
+                        subgraph_id="sg-cutover",
+                        block_ids=("b-rate",),
+                        claim_ids=(),
+                        failure_marked=True,
+                        failure_evidence_refs=(_evidence(session_id, 1),),
+                    )
+                ],
+            )
+        )
+    root = tmp_path / "store"
+    store = CausalExperiencesStore(root, config=_CAUSAL)
+    adapter = RetrievalSubgraphAdapter(
+        index, ForkBranchAdapter(root, store), session_acl=_allow
+    )
+    with pytest.raises(ValueError, match="not unique in the supersede index") as shared:
+        adapter.retrieve_historical_subgraphs("rev-shared", "sg-cutover", _PRINCIPAL)
+    assert "is not in the supersede index" not in str(shared.value)
+
+    with pytest.raises(ValueError, match="is not in the supersede index") as missing:
+        adapter.retrieve_historical_subgraphs("rev-missing", "sg-cutover", _PRINCIPAL)
+    assert "not unique" not in str(missing.value)
