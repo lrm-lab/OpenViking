@@ -14,8 +14,9 @@ not write a stored object.
 
 Initial rank inside each corpus is BM25. ``RetrievalProfile.rank_mode`` may
 select the hybrid tier, which mixes that score with a real vector from the
-injected embedder. A missing embedder, or a vector whose dimension is 0,
-keeps this call on BM25 and still returns the BM25 hits. The projection
+injected embedder. The mix weights are an unconfirmed stand-in; see
+``HYBRID_FUSION_POLICY_VERSION``. A missing embedder, or a vector whose dimension
+is 0, keeps this call on BM25 and still returns the BM25 hits. The projection
 ``embedding_stub`` is not a vector. ``FEATURE_SPEC_VERSION`` stays on the
 result. While ``FACT_LANE_PAUSED`` is set, ``retrieve`` does not call the
 segment/atom adapter and does not give those empty seats to another corpus.
@@ -77,8 +78,14 @@ FACT_LANE_PAUSED = True
 RANK_MODE_BM25 = "bm25"
 RANK_MODE_HYBRID = "hybrid"
 RANK_MODES = frozenset((RANK_MODE_BM25, RANK_MODE_HYBRID))
-# Above one half so a real vector can move a weaker BM25 hit ahead of a
-# stronger one. Equal min-max weights tie a pure two-document reversal.
+# Pending parameter. CONSENSUS decision #95 / narrative 86 only require
+# fusing BM25 with a real vector into one rank. They do not set weights or a
+# fusion formula. These values still need design confirmation.
+# HYBRID_FUSION_POLICY_VERSION marks this unconfirmed choice.
+# Stand-in until then: the vector weight is above one half, so a real vector
+# can move a weaker BM25 hit ahead of a stronger one. Equal min-max weights
+# tie a pure two-document reversal, and the stable sort keeps write order.
+HYBRID_FUSION_POLICY_VERSION = "hybrid-fusion-pending-v0"
 HYBRID_BM25_WEIGHT = 0.25
 HYBRID_VECTOR_WEIGHT = 0.75
 

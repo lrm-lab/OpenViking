@@ -21,11 +21,23 @@ from collections.abc import Sequence
 DEFAULT_K1 = 1.2
 DEFAULT_B = 0.75
 
-_TOKEN = re.compile(r"\w+", re.UNICODE)
+# CJK unified ideographs (U+4E00–U+9FFF) and Extension A (U+3400–U+4DBF) are
+# one token each, so a shared character such as 「绿」 is an overlap. The
+# second alternative is a ``\w`` run with those ideographs removed: Latin
+# letters, digits, underscore, and other non-CJK word characters stay one
+# word. Punctuation matches neither side and only separates tokens.
+_TOKEN = re.compile(
+    r"[\u3400-\u4dbf\u4e00-\u9fff]|[^\W\u3400-\u4dbf\u4e00-\u9fff]+",
+    re.UNICODE,
+)
 
 
 def tokenize(text: str) -> list[str]:
-    """Case-folded word tokens. Punctuation separates tokens; it is not matched."""
+    """Case-folded tokens. Punctuation separates tokens; it is not matched.
+
+    CJK ideographs in the ranges above are unigrams. Other word characters
+    stay grouped, so an English word is still one token.
+    """
     if not text:
         return []
     return _TOKEN.findall(text.casefold())

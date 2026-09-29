@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from openviking.session.ao_ledger import AOLedger
-from openviking.session.bm25 import DEFAULT_B, DEFAULT_K1, BM25Index
+from openviking.session.bm25 import DEFAULT_B, DEFAULT_K1, BM25Index, tokenize
 from openviking.session.causal_bridges import PATH_MAX_ENTITIES, check_path_budget
 from openviking.session.causal_experiences import (
     SEVEN_SECTION_KEYS,
@@ -1267,6 +1267,64 @@ def test_bm25_term_and_document_frequency_change_rank() -> None:
     assert mixed[1] == pytest.approx(mixed[2]) == pytest.approx(mixed[3])
     assert rarity.scores("absent") == [0.0, 0.0, 0.0, 0.0]
     assert rarity.scores("") == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_bm25_cjk_unigrams_rank_q127_release_example(tmp_path: Path) -> None:
+    """Q127 A: a shared CJK character overlaps; an English doc with no shared term stays out."""
+    query = "这次发布必须蓝绿"
+    exact = "这次发布必须蓝绿"
+    english = "green environment cutover"
+    green_once = "文档里只出现绿灯"
+    fork_text = "蓝绿发布"
+
+    assert tokenize(query) == ["这", "次", "发", "布", "必", "须", "蓝", "绿"]
+    assert tokenize(fork_text) == ["蓝", "绿", "发", "布"]
+    assert tokenize(green_once).count("绿") == 1
+    assert tokenize("blue-green 蓝绿 v2") == ["blue", "green", "蓝", "绿", "v2"]
+    assert tokenize("\u3400\u4dbf\u4e00\u9fff") == ["\u3400", "\u4dbf", "\u4e00", "\u9fff"]
+
+    scores = BM25Index([exact, english, green_once, fork_text]).scores(query)
+    assert scores[1] == 0.0
+    assert scores[0] > scores[3] > scores[2] > 0.0
+
+    root = tmp_path / "q127"
+    store = _store(root)
+    registry = ProjectionRegistry(root / "projections.json")
+    session_dir = root / "sess-q127"
+    ledger = AOLedger(session_dir, "sess-q127")
+    exact_id = _append_text(ledger, exact)
+    english_id = _append_text(ledger, english)
+    green_id = _append_text(ledger, green_once)
+    fork_id = _append_text(ledger, fork_text)
+    result = _facade(
+        root,
+        store,
+        registry,
+        session_dir,
+        "sess-q127",
+        fact_lane_paused=False,
+    ).retrieve(
+        query,
+        _PRINCIPAL,
+        RetrievalProfile(fork_branch=0, projection=0, segment_atom=4),
+    )
+    ids = [card.source_pointer["ao_id"] for card in result.cards]
+    assert english_id not in ids
+    assert ids[0] == exact_id
+    assert ids.index(fork_id) < ids.index(green_id)
+    assert result.cards[ids.index(fork_id)].score_breakdown["bm25"] > 0
+    assert result.rank_tier == "bm25"
+
+
+def test_bm25_english_words_stay_whole_tokens() -> None:
+    assert tokenize("APPLE apple_2") == ["apple", "apple_2"]
+    assert tokenize("Don't stop.") == ["don", "t", "stop"]
+    corpus = ["apple apple apple", "pineapple sauce", "apple"]
+    scores = BM25Index(corpus, k1=DEFAULT_K1, b=DEFAULT_B).scores("apple")
+    assert scores[1] == 0.0
+    assert scores[0] > scores[2] > 0.0
+    assert BM25Index(corpus).scores("") == [0.0, 0.0, 0.0]
+    assert BM25Index(corpus).scores("zephyr") == [0.0, 0.0, 0.0]
 
 
 def test_bm25_retrieval_orders_hits_and_keeps_per_corpus_quotas(tmp_path: Path) -> None:
