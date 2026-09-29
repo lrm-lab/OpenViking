@@ -1727,7 +1727,11 @@ def build_minimal_fallback_view(
 
 
 class ViewSupersedeIndex:
-    """Latest frozen revision per ``(session_id, purpose)``, with history retained."""
+    """Latest frozen revision per ``(session_id, purpose)``, with history retained.
+
+    ``revisions_for_purpose`` is the online cross-session read. ``to_dict`` stays
+    an offline dump and is not that read path.
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
@@ -1755,6 +1759,24 @@ class ViewSupersedeIndex:
         purpose_value = _require_choice(purpose, "purpose", PURPOSES)
         with self._lock:
             return list(self._history.get((session_id, purpose_value), []))
+
+    def revisions_for_purpose(self, purpose: str) -> list[InfluenceViewRevision]:
+        """Every frozen revision for ``purpose``, across sessions.
+
+        Order is ``session_id``, then registration order within that session.
+        This does not apply principal ACL and does not call ``to_dict``.
+        """
+        purpose_value = _require_choice(purpose, "purpose", PURPOSES)
+        with self._lock:
+            found: list[InfluenceViewRevision] = []
+            session_ids = sorted(
+                session_id
+                for session_id, stored_purpose in self._history
+                if stored_purpose == purpose_value
+            )
+            for session_id in session_ids:
+                found.extend(self._history.get((session_id, purpose_value), ()))
+            return found
 
     def to_dict(self) -> dict[str, Any]:
         keys: list[dict[str, Any]] = []

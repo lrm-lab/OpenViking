@@ -32,6 +32,15 @@ stay the serialized revision, so ``score_breakdown`` does not gain a text term.
 resolves the claim projection back to a frozen view revision and claim id.
 Diagnostic agents not calling it is an agent-side fence.
 
+``retrieve_historical_subgraphs(view_revision_id, subgraph_id, principal_labels)``
+is the diagnostic read. The server resolves that subgraph on the named frozen
+revision and requires ``is_failure``. The corpus is retrieval subgraphs on
+other ``post_run_index`` revisions. Ranking this wave is BM25 on a stand-in
+subgraph text (``SUBGRAPH_TEXT_POLICY_VERSION``); there is no vector tier.
+The read uses ``ViewSupersedeIndex.revisions_for_purpose`` and does not call
+``ViewSupersedeIndex.to_dict``. It does not write forks and ``retrieve`` does
+not call it.
+
 Online retrieval applies principal ACL inside each adapter before the quota
 is spent, then clamps the reranked list back to the causal-memory cap.
 Offline management reads are not part of this path and online code must not
@@ -67,13 +76,23 @@ from openviking.session.causal_experiences import (
     SEVEN_SECTION_KEYS,
     CausalExperiencesStore,
     ForkStatus,
+    InfluenceGrounding,
     branch_retrieval_channel,
 )
-from openviking.session.influence_projection import InfluenceProjection, ProjectionRegistry
+from openviking.session.influence_projection import (
+    InfluenceProjection,
+    ProjectionRegistry,
+    SessionAcl,
+)
 from openviking.session.influence_view import (
+    PURPOSE_POST_RUN_INDEX,
+    PURPOSES,
     RELATION_INFLUENCE,
+    InfluenceBlock,
     InfluenceClaim,
     InfluenceViewRevision,
+    RetrievalSubgraph,
+    ViewSupersedeIndex,
 )
 
 FEATURE_SPEC_VERSION = "ranker-feature-spec-v1"
@@ -107,6 +126,14 @@ HYBRID_VECTOR_WEIGHT = 0.75
 BRANCH_SYNOPSIS_LIMIT = 8
 BRANCH_SYNOPSIS_LINE_CHARS = 180
 BRANCH_SUMMARY_CHARS = 720
+# Pending parameter. A diagnostic subgraph hit compares one failure subgraph
+# with historical retrieval subgraphs. Design does not fix the document text
+# or a vector similarity. SUBGRAPH_TEXT_POLICY_VERSION marks this stand-in:
+# non-empty summary, input, output, carried_artifact, and downstream_effect
+# only, in stored member order. This wave ranks that string with BM25.
+# There is no vector tier on this path.
+SUBGRAPH_TEXT_POLICY_VERSION = "subgraph-text-pending-v0"
+DIAGNOSTIC_SUBGRAPH_HIT_CAP = 3
 
 CardKind = Literal[
     "fork",
@@ -682,6 +709,33 @@ def _rank_hits(
             )
         )
     return ranked
+
+
+def _rank_document_indexes(
+    query_text: str, documents: Sequence[str]
+) -> list[tuple[int, dict[str, Any]]]:
+    """BM25 order for documents that are not retrieval cards.
+
+    An empty query keeps every document at score 0 in the given order.
+    A non-empty query drops BM25 zeros. Equal scores keep the given order.
+    This helper does not embed. Hybrid fusion is not applied.
+    """
+    plan = _RankPlan(RANK_MODE_BM25, None)
+    plan.prepare(query_text)
+    if not documents:
+        return []
+    scores = BM25Index(documents).scores(query_text)
+    if not query_text:
+        return [
+            (index, _score_breakdown(0.0, plan, tier=RANK_MODE_BM25))
+            for index in range(len(documents))
+        ]
+    kept = [index for index, score in enumerate(scores) if score > 0.0]
+    bm25_kept = [scores[index] for index in kept]
+    return [
+        (kept[pos], _score_breakdown(bm25_kept[pos], plan, tier=RANK_MODE_BM25))
+        for pos in _order_by(bm25_kept)
+    ]
 
 
 def _channel_for_fork_status(status: str | None) -> CardChannel | None:
@@ -1361,6 +1415,337 @@ class SegmentAtomAdapter:
             watermark = page.snapshot_watermark
 
 
+def _nonempty_text(value: str) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def _subgraph_members(
+    revision: InfluenceViewRevision, subgraph: RetrievalSubgraph
+) -> tuple[tuple[InfluenceBlock, ...], tuple[InfluenceClaim, ...]]:
+    """Blocks and claims named by this subgraph, in stored id order.
+
+    Ids that are not on the revision are skipped. Other subgraphs on the
+    same revision are not included.
+    """
+    blocks = {block.block_id: block for block in revision.blocks}
+    claims = {claim.claim_id: claim for claim in revision.claims}
+    chosen_blocks = tuple(
+        blocks[block_id] for block_id in subgraph.block_ids if block_id in blocks
+    )
+    chosen_claims = tuple(
+        claims[claim_id] for claim_id in subgraph.claim_ids if claim_id in claims
+    )
+    return chosen_blocks, chosen_claims
+
+
+def _subgraph_retrieval_text(
+    revision: InfluenceViewRevision, subgraph: RetrievalSubgraph
+) -> str:
+    """Stand-in document for one retrieval subgraph. See ``SUBGRAPH_TEXT_POLICY_VERSION``.
+
+    Query and candidate both use this string. Schema labels, ids, roles,
+    relation types, the failure marker, guidance, and raw AO text are omitted
+    so two subgraphs with disjoint prose do not share tokens.
+    """
+    blocks, claims = _subgraph_members(revision, subgraph)
+    parts: list[str] = []
+    for block in blocks:
+        for value in (block.summary, block.input, block.output):
+            text = _nonempty_text(value)
+            if text:
+                parts.append(text)
+    for claim in claims:
+        for value in (claim.carried_artifact, claim.downstream_effect):
+            text = _nonempty_text(value)
+            if text:
+                parts.append(text)
+    return "\n".join(parts)
+
+
+def _position_inside_subgraph(
+    grounding: InfluenceGrounding, subgraph: RetrievalSubgraph
+) -> bool:
+    """Stand-in position parser. Never raises.
+
+    ``block`` matches only ``block:<id>`` against ``block_ids``.
+    ``edge`` matches only ``edge:<id>`` against ``claim_ids``.
+    The id is the substring after the first colon, with no whitespace trim.
+    ``cut``, a missing colon, an empty id, or a prefix that is not the kind
+    are outside the subgraph.
+    """
+    kind = grounding.position_kind
+    if kind != "block" and kind != "edge":
+        return False
+    prefix, separator, ident = grounding.position_ref.partition(":")
+    if separator != ":" or not ident:
+        return False
+    if kind == "block":
+        return prefix == "block" and ident in subgraph.block_ids
+    return prefix == "edge" and ident in subgraph.claim_ids
+
+
+def _diagnostic_fork_text(revision: Mapping[str, Any], synopses: Mapping[str, str]) -> str:
+    """Seven sections plus branch synopses. Not guidance and not raw AO."""
+    parts: list[str] = []
+    sections = _fork_retrieval_text(revision.get("seven_sections"))
+    if sections:
+        parts.append(sections)
+    branches = revision.get("branches")
+    if not isinstance(branches, list):
+        return "\n".join(parts)
+    ordered = sorted(
+        (item for item in branches if isinstance(item, dict)),
+        key=lambda item: str(item.get("branch_id") or ""),
+    )
+    for branch in ordered:
+        if not str(branch.get("branch_id") or ""):
+            continue
+        synopsis = _branch_retrieval_text(branch, synopses)
+        if synopsis:
+            parts.append(synopsis)
+    return "\n".join(parts)
+
+
+@dataclass(frozen=True)
+class DiagnosticForkHit:
+    """One stored fork revision whose grounding falls inside the hit subgraph.
+
+    ``text`` is the seven-section snapshot plus branch action synopses.
+    """
+
+    fork_node_id: str
+    revision_id: str
+    workspace_id: str
+    text: str
+    influence_grounding: InfluenceGrounding
+
+
+@dataclass(frozen=True)
+class DiagnosticSubgraphHit:
+    """One historical retrieval subgraph plus the forks grounded inside it.
+
+    Blocks and claims are that subgraph's own members. A sibling subgraph on
+    the same frozen view is not part of this hit. ``score_breakdown`` uses the
+    same BM25 keys as causal-memory card ranking.
+    """
+
+    view_revision_id: str
+    session_id: str
+    subgraph: RetrievalSubgraph
+    blocks: tuple[InfluenceBlock, ...]
+    claims: tuple[InfluenceClaim, ...]
+    forks: tuple[DiagnosticForkHit, ...]
+    score_breakdown: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        breakdown = _json_copy(
+            _require_mapping(self.score_breakdown, "score_breakdown"), "score_breakdown"
+        )
+        if not isinstance(breakdown, dict):
+            raise ValueError("score_breakdown must be a dict")
+        object.__setattr__(self, "score_breakdown", breakdown)
+        object.__setattr__(self, "blocks", tuple(self.blocks))
+        object.__setattr__(self, "claims", tuple(self.claims))
+        object.__setattr__(self, "forks", tuple(self.forks))
+
+
+class RetrievalSubgraphAdapter:
+    """Historical ``post_run_index`` retrieval subgraphs.
+
+    ``name`` is ``retrieval_subgraph``. Candidates are filtered with the
+    injected ``session_acl`` callback before they enter the BM25 corpus. A
+    session with no labels is invisible. The session id is not used as a
+    label. Fork visibility uses the revision ``workspace_id``, the same label
+    the fork/branch adapter uses. This adapter does not write forks and is
+    not called by ``HybridRetrievalFacade.retrieve``.
+    """
+
+    name = "retrieval_subgraph"
+
+    def __init__(
+        self,
+        views: ViewSupersedeIndex,
+        forks: ForkBranchAdapter,
+        *,
+        session_acl: SessionAcl | None = None,
+        session_dirs: Mapping[str, str | Path] | None = None,
+    ) -> None:
+        if not isinstance(views, ViewSupersedeIndex):
+            raise ValueError("views must be a ViewSupersedeIndex")
+        if not isinstance(forks, ForkBranchAdapter):
+            raise ValueError("forks must be a ForkBranchAdapter")
+        self._views = views
+        self._forks = forks
+        self._session_acl = session_acl
+        dirs: dict[str, Path] = {}
+        if session_dirs is not None:
+            if isinstance(session_dirs, (str, bytes)) or not isinstance(session_dirs, Mapping):
+                raise ValueError("session_dirs must be a mapping of session_id to path")
+            for session_id, path in session_dirs.items():
+                dirs[_require_str(session_id, "session_dirs")] = Path(path)
+        if forks._session_id and forks._session_dir is not None:
+            dirs.setdefault(forks._session_id, Path(forks._session_dir))
+        self._session_dirs = dirs
+
+    def retrieve_historical_subgraphs(
+        self,
+        view_revision_id: str,
+        subgraph_id: str,
+        principal_labels: Sequence[str],
+    ) -> tuple[DiagnosticSubgraphHit, ...]:
+        """Rank other post-run subgraphs against one failure subgraph.
+
+        The subgraph must exist on ``view_revision_id`` and ``is_failure``.
+        Otherwise this raises ``ValueError``. At most
+        ``DIAGNOSTIC_SUBGRAPH_HIT_CAP`` hits are returned. Fewer matches are
+        not backfilled. The querying revision is not a hit.
+        """
+        principal = _principal_set(principal_labels)
+        current = self._revision(view_revision_id)
+        query_subgraph = self._require_failure_subgraph(current, subgraph_id)
+        query_text = _subgraph_retrieval_text(current, query_subgraph)
+        candidates: list[tuple[InfluenceViewRevision, RetrievalSubgraph]] = []
+        documents: list[str] = []
+        for revision in self._views.revisions_for_purpose(PURPOSE_POST_RUN_INDEX):
+            if revision.revision_id == current.revision_id:
+                continue
+            labels = self._session_labels(revision.session_id)
+            if not labels or not _labels_visible(labels, principal):
+                continue
+            for subgraph in revision.retrieval_subgraphs:
+                candidates.append((revision, subgraph))
+                documents.append(_subgraph_retrieval_text(revision, subgraph))
+        ranked = _rank_document_indexes(query_text, documents)[:DIAGNOSTIC_SUBGRAPH_HIT_CAP]
+        synopses = self._synopses()
+        hits: list[DiagnosticSubgraphHit] = []
+        for index, breakdown in ranked:
+            revision, subgraph = candidates[index]
+            blocks, claims = _subgraph_members(revision, subgraph)
+            hits.append(
+                DiagnosticSubgraphHit(
+                    view_revision_id=revision.revision_id,
+                    session_id=revision.session_id,
+                    subgraph=subgraph,
+                    blocks=blocks,
+                    claims=claims,
+                    forks=self._forks_inside(revision, subgraph, principal, synopses),
+                    score_breakdown=breakdown,
+                )
+            )
+        return tuple(hits)
+
+    def _revision(self, view_revision_id: str) -> InfluenceViewRevision:
+        identity = _require_str(view_revision_id, "view_revision_id")
+        matches: list[InfluenceViewRevision] = []
+        for purpose in sorted(PURPOSES):
+            for revision in self._views.revisions_for_purpose(purpose):
+                if revision.revision_id == identity:
+                    matches.append(revision)
+        if len(matches) != 1:
+            raise ValueError(f"view revision {identity!r} is not in the supersede index")
+        return matches[0]
+
+    def _require_failure_subgraph(
+        self, revision: InfluenceViewRevision, subgraph_id: str
+    ) -> RetrievalSubgraph:
+        identity = _require_str(subgraph_id, "subgraph_id")
+        for subgraph in revision.retrieval_subgraphs:
+            if subgraph.subgraph_id != identity:
+                continue
+            if not subgraph.is_failure:
+                raise ValueError(f"subgraph {identity!r} is not failure-marked")
+            return subgraph
+        raise ValueError(
+            f"subgraph {identity!r} is not on view revision {revision.revision_id!r}"
+        )
+
+    def _session_labels(self, session_id: str) -> tuple[str, ...]:
+        if self._session_acl is None:
+            return ()
+        raw = self._session_acl(session_id)
+        if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
+            raise ValueError("session_acl must return a sequence of str")
+        return _normalize_labels(raw)
+
+    def _synopses(self) -> dict[str, str]:
+        found: dict[str, str] = {}
+        for session_id in sorted(self._session_dirs):
+            directory = self._session_dirs[session_id]
+            if not (directory / LEDGER_FILENAME).is_file():
+                continue
+            for record in AOLedger(directory, session_id).records():
+                synopsis = _synopsis_from_observation(record.observation)
+                if synopsis:
+                    found[record.ao_id] = synopsis
+        return found
+
+    def _forks_inside(
+        self,
+        revision: InfluenceViewRevision,
+        subgraph: RetrievalSubgraph,
+        principal: set[str],
+        synopses: Mapping[str, str],
+    ) -> tuple[DiagnosticForkHit, ...]:
+        hits: list[DiagnosticForkHit] = []
+        for fork_node_id in self._forks._fork_ids():
+            loaded = self._forks._store.get_fork_node(fork_node_id)
+            if loaded is None:
+                continue
+            revisions = loaded.get("revisions")
+            if not isinstance(revisions, list):
+                continue
+            for item in revisions:
+                if not isinstance(item, dict):
+                    continue
+                parsed = _fork_grounded_in(
+                    item, revision.revision_id, subgraph, principal, synopses
+                )
+                if parsed is not None:
+                    hits.append(parsed)
+        return tuple(hits)
+
+
+def _fork_grounded_in(
+    revision: Mapping[str, Any],
+    view_revision_id: str,
+    subgraph: RetrievalSubgraph,
+    principal: set[str],
+    synopses: Mapping[str, str],
+) -> DiagnosticForkHit | None:
+    raw_workspace = revision.get("workspace_id")
+    if not isinstance(raw_workspace, str) or not raw_workspace:
+        return None
+    labels = _normalize_labels((raw_workspace,))
+    if not _labels_visible(labels, principal):
+        return None
+    raw_grounding = revision.get("influence_grounding")
+    if not isinstance(raw_grounding, Mapping):
+        return None
+    try:
+        grounding = InfluenceGrounding.from_dict(dict(raw_grounding))
+    except ValueError:
+        return None
+    if grounding.view_revision_id != view_revision_id:
+        return None
+    if not _position_inside_subgraph(grounding, subgraph):
+        return None
+    fork_node_id = revision.get("fork_node_id")
+    revision_id = revision.get("revision_id")
+    if not isinstance(fork_node_id, str) or not fork_node_id:
+        return None
+    if not isinstance(revision_id, str) or not revision_id:
+        return None
+    return DiagnosticForkHit(
+        fork_node_id=fork_node_id,
+        revision_id=revision_id,
+        workspace_id=raw_workspace,
+        text=_diagnostic_fork_text(revision, synopses),
+        influence_grounding=grounding,
+    )
+
+
 def _assign_ranks(cards: Sequence[RetrievalCard], channel: str) -> list[RetrievalCard]:
     group = [card for card in cards if card.channel == channel]
     return [replace(card, in_channel_rank=index) for index, card in enumerate(group, start=1)]
@@ -1500,6 +1885,8 @@ class HybridRetrievalFacade:
     Online code must not call ``materialize_strength(None)``, ``events()``,
     ``list_bridges``, or ``ProjectionRegistry.to_dict``. Those are offline
     management paths and do not apply principal ACL.
+    Diagnostic subgraph retrieval is ``retrieve_historical_subgraphs`` and is
+    not part of ``retrieve``.
     """
 
     def __init__(
@@ -1514,10 +1901,16 @@ class HybridRetrievalFacade:
         seed: str | int | None = None,
         fact_lane_paused: bool | None = None,
         embedder: EmbedFn | None = None,
+        retrieval_subgraph: RetrievalSubgraphAdapter | None = None,
     ) -> None:
         self.fork_branch = fork_branch
         self.projection = projection
         self.segment_atom = segment_atom
+        if retrieval_subgraph is not None and not isinstance(
+            retrieval_subgraph, RetrievalSubgraphAdapter
+        ):
+            raise ValueError("retrieval_subgraph must be a RetrievalSubgraphAdapter or None")
+        self.retrieval_subgraph = retrieval_subgraph
         self.rerank = rerank if rerank is not None else IdentityRerank()
         self.acl_filter = acl_filter if acl_filter is not None else default_acl_filter
         self.feature_version = _require_str(feature_version, "feature_version")
@@ -1541,7 +1934,8 @@ class HybridRetrievalFacade:
         While the fact lane is paused this does not call ``segment_atom.search``
         and does not backfill those seats. ``materialize_strength(None)``,
         ``events()``, ``list_bridges``, and ``ProjectionRegistry.to_dict`` are
-        offline management paths. This method does not call them.
+        offline management paths. This method does not call them, and it does
+        not call ``retrieval_subgraph``.
         """
         parsed = coerce_query(query)
         budgets = coerce_profile(profile)
@@ -1645,6 +2039,25 @@ class HybridRetrievalFacade:
             claim_id,
             max_entities=max_entities,
             card_id=card_id,
+        )
+
+    def retrieve_historical_subgraphs(
+        self,
+        view_revision_id: str,
+        subgraph_id: str,
+        principal_labels: Sequence[str],
+    ) -> tuple[DiagnosticSubgraphHit, ...]:
+        """Read historical subgraphs for one failure subgraph on this revision.
+
+        The caller names the current view revision and the subgraph id on it.
+        The server loads that subgraph. A missing id, an id from another
+        revision, or a subgraph that is not failure-marked raises
+        ``ValueError``. This does not write forks and does not change markers.
+        """
+        if self.retrieval_subgraph is None:
+            raise ValueError("retrieval subgraph adapter is not configured")
+        return self.retrieval_subgraph.retrieve_historical_subgraphs(
+            view_revision_id, subgraph_id, principal_labels
         )
 
     def _visible(
