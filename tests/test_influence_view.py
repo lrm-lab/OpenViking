@@ -21,7 +21,9 @@ from openviking.session.influence_view import (
     InfluenceClaim,
     InfluenceEvidenceRef,
     InfluenceViewDraft,
+    InfluenceViewRevision,
     OmittedRange,
+    RetrievalSubgraph,
     SegmentRef,
     SourceRef,
     ViewSupersedeIndex,
@@ -552,3 +554,290 @@ def test_injected_clock_stamps_persisted_frozen_at(tmp_path: Path) -> None:
         clock=clock,
     )
     assert fallback.frozen_at == expected
+
+
+def _subgraph(
+    subgraph_id: str,
+    block_ids: tuple[str, ...],
+    claim_ids: tuple[str, ...] = (),
+    *,
+    failure_marked: bool = False,
+    failure_evidence_refs: tuple[InfluenceEvidenceRef, ...] = (),
+) -> RetrievalSubgraph:
+    return RetrievalSubgraph(
+        subgraph_id=subgraph_id,
+        block_ids=block_ids,
+        claim_ids=claim_ids,
+        failure_marked=failure_marked,
+        failure_evidence_refs=failure_evidence_refs,
+    )
+
+
+def _span() -> tuple[InfluenceBlock, InfluenceBlock, InfluenceClaim]:
+    early = _block("b-script", [1, 2], segment_id="seg-a")
+    late = _block("b-rate", [4, 5], segment_id="seg-b", participant_id="agent-b")
+    return early, late, _claim("c-cutover", "b-script", "b-rate")
+
+
+def _codes(view: InfluenceViewDraft | InfluenceViewRevision) -> set[str]:
+    return {item.code for item in validate_view(view)}
+
+
+def test_retrieval_subgraph_roundtrip_keeps_failure_marker_and_evidence() -> None:
+    early, late, claim = _span()
+    evidence = _evidence(5)
+    draft = _draft([early, late], [claim])
+    draft.add_retrieval_subgraph(
+        _subgraph(
+            "sg-cutover",
+            ("b-script", "b-rate"),
+            ("c-cutover",),
+            failure_marked=True,
+            failure_evidence_refs=(evidence,),
+        )
+    )
+    assert _codes(draft) == set()
+    revision = draft.freeze(revision_id="rev-sg", frozen_at="2026-09-24T08:00:00.000Z")
+    restored = InfluenceViewRevision.from_dict(json.loads(json.dumps(revision.to_dict())))
+    assert restored == revision
+    assert restored.retrieval_subgraphs[0].failure_marked is True
+    assert restored.retrieval_subgraphs[0].is_failure is True
+    assert restored.retrieval_subgraphs[0].failure_evidence_refs == (evidence,)
+    assert restored.retrieval_subgraphs[0].to_dict()["failure_evidence_refs"][0]["ao_id"] == "ao-5"
+
+    legacy = revision.to_dict()
+    legacy.pop("retrieval_subgraphs")
+    loaded = InfluenceViewRevision.from_dict(legacy)
+    assert loaded.retrieval_subgraphs == ()
+    assert loaded.content_hash == revision.content_hash
+
+
+def test_content_hash_covers_retrieval_subgraphs() -> None:
+    early, late, claim = _span()
+    plain = _subgraph("sg-cutover", ("b-script", "b-rate"), ("c-cutover",))
+    marked = _subgraph(
+        "sg-cutover",
+        ("b-script", "b-rate"),
+        ("c-cutover",),
+        failure_marked=True,
+        failure_evidence_refs=(_evidence(5),),
+    )
+    coverage = _coverage([early, late])
+    empty_hash = compute_content_hash((early, late), (claim,), coverage)
+    plain_hash = compute_content_hash((early, late), (claim,), coverage, (plain,))
+    marked_hash = compute_content_hash((early, late), (claim,), coverage, (marked,))
+    assert plain_hash != empty_hash
+    assert marked_hash != plain_hash
+    assert compute_content_hash((early, late), (claim,), coverage, (marked,)) == marked_hash
+
+    stamp = "2026-09-24T08:00:00.000Z"
+    without = _draft([early, late], [claim]).freeze(revision_id="rev-sg", frozen_at=stamp)
+    with_plain = _draft([early, late], [claim])
+    with_plain.add_retrieval_subgraph(plain)
+    frozen_plain = with_plain.freeze(revision_id="rev-sg", frozen_at=stamp)
+    assert frozen_plain.content_hash == plain_hash
+    assert frozen_plain != without
+    again = _draft([early, late], [claim])
+    again.add_retrieval_subgraph(plain)
+    assert again.freeze(revision_id="rev-sg", frozen_at=stamp) == frozen_plain
+
+
+def test_retrieval_subgraph_unknown_member_is_a_violation() -> None:
+    early, late, claim = _span()
+    legal = _draft([early, late], [claim])
+    legal.add_retrieval_subgraph(_subgraph("sg-ok", ("b-script", "b-rate"), ("c-cutover",)))
+    assert _codes(legal) == set()
+
+    illegal = _draft([early, late], [claim])
+    illegal.add_retrieval_subgraph(
+        _subgraph("sg-block", ("b-script", "b-rate", "missing-block"), ("c-cutover",))
+    )
+    illegal.add_retrieval_subgraph(
+        _subgraph("sg-claim", ("b-script", "b-rate"), ("c-cutover", "missing-claim"))
+    )
+    hits = [item for item in validate_view(illegal) if item.code == "subgraph_unknown_member"]
+    assert {item.location for item in hits} == {
+        "subgraph:sg-block/block_ids/missing-block",
+        "subgraph:sg-claim/claim_ids/missing-claim",
+    }
+    assert _codes(illegal) == {"subgraph_unknown_member"}
+
+
+def test_retrieval_subgraph_claim_endpoint_must_lie_inside_blocks() -> None:
+    early, late, claim = _span()
+    legal = _draft([early, late], [claim])
+    legal.add_retrieval_subgraph(_subgraph("sg-ok", ("b-script", "b-rate"), ("c-cutover",)))
+    assert _codes(legal) == set()
+
+    illegal = _draft([early, late], [claim])
+    illegal.add_retrieval_subgraph(_subgraph("sg-half", ("b-script",), ("c-cutover",)))
+    hits = [item for item in validate_view(illegal) if item.code == "subgraph_claim_endpoint_outside"]
+    assert len(hits) == 1
+    assert hits[0].location == "subgraph:sg-half/claim_ids/c-cutover"
+    assert _codes(illegal) == {"subgraph_claim_endpoint_outside"}
+
+
+def test_duplicate_retrieval_subgraph_id_is_a_violation() -> None:
+    early, late, claim = _span()
+    legal = _draft([early, late], [claim])
+    legal.add_retrieval_subgraph(_subgraph("sg-a", ("b-script", "b-rate"), ("c-cutover",)))
+    legal.add_retrieval_subgraph(_subgraph("sg-b", ("b-rate",), ()))
+    assert _codes(legal) == set()
+
+    illegal = _draft([early, late], [claim])
+    illegal.add_retrieval_subgraph(_subgraph("sg-a", ("b-script", "b-rate"), ("c-cutover",)))
+    illegal.add_retrieval_subgraph(_subgraph("sg-a", ("b-script",), ()))
+    hits = [item for item in validate_view(illegal) if item.code == "duplicate_subgraph_id"]
+    assert len(hits) == 1
+    assert hits[0].location == "subgraph:sg-a"
+    assert _codes(illegal) == {"duplicate_subgraph_id"}
+
+
+def test_retrieval_subgraph_over_block_limit_is_a_violation() -> None:
+    def many(count: int) -> list[InfluenceBlock]:
+        return [_block(f"b{index}", [index], segment_id=f"seg-{index}") for index in range(1, count + 1)]
+
+    allowed = many(12)
+    legal = _draft(allowed)
+    legal.add_retrieval_subgraph(_subgraph("sg-fit", tuple(block.block_id for block in allowed)))
+    assert _codes(legal) == set()
+    legal.freeze(revision_id="rev-fit", frozen_at="2026-09-24T08:00:00.000Z")
+
+    oversized = many(13)
+    illegal = _draft(oversized)
+    illegal.add_retrieval_subgraph(_subgraph("sg-over", tuple(block.block_id for block in oversized)))
+    hits = [item for item in validate_view(illegal) if item.code == "subgraph_block_limit"]
+    assert len(hits) == 1
+    assert hits[0].location == "subgraph:sg-over/block_ids"
+    assert _codes(illegal) == {"subgraph_block_limit"}
+    with pytest.raises(HighSeverityViolation) as caught:
+        illegal.freeze(revision_id="rev-over", frozen_at="2026-09-24T08:00:00.000Z")
+    assert {item.code for item in caught.value.violations} == {"subgraph_block_limit"}
+
+
+def test_retrieval_subgraph_failure_evidence_must_match_marker() -> None:
+    early, late, claim = _span()
+    evidence = (_evidence(5),)
+    legal = _draft([early, late], [claim])
+    legal.add_retrieval_subgraph(
+        _subgraph("sg-open", ("b-script", "b-rate"), ("c-cutover",))
+    )
+    legal.add_retrieval_subgraph(
+        _subgraph(
+            "sg-failed",
+            ("b-script", "b-rate"),
+            ("c-cutover",),
+            failure_marked=True,
+            failure_evidence_refs=evidence,
+        )
+    )
+    assert _codes(legal) == set()
+    assert legal.retrieval_subgraphs[0].is_failure is False
+    assert legal.retrieval_subgraphs[1].is_failure is True
+
+    missing = _draft([early, late], [claim])
+    missing.add_retrieval_subgraph(
+        _subgraph("sg-bare", ("b-script", "b-rate"), ("c-cutover",), failure_marked=True)
+    )
+    bare_hits = [item for item in validate_view(missing) if item.code == "subgraph_failure_evidence"]
+    assert len(bare_hits) == 1
+    assert bare_hits[0].location == "subgraph:sg-bare/failure_evidence_refs"
+
+    extra = _draft([early, late], [claim])
+    extra.add_retrieval_subgraph(
+        _subgraph(
+            "sg-extra",
+            ("b-script", "b-rate"),
+            ("c-cutover",),
+            failure_evidence_refs=evidence,
+        )
+    )
+    extra_hits = [item for item in validate_view(extra) if item.code == "subgraph_failure_evidence"]
+    assert len(extra_hits) == 1
+    assert extra_hits[0].location == "subgraph:sg-extra/failure_evidence_refs"
+    assert extra.retrieval_subgraphs[0].is_failure is False
+
+
+def test_conclusion_block_without_marker_is_not_a_failure_subgraph() -> None:
+    action = _block("b-cutover", [1, 2], segment_id="seg-a")
+    outcome = _block(
+        "b-rate",
+        [4],
+        role="conclusion",
+        participant_id="agent-b",
+        segment_id="seg-b",
+        summary="error rate rose",
+    )
+    claim = _claim("c-rate", "b-cutover", "b-rate")
+    draft = _draft([action, outcome], [claim])
+    draft.add_retrieval_subgraph(_subgraph("sg-rate", ("b-cutover", "b-rate"), ("c-rate",)))
+    assert validate_view(draft) == []
+    revision = draft.freeze(revision_id="rev-rate", frozen_at="2026-09-24T08:00:00.000Z")
+    subgraph = revision.retrieval_subgraphs[0]
+    roles = {
+        block.role
+        for block in revision.blocks
+        if block.block_id in subgraph.block_ids
+    }
+    assert "conclusion" in roles
+    assert outcome.summary == "error rate rose"
+    assert subgraph.failure_marked is False
+    assert subgraph.is_failure is False
+
+
+def test_retrieval_subgraph_serialization_omits_subtask_wording() -> None:
+    early, late, claim = _span()
+    draft = _draft([early, late], [claim])
+    draft.add_retrieval_subgraph(
+        _subgraph(
+            "sg-cutover",
+            ("b-script", "b-rate"),
+            ("c-cutover",),
+            failure_marked=True,
+            failure_evidence_refs=(_evidence(5),),
+        )
+    )
+    revision = draft.freeze(revision_id="rev-sg", frozen_at="2026-09-24T08:00:00.000Z")
+    text = json.dumps(revision.to_dict())
+    assert "subtask" not in text
+
+
+def test_fallback_view_leaves_retrieval_subgraphs_empty() -> None:
+    records = [
+        {
+            "ao_id": "ao-1",
+            "sequence": 1,
+            "participant_id": "agent-a",
+            "segment_id": "seg-a",
+            "content_hash": "hash-1",
+        }
+    ]
+    post = build_minimal_fallback_view(
+        {
+            "session_id": SESSION,
+            "task_run_id": TASK,
+            "purpose": "post_run_index",
+            "snapshot_watermark": "wm-fallback",
+            "view_id": "view-fb",
+            "revision_id": "rev-fb",
+            "frozen_at": "2026-09-24T02:00:00.000Z",
+            "ao_records": records,
+        }
+    )
+    diagnosis = build_minimal_fallback_view(
+        {
+            "session_id": SESSION,
+            "task_run_id": TASK,
+            "purpose": "failure_diagnosis",
+            "snapshot_watermark": "wm-fallback",
+            "view_id": "view-fb-diag",
+            "revision_id": "rev-fb-diag",
+            "frozen_at": "2026-09-24T07:00:00.000Z",
+            "ao_records": records,
+        }
+    )
+    assert post.retrieval_subgraphs == ()
+    assert diagnosis.retrieval_subgraphs == ()
+    assert any(block.role == "conclusion" for block in diagnosis.blocks)
+    assert validate_view(post) == []
+    assert validate_view(diagnosis) == []

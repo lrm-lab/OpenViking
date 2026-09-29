@@ -7,6 +7,10 @@ AO ledger (ADR-0010). Drafts stay mutable for at most three critic rounds;
 ``freeze`` yields an immutable revision. The supersede index keeps older
 revisions as history and points ``latest`` at the newest freeze for a
 ``(session_id, purpose)`` pair.
+
+A retrieval subgraph is a span the extraction model draws onto that frozen
+view, with the influence edges inside it and an explicit failure marker.
+The marker is stored as written. It is not inferred from block roles.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ DETERMINISTIC_FALLBACK_REASON = "deterministic_fallback"
 SYNTHETIC_ROOT_SINK_REASON = "synthetic_root_sink"
 OMITTED_GAP_REASON = "not_in_selected_ao_range"
 MAX_CRITIC_ROUNDS = 3
+MAX_RETRIEVAL_SUBGRAPH_BLOCKS = 12
 INDEX_VERSION = 1
 
 BlockRole = Literal["task", "orchestrator", "agent_action", "conclusion"]
@@ -96,6 +101,24 @@ def _require_choice(value: Any, field: str, choices: frozenset[str]) -> str:
     if text not in choices:
         raise ValueError(f"{field} must be one of {sorted(choices)}, got {text!r}")
     return text
+
+
+def _require_bool(value: Any, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a bool")
+    return value
+
+
+def _as_str_tuple(value: Sequence[Any], field: str) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes)):
+        raise ValueError(f"{field} must be a sequence of str")
+    try:
+        items = tuple(value)
+    except TypeError as exc:
+        raise ValueError(f"{field} must be a sequence of str") from exc
+    for index, item in enumerate(items):
+        _require_str(item, f"{field}[{index}]")
+    return items
 
 
 @dataclass(frozen=True)
@@ -676,16 +699,84 @@ class CriticPatchRecord:
         )
 
 
+@dataclass(frozen=True)
+class RetrievalSubgraph:
+    """One model-drawn span on a frozen view, plus its influence edges.
+
+    ``subgraph_id`` is unique inside the revision. It does not carry
+    ``session_id``, ``task_run_id``, ``revision_id``, or ``view_id``.
+    ``is_failure`` repeats the explicit ``failure_marked`` flag the
+    extraction model wrote. Block role and summary text do not set it.
+    """
+
+    subgraph_id: str
+    block_ids: tuple[str, ...]
+    claim_ids: tuple[str, ...]
+    failure_marked: bool = False
+    failure_evidence_refs: tuple[InfluenceEvidenceRef, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_str(self.subgraph_id, "subgraph_id")
+        object.__setattr__(self, "block_ids", _as_str_tuple(self.block_ids, "block_ids"))
+        object.__setattr__(self, "claim_ids", _as_str_tuple(self.claim_ids, "claim_ids"))
+        if not isinstance(self.failure_marked, bool):
+            raise ValueError("failure_marked must be a bool")
+        object.__setattr__(self, "failure_evidence_refs", tuple(self.failure_evidence_refs))
+        for ref in self.failure_evidence_refs:
+            if not isinstance(ref, InfluenceEvidenceRef):
+                raise ValueError("failure_evidence_refs must contain InfluenceEvidenceRef")
+
+    @property
+    def is_failure(self) -> bool:
+        """Explicit failure marker only. Conclusion blocks do not count."""
+        return self.failure_marked
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "subgraph_id": self.subgraph_id,
+            "block_ids": list(self.block_ids),
+            "claim_ids": list(self.claim_ids),
+            "failure_marked": self.failure_marked,
+            "failure_evidence_refs": [ref.to_dict() for ref in self.failure_evidence_refs],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RetrievalSubgraph:
+        payload = _require_mapping(data, "retrieval_subgraph")
+        block_ids = payload.get("block_ids")
+        claim_ids = payload.get("claim_ids")
+        if not isinstance(block_ids, list):
+            raise ValueError("block_ids must be a list")
+        if not isinstance(claim_ids, list):
+            raise ValueError("claim_ids must be a list")
+        evidence = tuple(
+            InfluenceEvidenceRef.from_dict(_require_mapping(item, "evidence_ref"))
+            for item in payload.get("failure_evidence_refs") or []
+        )
+        return cls(
+            subgraph_id=_require_str(payload.get("subgraph_id"), "subgraph_id"),
+            block_ids=_as_str_tuple(block_ids, "block_ids"),
+            claim_ids=_as_str_tuple(claim_ids, "claim_ids"),
+            failure_marked=_require_bool(payload.get("failure_marked", False), "failure_marked"),
+            failure_evidence_refs=evidence,
+        )
+
+
 def compute_content_hash(
     blocks: Sequence[InfluenceBlock],
     claims: Sequence[InfluenceClaim],
     coverage: CoverageManifest,
+    retrieval_subgraphs: Sequence[RetrievalSubgraph] = (),
 ) -> str:
-    """sha256 of canonical JSON for blocks, claims, and coverage."""
+    """sha256 of canonical JSON for blocks, claims, coverage, and retrieval subgraphs.
+
+    The subgraph list is always part of the payload, including when it is empty.
+    """
     payload = {
         "blocks": [block.to_dict() for block in blocks],
         "claims": [claim.to_dict() for claim in claims],
         "coverage": coverage.to_dict(),
+        "retrieval_subgraphs": [item.to_dict() for item in retrieval_subgraphs],
     }
     return _sha256_text(_canonical_dumps(payload))
 
@@ -703,6 +794,7 @@ class InfluenceViewDraft:
         coverage: CoverageManifest,
         blocks: Sequence[InfluenceBlock] | None = None,
         claims: Sequence[InfluenceClaim] | None = None,
+        retrieval_subgraphs: Sequence[RetrievalSubgraph] | None = None,
         critic_rounds: int = 0,
         patch_provenance: Sequence[CriticPatchRecord] | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -720,11 +812,14 @@ class InfluenceViewDraft:
         self.critic_rounds = rounds
         self.blocks: list[InfluenceBlock] = []
         self.claims: list[InfluenceClaim] = []
+        self.retrieval_subgraphs: list[RetrievalSubgraph] = []
         self.patch_provenance: list[CriticPatchRecord] = []
         for block in blocks or ():
             self._append_block(block)
         for claim in claims or ():
             self._append_claim(claim, enforce_hypothesis=False)
+        for subgraph in retrieval_subgraphs or ():
+            self._append_retrieval_subgraph(subgraph)
         for record in patch_provenance or ():
             if not isinstance(record, CriticPatchRecord):
                 raise ValueError("patch_provenance must contain CriticPatchRecord")
@@ -760,6 +855,21 @@ class InfluenceViewDraft:
     def add_claim(self, claim: InfluenceClaim) -> None:
         self._ensure_editable()
         self._append_claim(claim, enforce_hypothesis=True)
+
+    def _append_retrieval_subgraph(self, subgraph: RetrievalSubgraph) -> None:
+        if not isinstance(subgraph, RetrievalSubgraph):
+            raise ValueError("subgraph must be a RetrievalSubgraph")
+        self.retrieval_subgraphs.append(subgraph)
+
+    def add_retrieval_subgraph(self, subgraph: RetrievalSubgraph) -> None:
+        """Append one model-drawn subgraph.
+
+        Structural problems are ``Violation`` values from ``validate_view``,
+        the same channel as the other view checks. This method does not
+        reject them itself.
+        """
+        self._ensure_editable()
+        self._append_retrieval_subgraph(subgraph)
 
     def apply_critic_patch(
         self,
@@ -842,6 +952,7 @@ class InfluenceViewDraft:
                 raise HighSeverityViolation(high)
         blocks = tuple(self.blocks)
         claims = tuple(self.claims)
+        retrieval_subgraphs = tuple(self.retrieval_subgraphs)
         return InfluenceViewRevision(
             revision_id=_require_str(identity, "revision_id"),
             view_id=self.view_id,
@@ -854,8 +965,11 @@ class InfluenceViewDraft:
             critic_rounds=self.critic_rounds,
             patch_provenance=tuple(self.patch_provenance),
             construction_mode=mode,  # type: ignore[arg-type]
-            content_hash=compute_content_hash(blocks, claims, self.coverage),
+            content_hash=compute_content_hash(
+                blocks, claims, self.coverage, retrieval_subgraphs
+            ),
             frozen_at=stamp,
+            retrieval_subgraphs=retrieval_subgraphs,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -866,6 +980,7 @@ class InfluenceViewDraft:
             "task_run_id": self.task_run_id,
             "blocks": [block.to_dict() for block in self.blocks],
             "claims": [claim.to_dict() for claim in self.claims],
+            "retrieval_subgraphs": [item.to_dict() for item in self.retrieval_subgraphs],
             "coverage": self.coverage.to_dict(),
             "critic_rounds": self.critic_rounds,
             "patch_provenance": [item.to_dict() for item in self.patch_provenance],
@@ -892,6 +1007,10 @@ class InfluenceViewDraft:
                 InfluenceClaim.from_dict(_require_mapping(item, "claim"))
                 for item in payload.get("claims") or []
             ),
+            retrieval_subgraphs=tuple(
+                RetrievalSubgraph.from_dict(_require_mapping(item, "retrieval_subgraph"))
+                for item in payload.get("retrieval_subgraphs") or []
+            ),
             critic_rounds=_require_int(payload.get("critic_rounds", 0), "critic_rounds"),
             patch_provenance=tuple(
                 CriticPatchRecord.from_dict(_require_mapping(item, "patch"))
@@ -903,7 +1022,11 @@ class InfluenceViewDraft:
 
 @dataclass(frozen=True)
 class InfluenceViewRevision:
-    """Immutable freeze of a draft. Content hash covers blocks, claims, and coverage."""
+    """Immutable freeze of a draft.
+
+    Content hash covers blocks, claims, coverage, and retrieval subgraphs.
+    Equality includes the subgraph tuple.
+    """
 
     revision_id: str
     view_id: str
@@ -918,6 +1041,7 @@ class InfluenceViewRevision:
     construction_mode: ConstructionMode
     content_hash: str
     frozen_at: str
+    retrieval_subgraphs: tuple[RetrievalSubgraph, ...] = ()
 
     def __post_init__(self) -> None:
         _require_str(self.revision_id, "revision_id")
@@ -936,6 +1060,10 @@ class InfluenceViewRevision:
         object.__setattr__(self, "blocks", tuple(self.blocks))
         object.__setattr__(self, "claims", tuple(self.claims))
         object.__setattr__(self, "patch_provenance", tuple(self.patch_provenance))
+        object.__setattr__(self, "retrieval_subgraphs", tuple(self.retrieval_subgraphs))
+        for item in self.retrieval_subgraphs:
+            if not isinstance(item, RetrievalSubgraph):
+                raise ValueError("retrieval_subgraphs must contain RetrievalSubgraph")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -946,6 +1074,7 @@ class InfluenceViewRevision:
             "task_run_id": self.task_run_id,
             "blocks": [block.to_dict() for block in self.blocks],
             "claims": [claim.to_dict() for claim in self.claims],
+            "retrieval_subgraphs": [item.to_dict() for item in self.retrieval_subgraphs],
             "coverage": self.coverage.to_dict(),
             "critic_rounds": self.critic_rounds,
             "patch_provenance": [item.to_dict() for item in self.patch_provenance],
@@ -984,6 +1113,10 @@ class InfluenceViewRevision:
             ),
             content_hash=_require_str(payload.get("content_hash"), "content_hash"),
             frozen_at=_require_str(payload.get("frozen_at"), "frozen_at"),
+            retrieval_subgraphs=tuple(
+                RetrievalSubgraph.from_dict(_require_mapping(item, "retrieval_subgraph"))
+                for item in payload.get("retrieval_subgraphs") or []
+            ),
         )
 
 
@@ -1223,6 +1356,99 @@ def _coverage_violations(
     return findings
 
 
+def _retrieval_subgraph_violations(
+    blocks: Sequence[InfluenceBlock],
+    claims: Sequence[InfluenceClaim],
+    retrieval_subgraphs: Sequence[RetrievalSubgraph],
+) -> list[Violation]:
+    """Structural checks for model-drawn subgraphs. Failure is not inferred."""
+    findings: list[Violation] = []
+    block_ids = {block.block_id for block in blocks}
+    claims_by_id = {claim.claim_id: claim for claim in claims}
+    seen_ids: dict[str, int] = {}
+    for subgraph in retrieval_subgraphs:
+        seen_ids[subgraph.subgraph_id] = seen_ids.get(subgraph.subgraph_id, 0) + 1
+        member_blocks = set(subgraph.block_ids)
+        for block_id in subgraph.block_ids:
+            if block_id not in block_ids:
+                findings.append(
+                    Violation(
+                        code="subgraph_unknown_member",
+                        severity="high",
+                        message=f"block_id {block_id} is not in this revision",
+                        location=f"subgraph:{subgraph.subgraph_id}/block_ids/{block_id}",
+                    )
+                )
+        for claim_id in subgraph.claim_ids:
+            claim = claims_by_id.get(claim_id)
+            if claim is None:
+                findings.append(
+                    Violation(
+                        code="subgraph_unknown_member",
+                        severity="high",
+                        message=f"claim_id {claim_id} is not in this revision",
+                        location=f"subgraph:{subgraph.subgraph_id}/claim_ids/{claim_id}",
+                    )
+                )
+                continue
+            outside = (
+                claim.source_block_id not in member_blocks
+                or claim.target_block_id not in member_blocks
+            )
+            if outside:
+                findings.append(
+                    Violation(
+                        code="subgraph_claim_endpoint_outside",
+                        severity="high",
+                        message="claim endpoints must both be blocks of this retrieval subgraph",
+                        location=f"subgraph:{subgraph.subgraph_id}/claim_ids/{claim_id}",
+                    )
+                )
+        if len(subgraph.block_ids) > MAX_RETRIEVAL_SUBGRAPH_BLOCKS:
+            findings.append(
+                Violation(
+                    code="subgraph_block_limit",
+                    severity="high",
+                    message=(
+                        f"retrieval subgraph has {len(subgraph.block_ids)} blocks; "
+                        f"limit is {MAX_RETRIEVAL_SUBGRAPH_BLOCKS}"
+                    ),
+                    location=f"subgraph:{subgraph.subgraph_id}/block_ids",
+                )
+            )
+        marked = subgraph.failure_marked
+        has_evidence = bool(subgraph.failure_evidence_refs)
+        if marked and not has_evidence:
+            findings.append(
+                Violation(
+                    code="subgraph_failure_evidence",
+                    severity="high",
+                    message="a failure marker requires failure evidence",
+                    location=f"subgraph:{subgraph.subgraph_id}/failure_evidence_refs",
+                )
+            )
+        elif has_evidence and not marked:
+            findings.append(
+                Violation(
+                    code="subgraph_failure_evidence",
+                    severity="high",
+                    message="failure evidence requires an explicit failure marker",
+                    location=f"subgraph:{subgraph.subgraph_id}/failure_evidence_refs",
+                )
+            )
+    for subgraph_id, count in seen_ids.items():
+        if count > 1:
+            findings.append(
+                Violation(
+                    code="duplicate_subgraph_id",
+                    severity="high",
+                    message=f"subgraph_id {subgraph_id} is duplicated in this revision",
+                    location=f"subgraph:{subgraph_id}",
+                )
+            )
+    return findings
+
+
 def validate_view(draft: InfluenceViewDraft | InfluenceViewRevision) -> list[Violation]:
     """Server-side structural checks. Semantic critic verdicts are out of scope."""
     purpose, session_id, blocks, claims, coverage = _view_parts(draft)
@@ -1241,6 +1467,7 @@ def validate_view(draft: InfluenceViewDraft | InfluenceViewRevision) -> list[Vio
     findings.extend(_temporal_and_cycle_violations(blocks, claims))
     findings.extend(_diagnosis_connectivity_violations(purpose, blocks, claims))
     findings.extend(_coverage_violations(blocks, claims, coverage))
+    findings.extend(_retrieval_subgraph_violations(blocks, claims, draft.retrieval_subgraphs))
     return findings
 
 
