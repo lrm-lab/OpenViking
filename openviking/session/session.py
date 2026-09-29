@@ -25,6 +25,7 @@ from openviking.session.ao_ledger_recorder import (
     maybe_record_session_tool_exchanges,
     maybe_write_session_archive_attribution,
 )
+from openviking.session.trajectory_index_hook import maybe_index_session_trajectory
 from openviking.session import working_memory as wm
 from openviking.session.archive_store import (
     ArchiveStore,
@@ -1552,6 +1553,7 @@ class Session:
                     if isinstance(result, BaseException):
                         raise result
                 maybe_write_session_archive_attribution(self, archive_uri)
+                maybe_index_session_trajectory(self, task_id)
                 if retention_plan is not None:
                     await self._merge_archive_meta(
                         archive_uri,

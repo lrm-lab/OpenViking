@@ -15,6 +15,39 @@ SKILL_TRAJECTORY_MODES = frozenset(
 )
 
 
+class TrajectoryIndexConfig(BaseModel):
+    """Budget for the post-commit trajectory index.
+
+    The design does not say who pauses the queue or what the budget is.
+    These defaults are an implementation choice: the process config is the
+    authority, and task success or failure is not. ``paused`` defaults to
+    false so a causal commit can freeze a view. ``max_builds_per_window``
+    counts builds recorded in the index file the hook opens (one file per
+    session directory).
+    """
+
+    max_builds_per_window: int = Field(
+        default=32,
+        ge=0,
+        description=(
+            "How many trajectory views may be frozen per window. "
+            "0 skips every build with budget_exhausted and leaves the job queued."
+        ),
+    )
+    window_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description="Rolling window for max_builds_per_window.",
+    )
+    paused: bool = Field(
+        default=False,
+        description=(
+            "When true, the index step skips with paused and does not build. "
+            "Default false so a causal commit freezes a view."
+        ),
+    )
+
+
 class SessionAutoCommitConfig(BaseModel):
     """Server-wide controls for automatic session commits."""
 
@@ -128,6 +161,13 @@ class MemoryConfig(BaseModel):
     session_auto_commit: SessionAutoCommitConfig = Field(
         default_factory=SessionAutoCommitConfig,
         description="Server-wide controls for automatic session commits.",
+    )
+    trajectory_index: TrajectoryIndexConfig = Field(
+        default_factory=TrajectoryIndexConfig,
+        description=(
+            "Post-commit trajectory index budget. Defaults are an implementation "
+            "choice; they are not inferred from task outcome."
+        ),
     )
 
     @model_validator(mode="before")
@@ -257,3 +297,11 @@ def is_causal_mode_enabled(
         )
         == SKILL_TRAJECTORY_MODE_CAUSAL
     )
+
+
+def resolve_trajectory_index_config(config: Any = None) -> TrajectoryIndexConfig:
+    """Return ``memory.trajectory_index``.
+
+    ``config`` sources match :func:`resolve_skill_trajectory_mode`.
+    """
+    return _memory_config_from_source(config).trajectory_index
