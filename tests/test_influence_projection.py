@@ -401,3 +401,39 @@ def test_withdraw_superseded_calls_revalidation_callback(tmp_path) -> None:
     removed = registry.withdraw_superseded(SESSION, PURPOSE_POST_RUN_INDEX, "rev-2")
     assert [record.card.source_pointer.view_revision_id for record in removed] == ["rev-1"]
     assert seen == ["rev-1"]
+
+
+def _assert_opaque_card_id(card_id: str, kind: str) -> None:
+    prefix = f"{kind}-card-"
+    assert card_id.startswith(prefix)
+    suffix = card_id[len(prefix) :]
+    assert len(suffix) == 8
+    assert suffix == suffix.lower()
+    assert all(character in "0123456789abcdef" for character in suffix)
+
+
+def test_projected_card_ids_hide_internal_ids_and_stay_stable(tmp_path) -> None:
+    revision = _revision_with_claim()
+    registry = _registry(tmp_path, "first.json")
+    first = registry.register(revision, acl_labels=("team-a",))
+    again = registry.register(revision, acl_labels=("team-a",))
+    replay = _registry(tmp_path, "replay.json").register(revision, acl_labels=("team-a",))
+    assert [card.card_id for card in again] == [card.card_id for card in first]
+    assert [card.card_id for card in replay] == [card.card_id for card in first]
+
+    hidden = {
+        revision.revision_id,
+        revision.session_id,
+        *(block.block_id for block in revision.blocks),
+        *(claim.claim_id for claim in revision.claims),
+    }
+    for card in first:
+        _assert_opaque_card_id(card.card_id, card.kind)
+        for secret in hidden:
+            assert secret not in card.card_id
+        assert registry.get(card.card_id) is card
+        assert card.source_pointer.view_revision_id == revision.revision_id
+
+    other = _revision_with_claim(revision_id="rev-claim-next")
+    shifted = _registry(tmp_path, "shifted.json").register(other, acl_labels=("team-a",))
+    assert {card.card_id for card in shifted}.isdisjoint({card.card_id for card in first})

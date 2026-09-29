@@ -1858,7 +1858,7 @@ def test_expand_claim_neighborhood_by_card_id(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="not a claim projection"):
         facade.expand_claim_neighborhood(card_id=block_cards[0].payload_ref)
     with pytest.raises(ValueError, match="unknown card id"):
-        facade.expand_claim_neighborhood(card_id="claim:rev-skip:missing")
+        facade.expand_claim_neighborhood(card_id="claim-card-00000000")
     with pytest.raises(ValueError, match="unknown card id"):
         facade.expand_claim_neighborhood(card_id="fork:fk-1@rev-1")
     with pytest.raises(ValueError, match="card_id"):

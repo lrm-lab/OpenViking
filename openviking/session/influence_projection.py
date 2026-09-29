@@ -141,6 +141,29 @@ def _embedding_stub(content_hash: str) -> dict[str, Any]:
     return {"provider": "stub", "dimensions": 0, "digest": content_hash}
 
 
+_CARD_ID_HEX_LEN = 8
+
+
+def _opaque_card_id(*, kind: str, view_revision_id: str, entity_id: str) -> str:
+    """Deterministic card id that does not spell out internal identifiers.
+
+    The digest is SHA-256 of ``kind``, the frozen view revision, and the
+    block or claim id. The same triple always yields the same id, so
+    re-projection stays idempotent. A different revision yields a different
+    id. ``session_id`` is not an input and does not appear in the string.
+    """
+    digest = _sha256_text(
+        _canonical_dumps(
+            {
+                "entity_id": entity_id,
+                "kind": kind,
+                "view_revision_id": view_revision_id,
+            }
+        )
+    )
+    return f"{kind}-card-{digest[:_CARD_ID_HEX_LEN]}"
+
+
 def _card_content_hash(
     *,
     kind: str,
@@ -905,7 +928,11 @@ def _make_card(
         session_id=revision.session_id,
     )
     return InfluenceProjection(
-        card_id=f"{kind}:{revision.revision_id}:{entity_id}",
+        card_id=_opaque_card_id(
+            kind=kind,
+            view_revision_id=revision.revision_id,
+            entity_id=entity_id,
+        ),
         kind=kind,
         summary=summary,
         semantic_type=semantic_type,
