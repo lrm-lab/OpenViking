@@ -15,6 +15,9 @@ Implementation choices the design leaves open:
   anchor bound), so the caller must pass it. ``workspace_id``,
   ``diagnosis_run_id``, and ``model_version`` are not on the frozen view;
   the caller must pass those too. Empty stand-ins are not filled in.
+  ``workspace_labels`` is the caller's label set for this session.
+  ``workspace_id`` must be one of them. An empty or missing set is rejected
+  before any write. This module does not take an ACL callback.
 * ``hindsight_attribution`` and ``used_skills`` default to an empty list
   when the caller omits them. That is the schema's absence, not a fabricated
   ref or skill. Guidance stays on ``branches[].guidance``.
@@ -122,6 +125,22 @@ def default_failure_grounding_position(
     return ("block", f"block:{matches[0]}")
 
 
+def _require_workspace_in_labels(workspace_id: str, workspace_labels: Sequence[str]) -> None:
+    """Reject a workspace id that the caller did not list as visible.
+
+    Fail closed: a missing set, a non-sequence, or an empty set does not write.
+    """
+    if isinstance(workspace_labels, (str, bytes)) or not isinstance(workspace_labels, Sequence):
+        raise ValueError("workspace_labels must be a non-empty sequence of str")
+    labels: list[str] = []
+    for item in workspace_labels:
+        if not isinstance(item, str) or not item:
+            raise ValueError("workspace_labels entries must be non-empty str")
+        labels.append(item)
+    if workspace_id not in labels:
+        raise ValueError(f"workspace_id {workspace_id!r} is not in workspace_labels")
+
+
 def write_failure_subgraph_fork(
     store: CausalExperiencesStore,
     revision: InfluenceViewRevision,
@@ -132,6 +151,7 @@ def write_failure_subgraph_fork(
     position_kind: str,
     position_ref: str,
     workspace_id: str,
+    workspace_labels: Sequence[str],
     diagnosis_run_id: str,
     model_version: str,
     contemporaneous_basis: Sequence[Mapping[str, Any] | EvidenceRef],
@@ -143,6 +163,9 @@ def write_failure_subgraph_fork(
     A second call with the same revision and subgraph id and the same payload
     returns that fork. This function does not accept a list of subgraph ids
     and does not return a group of forks.
+
+    ``workspace_id`` must belong to ``workspace_labels``. Otherwise this
+    raises and does not write.
     """
     if not isinstance(store, CausalExperiencesStore):
         raise ValueError("store must be a CausalExperiencesStore")
@@ -160,6 +183,7 @@ def write_failure_subgraph_fork(
         "anchor_sequence": evidence.source_sequence,
     }
     workspace = _require_str(workspace_id, "workspace_id")
+    _require_workspace_in_labels(workspace, workspace_labels)
     diagnosis = _require_str(diagnosis_run_id, "diagnosis_run_id")
     model = _require_str(model_version, "model_version")
     kind = _require_str(position_kind, "position_kind")

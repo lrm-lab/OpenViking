@@ -252,6 +252,7 @@ def _write(store: CausalExperiencesStore, revision, subgraph_id: str, **override
         "position_kind": "block",
         "position_ref": "block:b-rate",
         "workspace_id": "team-a",
+        "workspace_labels": _PRINCIPAL,
         "diagnosis_run_id": "diag-cutover",
         "model_version": "diag-model-v1",
         "contemporaneous_basis": [_basis(anchor_sequence)],
@@ -676,3 +677,81 @@ def test_revision_lookup_distinguishes_missing_from_not_unique(tmp_path: Path) -
     with pytest.raises(ValueError, match="is not in the supersede index") as missing:
         adapter.retrieve_historical_subgraphs("rev-missing", "sg-cutover", _PRINCIPAL)
     assert "not unique" not in str(missing.value)
+
+
+def test_workspace_outside_labels_is_not_written(tmp_path: Path) -> None:
+    revision = _release_revision()
+    store = _store(tmp_path)
+    with pytest.raises(ValueError, match="workspace_labels"):
+        _write(
+            store,
+            revision,
+            "sg-cutover",
+            position_kind="block",
+            position_ref="block:b-rate",
+            workspace_labels=("other-team",),
+        )
+    assert _revision_files(tmp_path / "store") == []
+
+
+def test_empty_or_missing_workspace_labels_are_not_written(tmp_path: Path) -> None:
+    revision = _release_revision()
+    store = _store(tmp_path)
+    with pytest.raises(ValueError, match="workspace_labels"):
+        _write(
+            store,
+            revision,
+            "sg-cutover",
+            position_kind="block",
+            position_ref="block:b-rate",
+            workspace_labels=(),
+        )
+    with pytest.raises(ValueError, match="workspace_labels"):
+        _write(
+            store,
+            revision,
+            "sg-cutover",
+            position_kind="block",
+            position_ref="block:b-rate",
+            workspace_labels=None,  # type: ignore[arg-type]
+        )
+    with pytest.raises(TypeError):
+        write_failure_subgraph_fork(
+            store,
+            revision,
+            "sg-cutover",
+            seven_sections=_sections("错误率升高就切回蓝"),
+            branches=[
+                {
+                    "branch_id": "br-cutover",
+                    "evidence_status": "real",
+                    "ao_sequence": ["ao-step"],
+                    "guidance": {"instruction": _GUIDANCE},
+                }
+            ],
+            position_kind="block",
+            position_ref="block:b-rate",
+            workspace_id="team-a",
+            diagnosis_run_id="diag-cutover",
+            model_version="diag-model-v1",
+            contemporaneous_basis=[_basis(2)],
+        )
+    assert _revision_files(tmp_path / "store") == []
+
+
+def test_workspace_inside_labels_is_written(tmp_path: Path) -> None:
+    revision = _release_revision()
+    store = _store(tmp_path)
+    written = _write(
+        store,
+        revision,
+        "sg-cutover",
+        position_kind="block",
+        position_ref="block:b-rate",
+        workspace_labels=("other-team", "team-a"),
+    )
+    assert written.workspace_id == "team-a"
+    files = _revision_files(tmp_path / "store")
+    assert len(files) == 1
+    disk = files[0].read_text(encoding="utf-8")
+    assert "subtask" not in disk

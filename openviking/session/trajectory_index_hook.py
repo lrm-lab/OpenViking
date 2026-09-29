@@ -19,6 +19,12 @@ On-disk layout, under the session directory:
 
 * ``views.json`` — ``ViewSupersedeIndex``
 * ``trajectory-index.json`` — ``TrajectoryIndexService`` queue snapshot
+* ``projections.json`` — ``ProjectionRegistry`` of cards for this session
+
+A session whose owner cannot be resolved still freezes the view and the
+index. Projection cards are skipped in that case: visibility fails closed,
+and indexing itself is not an access check. ``revalidation_callback`` only
+logs the notified revision id. Nothing persists ``needs_revalidation``.
 
 ``task_run_id`` is this commit's ``task_id``. There is no task-run entity.
 ``priority`` is ``2`` and ``outcome_status`` is ``"unspecified"``: commit
@@ -37,7 +43,9 @@ from typing import Any
 
 from openviking.session.ao_ledger_reader import MAX_PAGE_LIMIT, list_ao_ledger
 from openviking.session.extraction_write import ExtractionProvider, extraction_index_builder
+from openviking.session.influence_projection import ProjectionRegistry
 from openviking.session.influence_view import PURPOSE_POST_RUN_INDEX, ViewSupersedeIndex
+from openviking.session.session_acl import session_acl_callback
 from openviking.session.trajectory_index import (
     PRIORITY_SUCCEEDED,
     IndexJob,
@@ -53,6 +61,7 @@ from openviking_cli.utils.config.memory_config import (
 
 VIEWS_FILENAME = "views.json"
 TRAJECTORY_INDEX_FILENAME = "trajectory-index.json"
+PROJECTIONS_FILENAME = "projections.json"
 
 # Lowest-urgency legal priority. Not a claim that the task succeeded.
 COMMIT_INDEX_PRIORITY = PRIORITY_SUCCEEDED
@@ -254,10 +263,40 @@ def _index_commit(
         session_dir / TRAJECTORY_INDEX_FILENAME,
         ViewSupersedeIndex(session_dir / VIEWS_FILENAME),
         fallback_session=fallback_session,
+        projection_registry=_projection_registry(session, session_dir),
+        revalidation_callback=_warn_revalidation_not_persisted,
         **service_kwargs,
     )
     service.enqueue(job)
     service.process_next(_policy(config))
+
+
+def _projection_registry(session: Any, session_dir: Path) -> ProjectionRegistry | None:
+    """Build this commit's registry, or skip it when the owner is unknown.
+
+    Indexing still runs. The missing registry is the visibility failure, not
+    a reason to drop the frozen view.
+    """
+    try:
+        session_acl = session_acl_callback(session)
+    except ValueError:
+        logger.warning(
+            "session owner label could not be resolved; projection registry was skipped",
+            exc_info=True,
+        )
+        return None
+    return ProjectionRegistry(
+        session_dir / PROJECTIONS_FILENAME,
+        session_acl=session_acl,
+    )
+
+
+def _warn_revalidation_not_persisted(revision_id: str) -> None:
+    """Log a revalidation notice. Production has no consumer to persist it."""
+    logger.warning(
+        "revalidation_callback notified revision %s; needs_revalidation was not persisted",
+        revision_id,
+    )
 
 
 def maybe_index_session_trajectory(
