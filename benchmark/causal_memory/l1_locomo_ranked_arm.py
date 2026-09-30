@@ -21,6 +21,11 @@ list is the candidate pool. Three readings share it:
            returned cards that cover the dia. Same tie break as ranked.
 
 ``l1_locomo_hitk.py`` and ``l1_locomo_projection_arm.py`` stay untouched.
+
+Beyond any-hit, each reading records coverage@k (fraction of that question's
+gold set inside the top k), all_gold@k (the whole gold set is inside the top
+k), and mrr (1/rank of the first gold inside the top 10, else 0). ``gold_n``
+is the deduped gold size. These fields are additive: existing keys stay.
 """
 
 from __future__ import annotations
@@ -66,6 +71,22 @@ _BASELINE_P_HIT10 = "0.0%"
 _BASELINE_P_ZERO = "100.0%"
 _BASELINE_T_HIT5 = "56.0%"
 _BASELINE_T_HIT10 = "61.8%"
+# Absolute counts from the R6e archive. A miss means this edit moved the pool
+# or the order. Do not edit these to absorb a miss. T's 56.0% is shared with
+# a neighbour count, so the count is part of the gate.
+_R6E_T_HIT5 = 1109
+_R6E_T_HIT10 = 1225
+_R6E_HIT10: tuple[tuple[str, str, int, str], ...] = (
+    ("A12", "ranked", 1170, "59.0%"),
+    ("A4", "ranked", 1110, "56.0%"),
+    ("B4", "ranked", 1062, "53.6%"),
+    ("B12", "ranked", 1108, "55.9%"),
+    ("A4", "legacy", 722, "36.4%"),
+    ("A12", "legacy", 302, "15.2%"),
+    ("B4", "legacy", 722, "36.4%"),
+    ("B12", "legacy", 314, "15.8%"),
+)
+_GOLD_BUCKETS = ("1", "2", ">=3")
 
 PROFILE_A4 = {"fork_branch": 0, "projection": 0, "segment_atom": 4}
 PROFILE_B12 = {"fork_branch": 0, "projection": 12, "segment_atom": 0}
@@ -105,16 +126,42 @@ class _Hit:
 
 
 class _Metric:
-    __slots__ = ("pool", "union", "hit5", "hit10", "ordered")
+    __slots__ = (
+        "pool",
+        "union",
+        "hit5",
+        "hit10",
+        "ordered",
+        "coverage5",
+        "coverage10",
+        "all_gold5",
+        "all_gold10",
+        "mrr",
+    )
 
     def __init__(
-        self, pool: int, union: int, hit5: bool, hit10: bool, ordered: tuple[str, ...]
+        self,
+        pool: int,
+        union: int,
+        hit5: bool,
+        hit10: bool,
+        ordered: tuple[str, ...],
+        coverage5: float,
+        coverage10: float,
+        all_gold5: bool,
+        all_gold10: bool,
+        mrr: float,
     ) -> None:
         self.pool = pool
         self.union = union
         self.hit5 = hit5
         self.hit10 = hit10
         self.ordered = ordered
+        self.coverage5 = coverage5
+        self.coverage10 = coverage10
+        self.all_gold5 = all_gold5
+        self.all_gold10 = all_gold10
+        self.mrr = mrr
 
 
 def _print_policy() -> None:
@@ -138,6 +185,13 @@ def _print_policy() -> None:
         "ranked = max score_breakdown['bm25']; ties by first-seen index, then dia id. "
         f"rrf = sum 1/({RRF_K} + best 1-based rank in that keyword's returned cards); "
         "same ties. One candidate list per arm."
+    )
+    print(
+        "coverage@k = |gold ∩ top k| / |gold|. "
+        "all_gold@k = gold ⊆ top k. "
+        "mrr = 1/rank of the first gold inside the top 10, else 0. "
+        "The order is already total (score, first-seen, dia id); no tie average. "
+        "gold_n buckets: 1, 2, >=3."
     )
 
 
@@ -261,6 +315,83 @@ def _rrf_order(hits: list[_Hit], first: dict[str, int]) -> list[str]:
     return sorted(first, key=lambda dia: (-scores[dia], first[dia], dia))
 
 
+def _coverage_bundle(
+    ordered: list[str] | tuple[str, ...], gold: set[str]
+) -> tuple[float, float, bool, bool, float]:
+    """coverage@5, coverage@10, all_gold@5, all_gold@10, mrr.
+
+    mrr is 1/rank of the first gold inside the top 10, else 0. Truncating at
+    10 is what makes ``mrr > 0`` the same fact as ``coverage@10 > 0``.
+    """
+    gold_n = len(gold)
+    if gold_n == 0:
+        _fail("coverage on an empty gold set")
+    covered5 = len(gold & set(ordered[:5]))
+    covered10 = len(gold & set(ordered[:10]))
+    mrr = 0.0
+    for rank, dia in enumerate(ordered[:10], start=1):
+        if dia in gold:
+            mrr = 1.0 / rank
+            break
+    return (
+        covered5 / gold_n,
+        covered10 / gold_n,
+        covered5 == gold_n,
+        covered10 == gold_n,
+        mrr,
+    )
+
+
+def _gold_bucket(gold_n: int) -> str:
+    if gold_n == 1:
+        return "1"
+    if gold_n == 2:
+        return "2"
+    return ">=3"
+
+
+def _inconsistent(
+    sample_id: str,
+    label: str,
+    gold: set[str],
+    gold_n: int,
+    ordered: list[str] | tuple[str, ...],
+    hit5: bool,
+    hit10: bool,
+    coverage5: float,
+    coverage10: float,
+    all_gold5: bool,
+    all_gold10: bool,
+    mrr: float,
+) -> str | None:
+    """gold_n, coverage, all_gold, and mrr must describe the same gold set."""
+    if gold_n != len(set(gold)) or gold_n < 1:
+        return f"{sample_id} {label}: gold_n {gold_n} != len(set(gold)) {len(set(gold))}"
+    fresh = _coverage_bundle(ordered, gold)
+    stored = (coverage5, coverage10, all_gold5, all_gold10, mrr)
+    if stored != fresh:
+        return f"{sample_id} {label}: stored {stored} != recomputed {fresh}"
+    if all_gold5 != (coverage5 == 1.0):
+        return f"{sample_id} {label}: all_gold@5={all_gold5} coverage@5={coverage5}"
+    if all_gold10 != (coverage10 == 1.0):
+        return f"{sample_id} {label}: all_gold@10={all_gold10} coverage@10={coverage10}"
+    if (mrr > 0.0) != (coverage10 > 0.0):
+        return (
+            f"{sample_id} {label}: mrr={mrr} coverage@10={coverage10} (mrr > 0 iff coverage@10 > 0)"
+        )
+    if mrr < 0.0 or mrr > 1.0:
+        return f"{sample_id} {label}: mrr={mrr} is outside 0..1"
+    if hit5 != (coverage5 > 0.0) or hit10 != (coverage10 > 0.0):
+        return f"{sample_id} {label}: any-hit disagrees with coverage"
+    if all_gold5 and not all_gold10:
+        return f"{sample_id} {label}: all_gold@5 without all_gold@10"
+    if coverage5 > coverage10:
+        return f"{sample_id} {label}: coverage@5 {coverage5} > coverage@10 {coverage10}"
+    if gold_n == 1 and (all_gold5 != hit5 or all_gold10 != hit10):
+        return f"{sample_id} {label}: single-gold all_gold disagrees with any-hit"
+    return None
+
+
 def score_pool(hits: list[_Hit], gold: set[str], metrics: tuple[str, ...]) -> dict[str, _Metric]:
     """Rank one shared candidate list. Union size is recomputed per metric."""
     first = _first_seen(hits)
@@ -276,12 +407,18 @@ def score_pool(hits: list[_Hit], gold: set[str], metrics: tuple[str, ...]) -> di
     for name, ordered in orders.items():
         if len(ordered) != len(set(ordered)):
             _fail(f"{name} ranking emitted a duplicate dia")
+        coverage5, coverage10, all_gold5, all_gold10, mrr = _coverage_bundle(ordered, gold)
         scored[name] = _Metric(
             pool=pool,
             union=len(ordered),
             hit5=any_hit(ordered, gold, 5),
             hit10=any_hit(ordered, gold, 10),
             ordered=tuple(ordered),
+            coverage5=coverage5,
+            coverage10=coverage10,
+            all_gold5=all_gold5,
+            all_gold10=all_gold10,
+            mrr=mrr,
         )
     return scored
 
@@ -292,6 +429,11 @@ def _add(counter: Counter, metric: _Metric) -> None:
     counter["zero"] += int(metric.union == 0)
     counter["union"] += metric.union
     counter["pool"] += metric.pool
+    counter["coverage5"] += metric.coverage5
+    counter["coverage10"] += metric.coverage10
+    counter["all_gold5"] += int(metric.all_gold5)
+    counter["all_gold10"] += int(metric.all_gold10)
+    counter["mrr"] += metric.mrr
 
 
 def _delta(later: int, earlier: int, total: int) -> str:
@@ -309,10 +451,38 @@ def _row_line(arm: str, metric: str, counter: Counter, total: int) -> None:
     )
 
 
+def _reading_labels() -> list[tuple[str, str]]:
+    labels = [("T", "token")]
+    for name, _profile, _channel, _paused, metrics in _ARMS:
+        for metric in metrics:
+            labels.append((name, metric))
+    return labels
+
+
+def _counter_for(bucket: dict[str, Any], arm: str, metric: str) -> Counter:
+    if arm == "T":
+        return bucket["T"]
+    return bucket[arm][metric]
+
+
+def _rich_line(arm: str, metric: str, counter: Counter, total: int) -> None:
+    print(
+        f"{arm:<10} {metric:<8} "
+        f"hit@5={_pct(counter['hit5'], total):>7}  "
+        f"hit@10={_pct(counter['hit10'], total):>7}  "
+        f"cov@5={_pct(counter['coverage5'], total):>7}  "
+        f"cov@10={_pct(counter['coverage10'], total):>7}  "
+        f"all@5={_pct(counter['all_gold5'], total):>7}  "
+        f"all@10={_pct(counter['all_gold10'], total):>7}  "
+        f"mrr={counter['mrr'] / total:.4f}"
+    )
+
+
 def _print_tables(
     overall: dict[str, dict[str, Counter]],
     token: Counter,
     by_cat: dict[Any, dict[str, Counter]],
+    by_gold: dict[str, dict[str, Any]],
     total: int,
     top10_differs: Counter,
     problems_so_far: int,
@@ -406,6 +576,40 @@ def _print_tables(
                 f"mean_union={counter['union'] / n:.2f}  "
                 f"mean_pool={counter['pool'] / n:.2f}"
             )
+
+    labels = _reading_labels()
+    print("\n=== overall (any-hit / coverage / all-gold / mrr) ===")
+    print("coverage and mrr are means; any-hit and all-gold are question rates.")
+    for name, _profile, _channel, _paused, metrics in _ARMS:
+        for metric in metrics:
+            _rich_line(name, metric, overall[name][metric], total)
+    _rich_line("T", "token", token, total)
+
+    print("\n=== by gold count (all_gold@10 / coverage@10) ===")
+    for bucket_name in _GOLD_BUCKETS:
+        bucket = by_gold.get(bucket_name)
+        n = 0 if bucket is None else bucket["T"]["n"]
+        print(f"gold_n={bucket_name}: n={n}")
+        if n == 0 or bucket is None:
+            continue
+        for arm, metric in labels:
+            counter = _counter_for(bucket, arm, metric)
+            print(
+                f"  {arm:<10} {metric:<8} "
+                f"all@10={_pct(counter['all_gold10'], n):>7} ({counter['all_gold10']})  "
+                f"cov@10={_pct(counter['coverage10'], n):>7}"
+            )
+
+    print("\n=== per category (all_gold@10) ===")
+    for cat in sorted(by_cat, key=_cat_key):
+        n = by_cat[cat]["T"]["n"]
+        print(f"cat {cat}: n={n}")
+        for arm, metric in labels:
+            counter = _counter_for(by_cat[cat], arm, metric)
+            print(
+                f"  {arm:<10} {metric:<8} "
+                f"all@10={_pct(counter['all_gold10'], n):>7} ({counter['all_gold10']})"
+            )
     if problems_so_far:
         print(f"\nconsistency problems seen during the run: {problems_so_far}")
 
@@ -444,17 +648,71 @@ def _remember_category(
     scored_by_arm: dict[str, dict[str, _Metric]],
     token_hit5: bool,
     token_hit10: bool,
+    token_coverage5: float,
+    token_coverage10: float,
+    token_all5: bool,
+    token_all10: bool,
+    token_mrr: float,
 ) -> None:
     bucket = by_cat.setdefault(category, {})
     token_counter = bucket.setdefault("T", Counter())
     token_counter["n"] += 1
     token_counter["hit5"] += int(token_hit5)
     token_counter["hit10"] += int(token_hit10)
+    token_counter["coverage5"] += token_coverage5
+    token_counter["coverage10"] += token_coverage10
+    token_counter["all_gold5"] += int(token_all5)
+    token_counter["all_gold10"] += int(token_all10)
+    token_counter["mrr"] += token_mrr
     for name, _profile, _channel, _paused, metrics in _ARMS:
         arm_bucket = bucket.setdefault(name, {})
         for metric in metrics:
             counter = arm_bucket.setdefault(metric, Counter())
             _add(counter, scored_by_arm[name][metric])
+
+
+def _r6e_drift(overall: dict[str, dict[str, Counter]], token: Counter, total: int) -> list[str]:
+    paused = overall["P_legacy"]["legacy"]
+    specs: list[tuple[str, int, int, str]] = [
+        ("P_legacy hit@5", paused["hit5"], 0, _BASELINE_P_HIT5),
+        ("P_legacy hit@10", paused["hit10"], 0, _BASELINE_P_HIT10),
+        ("P_legacy empty-union", paused["zero"], total, _BASELINE_P_ZERO),
+        ("T hit@5", token["hit5"], _R6E_T_HIT5, _BASELINE_T_HIT5),
+        ("T hit@10", token["hit10"], _R6E_T_HIT10, _BASELINE_T_HIT10),
+    ]
+    for arm, metric, count, pct in _R6E_HIT10:
+        specs.append((f"{arm} {metric} @10", overall[arm][metric]["hit10"], count, pct))
+    drifts: list[str] = []
+    for label, got, expected_count, expected_pct in specs:
+        got_pct = _pct(got, total)
+        if got != expected_count or got_pct != expected_pct:
+            drifts.append(
+                f"{label} got {got_pct} ({got}) expected {expected_pct} ({expected_count})"
+            )
+    return drifts
+
+
+def _print_r6e_gate(overall: dict[str, dict[str, Counter]], token: Counter, total: int) -> None:
+    paused = overall["P_legacy"]["legacy"]
+
+    def hit10(arm: str, metric: str) -> str:
+        count = overall[arm][metric]["hit10"]
+        return f"{_pct(count, total)} ({count})"
+
+    print(
+        "R6e any-hit gate: "
+        f"P_legacy {_pct(paused['hit5'], total)}/{_pct(paused['hit10'], total)}/"
+        f"空并集 {_pct(paused['zero'], total)}; "
+        f"T {_pct(token['hit5'], total)}@5 / {_pct(token['hit10'], total)}@10; "
+        f"A12 ranked @10 = {hit10('A12', 'ranked')}; "
+        f"A4 ranked @10 = {hit10('A4', 'ranked')}; "
+        f"B4 ranked @10 = {hit10('B4', 'ranked')}; "
+        f"B12 ranked @10 = {hit10('B12', 'ranked')}; "
+        f"legacy A4 {hit10('A4', 'legacy')} / "
+        f"A12 {hit10('A12', 'legacy')} / "
+        f"B4 {hit10('B4', 'legacy')} / "
+        f"B12 {hit10('B12', 'legacy')}."
+    )
 
 
 def main() -> None:
@@ -477,6 +735,7 @@ def main() -> None:
     overall = _empty_overall()
     token: Counter = Counter()
     by_cat: dict[Any, dict[str, Counter]] = {}
+    by_gold: dict[str, dict[str, Any]] = {}
     top10_differs: Counter = Counter()
     stats: Counter = Counter()
     problems: list[str] = []
@@ -504,9 +763,15 @@ def main() -> None:
                 _fail(f"{session_id}: fact_lane_paused constructor flag did not stick")
             conv_questions = 0
             for question in conv["qa"]:
-                gold = set(question.get("evidence") or [])
+                evidence = question.get("evidence") or []
+                gold = set(evidence)
                 if not gold:
                     continue
+                gold_n = len(gold)
+                if gold_n != len(set(gold)) or gold_n != len(set(evidence)):
+                    problems.append(
+                        f"{conv['sample_id']}: gold_n {gold_n} != len(set(gold)) {len(set(evidence))}"
+                    )
                 total_q += 1
                 conv_questions += 1
                 keywords = _question_keywords(question["question"])
@@ -529,18 +794,77 @@ def main() -> None:
                     scored_by_arm[name] = scored
                     for metric_name, metric in scored.items():
                         _add(overall[name][metric_name], metric)
+                        problem = _inconsistent(
+                            conv["sample_id"],
+                            f"{name} {metric_name}",
+                            gold,
+                            gold_n,
+                            metric.ordered,
+                            metric.hit5,
+                            metric.hit10,
+                            metric.coverage5,
+                            metric.coverage10,
+                            metric.all_gold5,
+                            metric.all_gold10,
+                            metric.mrr,
+                        )
+                        if problem is not None:
+                            problems.append(problem)
                     if "legacy" in scored and "ranked" in scored:
                         if scored["legacy"].ordered[:10] != scored["ranked"].ordered[:10]:
                             top10_differs[name] += 1
                 token_ranked = token_ranked_dias(atoms, _tokens(question["question"]))
                 token_hit5 = any_hit(token_ranked, gold, 5)
                 token_hit10 = any_hit(token_ranked, gold, 10)
+                t_cov5, t_cov10, t_all5, t_all10, t_mrr = _coverage_bundle(token_ranked, gold)
                 if token_hit5 and not token_hit10:
                     problems.append(f"{conv['sample_id']}: T hit@5 is not a subset of hit@10")
+                problem = _inconsistent(
+                    conv["sample_id"],
+                    "T token",
+                    gold,
+                    gold_n,
+                    token_ranked,
+                    token_hit5,
+                    token_hit10,
+                    t_cov5,
+                    t_cov10,
+                    t_all5,
+                    t_all10,
+                    t_mrr,
+                )
+                if problem is not None:
+                    problems.append(problem)
                 token["hit5"] += int(token_hit5)
                 token["hit10"] += int(token_hit10)
+                token["coverage5"] += t_cov5
+                token["coverage10"] += t_cov10
+                token["all_gold5"] += int(t_all5)
+                token["all_gold10"] += int(t_all10)
+                token["mrr"] += t_mrr
                 _remember_category(
-                    by_cat, question.get("category"), scored_by_arm, token_hit5, token_hit10
+                    by_cat,
+                    question.get("category"),
+                    scored_by_arm,
+                    token_hit5,
+                    token_hit10,
+                    t_cov5,
+                    t_cov10,
+                    t_all5,
+                    t_all10,
+                    t_mrr,
+                )
+                _remember_category(
+                    by_gold,
+                    _gold_bucket(gold_n),
+                    scored_by_arm,
+                    token_hit5,
+                    token_hit10,
+                    t_cov5,
+                    t_cov10,
+                    t_all5,
+                    t_all10,
+                    t_mrr,
                 )
                 row: dict[str, Any] = {
                     "sample_id": conv["sample_id"],
@@ -563,6 +887,25 @@ def main() -> None:
                             scored_by_arm[name]["legacy"].ordered[:10]
                             != scored_by_arm[name]["ranked"].ordered[:10]
                         )
+                if len(row["gold"]) != gold_n:
+                    problems.append(
+                        f"{conv['sample_id']}: stored gold length {len(row['gold'])} != gold_n {gold_n}"
+                    )
+                row["gold_n"] = gold_n
+                row["T_coverage5"] = t_cov5
+                row["T_coverage10"] = t_cov10
+                row["T_all_gold5"] = t_all5
+                row["T_all_gold10"] = t_all10
+                row["T_mrr"] = t_mrr
+                for name, _profile, _channel, _paused, metrics in _ARMS:
+                    for metric_name in metrics:
+                        metric = scored_by_arm[name][metric_name]
+                        prefix = f"{name}_{metric_name}"
+                        row[f"{prefix}_coverage5"] = metric.coverage5
+                        row[f"{prefix}_coverage10"] = metric.coverage10
+                        row[f"{prefix}_all_gold5"] = metric.all_gold5
+                        row[f"{prefix}_all_gold10"] = metric.all_gold10
+                        row[f"{prefix}_mrr"] = metric.mrr
                 per_question.append(row)
             print(
                 f"[{conv['sample_id']}] atoms={len(atoms)} blocks={len(revision.blocks)} "
@@ -574,7 +917,7 @@ def main() -> None:
     if total_q == 0:
         _fail("no questions with evidence")
 
-    _print_tables(overall, token, by_cat, total_q, top10_differs, len(problems))
+    _print_tables(overall, token, by_cat, by_gold, total_q, top10_differs, len(problems))
     print(
         f"\nprojection payload_ref != card_id: {stats['payload_ne_card_id']} "
         "(dedup still uses source_pointer['card_id'])"
@@ -600,23 +943,10 @@ def main() -> None:
         _fail("; ".join(shown) + suffix)
 
     if not args.limit_convs:
-        paused = overall["P_legacy"]["legacy"]
-        got = {
-            "P_hit5": _pct(paused["hit5"], total_q),
-            "P_hit10": _pct(paused["hit10"], total_q),
-            "P_zero": _pct(paused["zero"], total_q),
-            "T_hit5": _pct(token["hit5"], total_q),
-            "T_hit10": _pct(token["hit10"], total_q),
-        }
-        expected = {
-            "P_hit5": _BASELINE_P_HIT5,
-            "P_hit10": _BASELINE_P_HIT10,
-            "P_zero": _BASELINE_P_ZERO,
-            "T_hit5": _BASELINE_T_HIT5,
-            "T_hit10": _BASELINE_T_HIT10,
-        }
-        if got != expected:
-            _fail(f"P/T drifted from the frozen baseline: got {got} expected {expected}")
+        _print_r6e_gate(overall, token, total_q)
+        drifts = _r6e_drift(overall, token, total_q)
+        if drifts:
+            _fail("R6e any-hit drift: " + "; ".join(drifts))
         print("P/T match the frozen baseline (P 0.0%/0.0%/empty 100.0%, T 56.0%/61.8%).")
     else:
         print("baseline gate skipped (--limit-convs).")
