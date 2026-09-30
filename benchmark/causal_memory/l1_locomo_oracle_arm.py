@@ -47,14 +47,14 @@ from l1_locomo_ranked_arm import (
     PROFILE_A4,
     PROFILE_B12,
     PROJECTION_PROFILE,
-    _Hit,
-    _Metric,
     _add,
     _check_family,
     _coverage_bundle,
     _fail,
     _gold_bucket,
+    _Hit,
     _inconsistent,
+    _Metric,
     _pct,
     _print_r6e_gate,
     _question_keywords,
@@ -228,7 +228,9 @@ def _audit_observations(conversations: list[dict]) -> dict[str, Any]:
         within_multi += sum(1 for texts in by_dia.values() if len(texts) > 1)
         message_ids = _message_ids(conv)
         anchored = sum(1 for dia in message_ids if dia in by_dia)
-        unmatched_entries += sum(len(texts) for dia, texts in by_dia.items() if dia not in message_ids)
+        unmatched_entries += sum(
+            len(texts) for dia, texts in by_dia.items() if dia not in message_ids
+        )
         messages += len(message_ids)
         anchored_messages += anchored
         per_conv.append(
@@ -285,7 +287,11 @@ def _observation_index(obs: dict[str, Any]) -> tuple[dict[str, list[str]], int]:
                 malformed += 1
                 continue
             for item in items:
-                if not isinstance(item, (list, tuple)) or len(item) != 2 or not isinstance(item[1], str):
+                if (
+                    not isinstance(item, (list, tuple))
+                    or len(item) != 2
+                    or not isinstance(item[1], str)
+                ):
                     malformed += 1
                     continue
                 text = item[0]
@@ -446,9 +452,7 @@ def _freeze_variant(
     if revision.retrieval_subgraphs:
         _fail(f"{session_id} {variant}: expected no subgraphs")
     if len(revision.blocks) != n_messages:
-        _fail(
-            f"{session_id} {variant}: blocks {len(revision.blocks)} != messages {n_messages}"
-        )
+        _fail(f"{session_id} {variant}: blocks {len(revision.blocks)} != messages {n_messages}")
     registry = ProjectionRegistry(work / f"projections-{variant}.jsonl")
     cards = registry.register(revision, acl_labels=tuple(LABELS))
     visible = registry.search(principal_labels=tuple(LABELS))
@@ -508,7 +512,9 @@ def _metric_from_packed(blob: dict[str, Any], pool: int, union: int) -> _Metric:
     )
 
 
-def _empty_overall(specs: tuple[tuple[str, dict[str, int], str, str, str], ...]) -> dict[str, dict[str, Counter]]:
+def _empty_overall(
+    specs: tuple[tuple[str, dict[str, int], str, str, str], ...],
+) -> dict[str, dict[str, Counter]]:
     return {name: {metric: Counter() for metric in METRICS} for name, *_rest in specs}
 
 
@@ -874,7 +880,9 @@ def _merge_gold(by_gold: dict[str, dict[str, Any]]) -> dict[str, Any]:
     return merged
 
 
-def _mean_pin(drifts: list[str], label: str, counter: Counter, total: int, expected: dict[str, str]) -> None:
+def _mean_pin(
+    drifts: list[str], label: str, counter: Counter, total: int, expected: dict[str, str]
+) -> None:
     got = {
         "coverage10": _pct(counter["coverage10"], total),
         "all_gold10": _pct(counter["all_gold10"], total),
@@ -885,7 +893,9 @@ def _mean_pin(drifts: list[str], label: str, counter: Counter, total: int, expec
             drifts.append(f"{label} {key} got {got[key]} expected {want}")
 
 
-def _group_counter(group: str, arm: str, by_gold: dict[str, dict[str, Any]], by_cat: dict[Any, dict[str, Any]]) -> tuple[Counter, int]:
+def _group_counter(
+    group: str, arm: str, by_gold: dict[str, dict[str, Any]], by_cat: dict[Any, dict[str, Any]]
+) -> tuple[Counter, int]:
     if group.startswith("gold:"):
         bucket_name = group.split(":", 1)[1]
         bucket = by_gold.get(bucket_name)
@@ -985,10 +995,16 @@ def _print_annotation(audit: dict[str, Any]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", default="/home/zhoujie22/river2_0/evol_bench/LoCoMo/data/locomo/locomo10.json")
-    parser.add_argument("--out", required=True, help="checkpoint JSON, rewritten after each conversation")
+    parser.add_argument(
+        "--data", default="/home/zhoujie22/river2_0/evol_bench/LoCoMo/data/locomo/locomo10.json"
+    )
+    parser.add_argument(
+        "--out", required=True, help="checkpoint JSON, rewritten after each conversation"
+    )
     parser.add_argument("--limit-convs", type=int, default=0, help="0 = all")
-    parser.add_argument("--resume", action="store_true", help="skip conversations already complete in --out")
+    parser.add_argument(
+        "--resume", action="store_true", help="skip conversations already complete in --out"
+    )
     args = parser.parse_args()
     started = time.perf_counter()
 
@@ -1107,7 +1123,9 @@ def main() -> None:
                         _fail(f"{session_id} {variant}.{config}: fact_lane_paused is not False")
             probe_counts = None
             if not probed:
-                unresolved_fallback = _unresolved_facade(work, session_id, fallback_registry, fallback)
+                unresolved_fallback = _unresolved_facade(
+                    work, session_id, fallback_registry, fallback
+                )
                 probe_counts = {
                     "placeholder_no_resolver_card": _probe_card_keyword(
                         facades["placeholder.no_resolver"], "placeholder.no_resolver"
@@ -1162,9 +1180,7 @@ def main() -> None:
 
     total_q = len(folded_rows)
     disagreements = _top10_disagreements(folded_rows)
-    _print_tables(
-        specs, overall, token, by_cat, by_gold, total_q, cards_returned, disagreements
-    )
+    _print_tables(specs, overall, token, by_cat, by_gold, total_q, cards_returned, disagreements)
     print(
         f"\nprojection payload_ref != card_id: {stats['payload_ne_card_id']} "
         "(dedup still uses source_pointer['card_id'])"
@@ -1220,9 +1236,7 @@ def main() -> None:
         for seat in SEATS:
             name = _oracle_arm_name("placeholder", "no_resolver", seat)
             if cards_returned[name] != 0:
-                _fail(
-                    f"{name} retrieved {cards_returned[name]} cards on this slice; expected 0"
-                )
+                _fail(f"{name} retrieved {cards_returned[name]} cards on this slice; expected 0")
     print("gates passed.")
 
 
