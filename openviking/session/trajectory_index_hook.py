@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Post-commit trajectory index hook.
 
-``session.py`` calls :func:`maybe_index_session_trajectory` once, after archive
-attribution in Phase 1. Legacy mode is one boolean check and returns. Causal
+``session.py`` calls :func:`maybe_index_session_trajectory` after archive
+attribution in Phase 1, and again from Phase 2 only when an extraction
+provider is injected. Legacy mode is one boolean check and returns. Causal
 mode pages the real AO ledger, enqueues one ``IndexJob``, and drives
 ``process_next``. The service is always given a ``fallback_session`` so the
 synthetic one-AO fallback is not the production path. Failures are logged and
@@ -49,6 +50,8 @@ from openviking.session.session_acl import session_acl_callback
 from openviking.session.trajectory_index import (
     PRIORITY_SUCCEEDED,
     IndexJob,
+    IndexedResult,
+    SkippedResult,
     TrajectoryIndexService,
     WorkspacePolicy,
 )
@@ -277,7 +280,9 @@ def _index_commit(
         **service_kwargs,
     )
     service.enqueue(job)
-    service.process_next(_policy(config))
+    result = service.process_next(_policy(config))
+    if extraction_provider is not None:
+        _log_phase2_index_result(result)
 
 
 def _projection_registry(session: Any, session_dir: Path) -> ProjectionRegistry | None:
@@ -297,6 +302,23 @@ def _projection_registry(session: Any, session_dir: Path) -> ProjectionRegistry 
     return ProjectionRegistry(
         session_dir / PROJECTIONS_FILENAME,
         session_acl=session_acl,
+    )
+
+
+def _log_phase2_index_result(result: IndexedResult | SkippedResult) -> None:
+    """Record the Phase 2 build outcome. A skip used to be silent."""
+    if isinstance(result, SkippedResult):
+        logger.warning(
+            "phase2 trajectory index skipped reason=%s job_id=%s",
+            result.reason,
+            result.job_id,
+        )
+        return
+    logger.info(
+        "phase2 trajectory index indexed revision_id=%s construction_mode=%s job_id=%s",
+        result.revision.revision_id,
+        result.revision.construction_mode,
+        result.job.job_id,
     )
 
 

@@ -82,6 +82,7 @@ from openviking_cli.utils.config import get_openviking_config
 if TYPE_CHECKING:
     from openviking.config.vlm import VLMResolver
     from openviking.session.compressor_v3 import SessionCompressorV3 as SessionCompressor
+    from openviking.session.extraction_write import ExtractionProvider
     from openviking.storage import VikingDBManager
     from openviking.storage.queuefs.session_commit_msg import SessionCommitMsg
     from openviking.storage.viking_fs import VikingFS
@@ -432,6 +433,8 @@ class Session:
         agent_evolution_enabled_provider: Optional[Callable[[], bool | Awaitable[bool]]] = None,
         memory_policy_provider: Optional[MemoryPolicyProvider] = None,
         vlm_resolver: Optional["VLMResolver"] = None,
+        *,
+        extraction_provider: Optional["ExtractionProvider"] = None,
     ):
         self._viking_fs = viking_fs
         self._vikingdb_manager = vikingdb_manager
@@ -471,6 +474,7 @@ class Session:
         self._memory_policy_provider = memory_policy_provider
         self._usage_reporter = usage_reporter
         self._vlm_resolver = vlm_resolver
+        self._extraction_provider = extraction_provider
 
     async def _get_vlm_config(self):
         if self._vlm_resolver is None:
@@ -1933,6 +1937,25 @@ class Session:
         return contexts
 
     @tracer("session.commit.phase2", ignore_result=True, ignore_args=True)
+    def _run_post_extraction_causal_seam(self, task_id: str) -> None:
+        """Phase 2 trajectory index. Failures must not block ``.done``.
+
+        No provider means the hook is not called: Phase 1 already froze the
+        fallback revision, and another provider-less build would spend the
+        trajectory-index budget without changing that view.
+        """
+        try:
+            provider = self._extraction_provider
+            if provider is None:
+                return
+            maybe_index_session_trajectory(
+                self,
+                task_id,
+                extraction_provider=provider,
+            )
+        except Exception:
+            logger.warning("post-extraction causal seam failed", exc_info=True)
+
     async def _run_memory_extraction(
         self,
         task_id: str,
@@ -2282,6 +2305,7 @@ class Session:
                                 len(extracted_skill_results),
                             )
                         get_current_telemetry().set("memory.extracted", total_extracted)
+                        self._run_post_extraction_causal_seam(task_id)
                     else:
                         if self._session_compressor:
                             logger.info(

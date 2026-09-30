@@ -578,7 +578,7 @@ def test_configured_provider_freezes_payload_through_process_next(
     assert seen == [(HOOK_SESSION, HOOK_TASK, "unspecified")]
     assert revision is not None
     assert revision.construction_mode == CONSTRUCTION_MODE_ADAPTIVE
-    assert revision.revision_id == f"post-run:{HOOK_SESSION}:{HOOK_TASK}"
+    assert revision.revision_id == f"post-run:{HOOK_SESSION}:{HOOK_TASK}:adaptive"
     assert [item.subgraph_id for item in revision.retrieval_subgraphs] == ["sg-cutover", "sg-note"]
     assert revision.retrieval_subgraphs[1].is_failure is True
     assert InfluenceViewRevision.from_dict(revision.to_dict()) == revision
@@ -606,7 +606,7 @@ def test_repeat_extraction_does_not_register_a_second_view(tmp_path: Path) -> No
     assert len(history) == 1
     assert history[0].task_run_id == HOOK_TASK
     assert history[0].construction_mode == CONSTRUCTION_MODE_ADAPTIVE
-    assert history[0].revision_id == f"post-run:{HOOK_SESSION}:{HOOK_TASK}"
+    assert history[0].revision_id == f"post-run:{HOOK_SESSION}:{HOOK_TASK}:adaptive"
 
 
 @pytest.mark.asyncio

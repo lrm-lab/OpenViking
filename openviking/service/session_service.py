@@ -49,6 +49,7 @@ logger = get_logger(__name__)
 if TYPE_CHECKING:
     from openviking.config.vlm import VLMResolver
     from openviking.session.compressor_v3 import SessionCompressorV3
+    from openviking.session.extraction_write import ExtractionProvider
     from openviking.usage_reporter import UsageReporter
 
 
@@ -71,6 +72,7 @@ class SessionService:
         self._default_user_memory_policy: Optional[Dict[str, Any]] = None
         self._default_user_auto_commit_policy: Optional[Dict[str, Any]] = None
         self._usage_reporter: Optional["UsageReporter"] = None
+        self._extraction_provider: Optional["ExtractionProvider"] = None
         # Server-wide controls remain disabled until configured during app setup.
         self._session_auto_commit_config = SessionAutoCommitConfig()
         # Per-worker in-flight guard so bursts don't spawn duplicate commit
@@ -98,6 +100,14 @@ class SessionService:
     ) -> None:
         """Set tool output externalization controls for newly created sessions."""
         self._tool_output_externalization_config = config.model_copy(deep=True)
+
+    def set_extraction_provider(self, provider: Optional["ExtractionProvider"]) -> None:
+        """Set the Phase 2 extraction provider for newly created sessions.
+
+        ``None`` leaves Phase 2 on the Phase 1 fallback revision. This is not
+        read from config.
+        """
+        self._extraction_provider = provider
 
     def set_default_user_memory_policy(self, memory_policy: Optional[Dict[str, Any]]) -> None:
         """Set the server fallback used when a User has no persisted policy."""
@@ -218,6 +228,7 @@ class SessionService:
             memory_policy_provider=lambda: self._get_user_memory_policy(ctx),
             usage_reporter=self._usage_reporter,
             vlm_resolver=self._vlm_resolver,
+            extraction_provider=self._extraction_provider,
         )
 
     async def _get_user_memory_policy(self, ctx: RequestContext) -> Optional[Dict[str, Any]]:

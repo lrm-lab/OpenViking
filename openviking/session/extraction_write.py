@@ -176,10 +176,11 @@ def extraction_index_builder(
     """Return a trajectory-index ``Builder`` that freezes ``provider`` output.
 
     The provider is called as ``provider(session_id, task_run_id, outcome_status)``
-    and must return an :class:`ExtractionPayload`. View identity matches the
-    post-run commit hook: ``view_id`` is ``{session_id}:post_run_index`` and
-    ``revision_id`` is ``post-run:{session_id}:{task_run_id}``. ``frozen_at``
-    is the commit timestamp the hook already stored on the job.
+    and must return an :class:`ExtractionPayload`. ``view_id`` matches the
+    post-run commit hook (``{session_id}:post_run_index``). ``revision_id`` is
+    ``post-run:{session_id}:{task_run_id}:adaptive`` so it does not collide
+    with the Phase 1 fallback id ``post-run:{session_id}:{task_run_id}``.
+    ``frozen_at`` is the commit timestamp the hook already stored on the job.
 
     A refused freeze propagates. This builder does not degrade to fallback.
     """
@@ -195,7 +196,7 @@ def extraction_index_builder(
             session_id=session_id,
             task_run_id=task_run_id,
             view_id=f"{session_id}:{PURPOSE_POST_RUN_INDEX}",
-            revision_id=f"post-run:{session_id}:{task_run_id}",
+            revision_id=f"post-run:{session_id}:{task_run_id}:adaptive",
             frozen_at=stamp,
             blocks=payload.blocks,
             claims=payload.claims,
