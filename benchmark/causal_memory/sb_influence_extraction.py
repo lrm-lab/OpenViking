@@ -25,54 +25,99 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-_ROOT = Path(__file__).resolve().parents[2]
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
 
-import openviking.session.ao_ledger as ao_ledger_mod
-from openviking.session.ao_ledger import AOLedger
-from openviking.session.bm25 import BM25Index, tokenize
-from openviking.session.causal_experiences import (
-    SEVEN_SECTION_KEYS,
-    CausalExperiencesStore,
-)
-from openviking.session.extraction_write import freeze_extracted_view
-from openviking.session.influence_projection import ProjectionRegistry
-from openviking.session.influence_view import (
-    MAX_RETRIEVAL_SUBGRAPH_BLOCKS,
-    PURPOSE_POST_RUN_INDEX,
-    RELATION_INFLUENCE,
-    RELATION_SKIP,
-    ROLE_CONCLUSION,
-    ROLE_TASK,
-    AORange,
-    CoverageManifest,
-    HighSeverityViolation,
-    InfluenceBlock,
-    InfluenceClaim,
-    InfluenceEvidenceRef,
-    InfluenceViewRevision,
-    OmittedRange,
-    RetrievalSubgraph,
-    SegmentRef,
-    SourceRef,
-)
-from openviking.session.retrieval_facade import (
-    CAUSAL_MEMORY_CAP,
-    ForkBranchAdapter,
-    HybridRetrievalFacade,
-    InfluenceProjectionAdapter,
-    SegmentAtomAdapter,
-)
-from openviking.session.subgraph_forks import (
-    default_failure_grounding_position,
-    write_failure_subgraph_fork,
-)
-from openviking.session.trajectory_index_hook import (
-    _page_ao_records,
-    _stable_snapshot_watermark,
-    _view_ao_record,
-)
+def _load_openviking() -> None:
+    """Put the repo root on ``sys.path`` and bind the OpenViking names.
+
+    The imports live in this function so they are not module-level imports
+    after a path edit (ruff E402). The bound names are the same objects the
+    rest of this file already used.
+    """
+    root = Path(__file__).resolve().parents[2]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    global AOLedger
+    global AORange
+    global BM25Index
+    global CAUSAL_MEMORY_CAP
+    global CausalExperiencesStore
+    global CoverageManifest
+    global ForkBranchAdapter
+    global HighSeverityViolation
+    global HybridRetrievalFacade
+    global InfluenceBlock
+    global InfluenceClaim
+    global InfluenceEvidenceRef
+    global InfluenceProjectionAdapter
+    global InfluenceViewRevision
+    global MAX_RETRIEVAL_SUBGRAPH_BLOCKS
+    global OmittedRange
+    global PURPOSE_POST_RUN_INDEX
+    global ProjectionRegistry
+    global RELATION_INFLUENCE
+    global RELATION_SKIP
+    global ROLE_CONCLUSION
+    global ROLE_TASK
+    global RetrievalSubgraph
+    global SEVEN_SECTION_KEYS
+    global SegmentAtomAdapter
+    global SegmentRef
+    global SourceRef
+    global _page_ao_records
+    global _stable_snapshot_watermark
+    global _view_ao_record
+    global ao_ledger_mod
+    global default_failure_grounding_position
+    global freeze_extracted_view
+    global tokenize
+    global write_failure_subgraph_fork
+    import openviking.session.ao_ledger as ao_ledger_mod
+    from openviking.session.ao_ledger import AOLedger
+    from openviking.session.bm25 import BM25Index, tokenize
+    from openviking.session.causal_experiences import (
+        SEVEN_SECTION_KEYS,
+        CausalExperiencesStore,
+    )
+    from openviking.session.extraction_write import freeze_extracted_view
+    from openviking.session.influence_projection import ProjectionRegistry
+    from openviking.session.influence_view import (
+        MAX_RETRIEVAL_SUBGRAPH_BLOCKS,
+        PURPOSE_POST_RUN_INDEX,
+        RELATION_INFLUENCE,
+        RELATION_SKIP,
+        ROLE_CONCLUSION,
+        ROLE_TASK,
+        AORange,
+        CoverageManifest,
+        HighSeverityViolation,
+        InfluenceBlock,
+        InfluenceClaim,
+        InfluenceEvidenceRef,
+        InfluenceViewRevision,
+        OmittedRange,
+        RetrievalSubgraph,
+        SegmentRef,
+        SourceRef,
+    )
+    from openviking.session.retrieval_facade import (
+        CAUSAL_MEMORY_CAP,
+        ForkBranchAdapter,
+        HybridRetrievalFacade,
+        InfluenceProjectionAdapter,
+        SegmentAtomAdapter,
+    )
+    from openviking.session.subgraph_forks import (
+        default_failure_grounding_position,
+        write_failure_subgraph_fork,
+    )
+    from openviking.session.trajectory_index_hook import (
+        _page_ao_records,
+        _stable_snapshot_watermark,
+        _view_ao_record,
+    )
+
+
+_load_openviking()
 
 SCHEMA = "r8a-v1"
 FROZEN_AT = "2026-09-30T00:00:00.000Z"
@@ -407,7 +452,7 @@ def _episode_dirs() -> list[Path]:
     dirs = sorted(path for path in SB_EPISODES.iterdir() if path.is_dir())
     codes = [path.name[:4] for path in dirs]
     if codes != [f"{index:04d}" for index in range(1, 15)]:
-        _fail(f"episode dirs are { [path.name for path in dirs] }, expected 0001..0014")
+        _fail(f"episode dirs are {[path.name for path in dirs]}, expected 0001..0014")
     return dirs
 
 
@@ -549,7 +594,9 @@ def _parse_transcript(episode_dir: Path) -> dict[str, Any]:
     }
 
 
-def _append_ledger(session_dir: Path, session_id: str, parsed: dict[str, Any], episode_index: int) -> list[dict[str, Any]]:
+def _append_ledger(
+    session_dir: Path, session_id: str, parsed: dict[str, Any], episode_index: int
+) -> list[dict[str, Any]]:
     if session_dir.exists():
         for child in session_dir.iterdir():
             if child.is_file():
@@ -596,11 +643,12 @@ def _append_ledger(session_dir: Path, session_id: str, parsed: dict[str, Any], e
     paged = [_view_ao_record(row, session_id) for row in _page_ao_records(session_dir, session_id)]
     paged.sort(key=lambda row: (row["sequence"], row["ao_id"]))
     if len(paged) != len(parsed["items"]):
-        _fail(
-            f"{session_id}: paged {len(paged)} AO rows, transcript items {len(parsed['items'])}"
-        )
+        _fail(f"{session_id}: paged {len(paged)} AO rows, transcript items {len(parsed['items'])}")
     for item, row in zip(parsed["items"], paged, strict=True):
-        if row["participant_id"] != item["participant_id"] or row["segment_id"] != item["segment_id"]:
+        if (
+            row["participant_id"] != item["participant_id"]
+            or row["segment_id"] != item["segment_id"]
+        ):
             _fail(f"{session_id}: ledger did not keep segment/participant at seq {row['sequence']}")
         if not row["ao_id"] or not row["content_hash"]:
             _fail(f"{session_id}: AO seq {row['sequence']} missing id or content hash")
@@ -663,7 +711,9 @@ def _build_blocks(
             commands = " ; ".join(command for _name, command in calls)
             block_input = _clip(item["input_text"], TEXT_CLIP)
             block_output = _clip(commands, TEXT_CLIP)
-            summary = (" ".join(f"pattern:{pattern}" for pattern in patterns) + " " + block_output).strip()
+            summary = (
+                " ".join(f"pattern:{pattern}" for pattern in patterns) + " " + block_output
+            ).strip()
             summary = summary or "tool_call"
         elif item["kind"] == "tool_result":
             role = "agent_action"
@@ -1147,9 +1197,7 @@ def _revision_of(payload: dict[str, Any] | None) -> InfluenceViewRevision | None
 def _basis_for(revision: InfluenceViewRevision, subgraph: RetrievalSubgraph) -> dict[str, Any]:
     anchor_seq = subgraph.failure_evidence_refs[0].source_sequence
     earlier = [
-        block
-        for block in revision.blocks
-        if block.ao_end_seq < anchor_seq and block.source_refs
+        block for block in revision.blocks if block.ao_end_seq < anchor_seq and block.source_refs
     ]
     if not earlier:
         _fail(f"{revision.session_id}: no AO strictly before the failure anchor")
@@ -1234,7 +1282,9 @@ def _new_store(root: Path) -> CausalExperiencesStore:
 
 
 def _run_forks(records: list[dict[str, Any]], work: Path, caliber: str) -> list[dict[str, Any]]:
-    wanted = [record for record in records if record["in_narrow" if caliber == "narrow" else "in_wide"]]
+    wanted = [
+        record for record in records if record["in_narrow" if caliber == "narrow" else "in_wide"]
+    ]
     store = _new_store(work / f"forks-{caliber}")
     rows: list[dict[str, Any]] = []
     for record in wanted:
@@ -1274,7 +1324,9 @@ def _run_forks(records: list[dict[str, Any]], work: Path, caliber: str) -> list[
                 f"{sorted(set(after_negative) - set(before_negative))}"
             )
         if "workspace_labels" not in negative_error:
-            _fail(f"{record['episode_dir']}: ACL error did not name workspace_labels: {negative_error}")
+            _fail(
+                f"{record['episode_dir']}: ACL error did not name workspace_labels: {negative_error}"
+            )
         first = _write_fork(store, revision, record, payload)
         readback = _readback(store, first, revision, payload)
         before_second = _files(work / f"forks-{caliber}")
@@ -1370,7 +1422,10 @@ def _control_gate(record: dict[str, Any], ledger_root: Path) -> dict[str, Any]:
     if revision is None or len(revision.blocks) < 2:
         _fail("control gate needs a frozen episode with two blocks")
     session_id = revision.session_id
-    paged = [_view_ao_record(row, session_id) for row in _page_ao_records(ledger_root / session_id, session_id)]
+    paged = [
+        _view_ao_record(row, session_id)
+        for row in _page_ao_records(ledger_root / session_id, session_id)
+    ]
     ledger = _ledger_index(paged)
     fake = InfluenceEvidenceRef(
         ao_id="forged-ao-not-in-ledger",
@@ -1405,7 +1460,9 @@ def _control_gate(record: dict[str, Any], ledger_root: Path) -> dict[str, Any]:
     dangling_codes = list(dangling.get("codes") or [])
     if "dangling_claim" not in dangling_codes:
         _fail(f"forged block endpoint was not rejected, result={dangling}")
-    print("CONTROL forged claim rejected " + json.dumps(dangling, ensure_ascii=False, sort_keys=True))
+    print(
+        "CONTROL forged claim rejected " + json.dumps(dangling, ensure_ascii=False, sort_keys=True)
+    )
     bad_subgraph = RetrievalSubgraph(
         subgraph_id="sg-forged",
         block_ids=(revision.blocks[0].block_id,),
@@ -1421,7 +1478,10 @@ def _control_gate(record: dict[str, Any], ledger_root: Path) -> dict[str, Any]:
     unknown_codes = list(unknown.get("codes") or [])
     if "subgraph_unknown_member" not in unknown_codes:
         _fail(f"forged claim_id was not rejected, result={unknown}")
-    print("CONTROL forged claim_id rejected " + json.dumps(unknown, ensure_ascii=False, sort_keys=True))
+    print(
+        "CONTROL forged claim_id rejected "
+        + json.dumps(unknown, ensure_ascii=False, sort_keys=True)
+    )
     real_source = revision.blocks[0]
     real_target = revision.blocks[1]
     forged_evidence_claim = InfluenceClaim(
@@ -1497,7 +1557,9 @@ def _freeze_or_codes(
     return {"rejected": False, "codes": []}
 
 
-def _card_patterns(card: Any, record_by_session: dict[str, dict[str, Any]], fork_owner: dict[str, str]) -> tuple[str, set[str]]:
+def _card_patterns(
+    card: Any, record_by_session: dict[str, dict[str, Any]], fork_owner: dict[str, str]
+) -> tuple[str, set[str]]:
     pointer = card.source_pointer or {}
     if card.kind in {"block_projection", "claim_projection"}:
         session_id = pointer.get("session_id")
@@ -1542,7 +1604,9 @@ def _structural_search(
         if fork_row is None:
             continue
         revision_payload = record["revision"]
-        if record["revision_wide"] is not None and fork_row["view_revision_id"].startswith("r8a-wide:"):
+        if record["revision_wide"] is not None and fork_row["view_revision_id"].startswith(
+            "r8a-wide:"
+        ):
             revision_payload = record["revision_wide"]
         revision = _revision_of(revision_payload)
         if revision is None:
@@ -1647,17 +1711,18 @@ def _score_leave_one_out(
     }
 
 
-def _run_l3(records: list[dict[str, Any]], fork_tables: dict[str, list[dict[str, Any]]], work: Path, tests: list[dict[str, Any]]) -> dict[str, Any]:
+def _run_l3(
+    records: list[dict[str, Any]],
+    fork_tables: dict[str, list[dict[str, Any]]],
+    work: Path,
+    tests: list[dict[str, Any]],
+) -> dict[str, Any]:
     by_caliber: dict[str, Any] = {}
     for caliber, fork_rows in fork_tables.items():
         per_episode = []
         for held in records:
             corpus = [record for record in records if record["episode_dir"] != held["episode_dir"]]
-            fork_corpus = [
-                row
-                for row in fork_rows
-                if row["episode_dir"] != held["episode_dir"]
-            ]
+            fork_corpus = [row for row in fork_rows if row["episode_dir"] != held["episode_dir"]]
             tag = f"{caliber}-{held['episode_dir']}"
             structural = _structural_search(corpus, fork_corpus, work, tag)(held["query_prefix"])
             lexical = _lexical_hits(held["query_prefix"], corpus)
