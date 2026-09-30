@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -417,6 +418,47 @@ def test_marked_subgraph_without_evidence_does_not_invent_an_anchor(tmp_path: Pa
     assert _revision_files(tmp_path / "store") == []
 
 
+def _store_tree(root: Path) -> set[str]:
+    if not root.exists():
+        return set()
+    return {path.relative_to(root).as_posix() for path in root.rglob("*")}
+
+
+def test_forged_anchor_with_caller_position_is_not_written(tmp_path: Path) -> None:
+    """A caller-supplied block position must cover failure_evidence_refs[0]."""
+    revision = _release_revision()
+    forged_subgraphs = []
+    for subgraph in revision.retrieval_subgraphs:
+        if subgraph.subgraph_id != "sg-cutover":
+            forged_subgraphs.append(subgraph)
+            continue
+        forged = replace(
+            subgraph.failure_evidence_refs[0],
+            ao_id="ao-forged-not-on-any-block",
+        )
+        forged_subgraphs.append(replace(subgraph, failure_evidence_refs=(forged,)))
+    forged_revision = _freeze(
+        _SESSION,
+        "rev-forged-anchor",
+        list(revision.blocks),
+        forged_subgraphs,
+        claims=list(revision.claims),
+    )
+    store = _store(tmp_path)
+    root = tmp_path / "store"
+    before = _store_tree(root)
+    with pytest.raises(ValueError, match="does not cover failure evidence"):
+        _write(
+            store,
+            forged_revision,
+            "sg-cutover",
+            position_kind="block",
+            position_ref="block:b-rate",
+        )
+    assert _store_tree(root) == before
+    assert _revision_files(root) == []
+
+
 def test_grounding_outside_subgraph_is_rejected(tmp_path: Path) -> None:
     revision = _release_revision()
     store = _store(tmp_path)
@@ -667,9 +709,7 @@ def test_revision_lookup_distinguishes_missing_from_not_unique(tmp_path: Path) -
         )
     root = tmp_path / "store"
     store = CausalExperiencesStore(root, config=_CAUSAL)
-    adapter = RetrievalSubgraphAdapter(
-        index, ForkBranchAdapter(root, store), session_acl=_allow
-    )
+    adapter = RetrievalSubgraphAdapter(index, ForkBranchAdapter(root, store), session_acl=_allow)
     with pytest.raises(ValueError, match="not unique in the supersede index") as shared:
         adapter.retrieve_historical_subgraphs("rev-shared", "sg-cutover", _PRINCIPAL)
     assert "is not in the supersede index" not in str(shared.value)

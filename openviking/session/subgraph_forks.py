@@ -25,6 +25,13 @@ Implementation choices the design leaves open:
   ``source_refs`` contain that failure AO (``ao_id``, session, and
   sequence). Zero or several matches raise. The position is a block, not
   an edge: the failure evidence is an AO, and a block is what covers an AO.
+* A caller-supplied ``position_kind="block"`` must name a block on the
+  revision whose ``source_refs`` cover ``failure_evidence_refs[0]``
+  (``_block_covers_evidence``: same ``ao_id``, session, and sequence).
+  A miss raises before any draft is submitted, so nothing is written.
+  Other position kinds are not checked against that AO. They still have
+  to sit inside the subgraph and yield a non-empty summary snapshot.
+  ``validate_view`` still does not resolve evidence against a ledger.
 * ``semantic_summary_snapshot`` is the block ``summary``, or for an edge the
   claim's ``carried_artifact`` and ``downstream_effect`` joined by a newline.
   An empty snapshot raises.
@@ -66,9 +73,7 @@ from openviking.session.influence_view import (
 from openviking.session.retrieval_facade import _position_inside_subgraph
 
 _NODE_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "openviking.failure-subgraph-fork-node")
-_REVISION_NAMESPACE = uuid.uuid5(
-    uuid.NAMESPACE_URL, "openviking.failure-subgraph-fork-revision"
-)
+_REVISION_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "openviking.failure-subgraph-fork-revision")
 _UNRESOLVED_SUMMARY = "unresolved"
 
 
@@ -201,9 +206,11 @@ def write_failure_subgraph_fork(
     )
     if not _position_inside_subgraph(grounding, subgraph):
         raise ValueError(
-            f"grounding position {kind}:{ref!r} is not inside "
-            f"subgraph {subgraph.subgraph_id!r}"
+            f"grounding position {kind}:{ref!r} is not inside subgraph {subgraph.subgraph_id!r}"
         )
+    # Block positions must cover the anchor. Edge and any other kind that
+    # the inside-subgraph parser accepts keep the rules above and below.
+    _require_block_position_covers_anchor(revision, subgraph, evidence, kind, ref)
     if summary is None:
         raise ValueError(
             f"cannot derive semantic_summary_snapshot for grounding position {kind}:{ref!r}"
@@ -219,9 +226,7 @@ def write_failure_subgraph_fork(
     fork_node_id = str(
         uuid.uuid5(
             _NODE_NAMESPACE,
-            _canonical_dumps(
-                {"workspace_id": workspace, "anchor": canonical_anchor_key(anchor)}
-            ),
+            _canonical_dumps({"workspace_id": workspace, "anchor": canonical_anchor_key(anchor)}),
         )
     )
     revision_id = str(
@@ -242,9 +247,7 @@ def write_failure_subgraph_fork(
         "workspace_id": workspace,
         "anchor": anchor,
         "seven_sections": _seven_sections(seven_sections),
-        "contemporaneous_basis": _evidence_payload(
-            contemporaneous_basis, "contemporaneous_basis"
-        ),
+        "contemporaneous_basis": _evidence_payload(contemporaneous_basis, "contemporaneous_basis"),
         "hindsight_attribution": _evidence_payload(
             () if hindsight_attribution is None else hindsight_attribution,
             "hindsight_attribution",
@@ -269,13 +272,9 @@ def _require_failure_subgraph(
     if not isinstance(revision, InfluenceViewRevision):
         raise ValueError("revision must be an InfluenceViewRevision")
     identity = _require_str(subgraph_id, "subgraph_id")
-    matches = [
-        item for item in revision.retrieval_subgraphs if item.subgraph_id == identity
-    ]
+    matches = [item for item in revision.retrieval_subgraphs if item.subgraph_id == identity]
     if not matches:
-        raise ValueError(
-            f"subgraph {identity!r} is not on view revision {revision.revision_id!r}"
-        )
+        raise ValueError(f"subgraph {identity!r} is not on view revision {revision.revision_id!r}")
     if len(matches) != 1:
         raise ValueError(
             f"subgraph {identity!r} is not unique on view revision {revision.revision_id!r}"
@@ -293,6 +292,36 @@ def _failure_anchor_evidence(subgraph: RetrievalSubgraph):
             "cannot derive an ao anchor"
         )
     return subgraph.failure_evidence_refs[0]
+
+
+def _require_block_position_covers_anchor(
+    revision: InfluenceViewRevision,
+    subgraph: RetrievalSubgraph,
+    evidence: Any,
+    position_kind: str,
+    position_ref: str,
+) -> None:
+    """Reject a block position that does not cover the failure anchor.
+
+    ``position_kind="block"`` requires ``position_ref`` ``block:<block_id>``
+    and ``_block_covers_evidence`` on that block. The check runs only after
+    the position is already inside the subgraph, and before any store write.
+    Any other ``position_kind`` returns without looking at the anchor.
+    """
+    if position_kind != "block":
+        return
+    prefix, separator, ident = position_ref.partition(":")
+    block = None
+    if separator == ":" and prefix == "block" and ident:
+        for item in revision.blocks:
+            if item.block_id == ident:
+                block = item
+                break
+    if block is None or not _block_covers_evidence(block, evidence):
+        raise ValueError(
+            f"block position {position_ref!r} does not cover failure evidence "
+            f"ao {evidence.ao_id!r} on subgraph {subgraph.subgraph_id!r}"
+        )
 
 
 def _block_covers_evidence(block: InfluenceBlock, evidence: Any) -> bool:

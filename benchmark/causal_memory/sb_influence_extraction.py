@@ -8,12 +8,15 @@ Deterministic stand-in. No model is called. Task-success generalization is
 not measured: the recorded traces have no grader verdict.
 
 Rules below are fixed before any score is computed. They are printed at
-startup. Do not edit them to absorb a miss.
+startup. Do not edit them to absorb a miss. R8b adds same-capacity arms
+and a finer pattern key beside the coarse key. Those rules are frozen
+the same way.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -249,6 +252,97 @@ INFLUENCE_RULE = (
     "resolve is a script failure before freeze."
 )
 
+# R8a micro pins. Do not edit these to absorb a miss.
+R8A_L3_MICRO = {
+    "narrow": {
+        "lexical_cross_family": {"denominator": 218, "hits": 78, "rate": "0.3578"},
+        "lexical_hits": {"denominator": 218, "hits": 103, "rate": "0.4725"},
+        "lexical_no_surface": {"denominator": 52, "hits": 9, "rate": "0.1731"},
+        "n": 14,
+        "structural_cross_family": {"denominator": 218, "hits": 126, "rate": "0.5780"},
+        "structural_hits": {"denominator": 218, "hits": 154, "rate": "0.7064"},
+        "structural_no_surface": {"denominator": 52, "hits": 15, "rate": "0.2885"},
+    },
+    "wide": {
+        "lexical_cross_family": {"denominator": 218, "hits": 78, "rate": "0.3578"},
+        "lexical_hits": {"denominator": 218, "hits": 103, "rate": "0.4725"},
+        "lexical_no_surface": {"denominator": 52, "hits": 9, "rate": "0.1731"},
+        "n": 14,
+        "structural_cross_family": {"denominator": 218, "hits": 125, "rate": "0.5734"},
+        "structural_hits": {"denominator": 218, "hits": 153, "rate": "0.7018"},
+        "structural_no_surface": {"denominator": 52, "hits": 14, "rate": "0.2692"},
+    },
+}
+
+# Coarse control card. Frozen string, not chosen after looking at arm gaps.
+FREQUENT_COARSE_PATTERN = "run_command:cd"
+COARSE_VOCAB_EXPECTED = 41
+COARSE_FREQUENT_HITS_EXPECTED = 77
+COARSE_UPPER_HITS_EXPECTED = 197
+COARSE_SECOND_HALF_EXPECTED = 218
+
+FINE_KEY_RULE = (
+    "FINE PATTERN KEY (frozen before scores; the coarse key is not replaced). "
+    "fine = '{tool}:{shell_token}:{second_token}'. "
+    "second_token is the second whitespace token of arguments.command, "
+    "quote-stripped, basename if it contains '/', casefolded, then kept as "
+    "[a-z0-9._+-], or 'empty' when there is no second token. "
+    "tool and shell_token are the coarse-key fields. "
+    "Card summary text and BM25 retrieval stay on the coarse pattern token, "
+    "so the retrieved card set is the coarse set. Only the hit-test lists, "
+    "the lexical document's pattern label, the capacity-matched seat count, "
+    "and the frequent-pattern control use this key. "
+    "Both keys are reported side by side. Neither rule is edited after scores."
+)
+
+ARM_RULES = (
+    "R8B ARM RULES (frozen before scores). "
+    "structural_full: the R8a structural arm, every pattern on each retrieved "
+    "card, natural list order, not a sorted set. "
+    "structural_cap1_first: each retrieved card keeps patterns[0] in that "
+    "natural order (block call order, claim list order, fork/branch tail "
+    "extend order). No selection. An empty list stays empty. "
+    "structural_cap1_oracle: ORACLE UPPER BOUND, same nature as the R7c "
+    "oracle arm, not a deployable ranker. Each card keeps exactly one "
+    "pattern. The choice may look at the held-out second half. It maximizes "
+    "the number of second-half events whose pattern equals some kept pattern. "
+    "A pattern's events count once even if several cards could keep it. "
+    "The maximizer assigns each second-half pattern to at most one card that "
+    "lists it (maximum-weight assignment; weight = event count). Ties break "
+    "by the lexicographically smallest tuple of indexes into each card's "
+    "de-duplicated natural-order list; an unassigned card keeps index 0. "
+    "lexical_k12: the R8a lexical arm, 12 seats, one pattern per document. "
+    "lexical_capacity_matched: seat count = number of distinct patterns in "
+    "the structural_full cards for that same query (len of the union). "
+    "Rank, documents, score>0 drop, and (episode_dir, event_index) ties stay "
+    "the lexical_k12 rules. The seat count may exceed 12. "
+    "lexical_same_events: seat count = number of structural_full cards "
+    "(at most 12), one pattern per seat, same rank and ties. If that count "
+    "is 12 on every query the arm matches lexical_k12 and the report says so. "
+    "frequent_pattern_control: one synthetic card and no retrieval. Coarse "
+    f"key: patterns = ['{FREQUENT_COARSE_PATTERN}'] only. Fine key: the unique "
+    "mode of the fine key over all 14 episodes' tool events; ties break by "
+    "lexicographic pattern string. The mode is printed before episode scores. "
+    "cross_family_only: before retrieval, drop every episode whose family_id "
+    "equals the held-out episode's family_id (the held-out episode is already "
+    "absent). Then run structural_full and lexical_k12 on that reduced corpus. "
+    "A hit is the ordinary pattern-key hit. Same-family cards are not "
+    "retrieved, so they cannot occupy a seat. "
+    "Corpus upper bound: a second-half event counts when its pattern occurs "
+    "at least once in the other 13 episodes. Vocabulary size is the number "
+    "of distinct pattern keys over all tool events in the 14 episodes. "
+    "Coarse gates, fixed from the R8a recount: vocabulary "
+    f"{COARSE_VOCAB_EXPECTED}, frequent-card hits "
+    f"{COARSE_FREQUENT_HITS_EXPECTED}/{COARSE_SECOND_HALF_EXPECTED}, "
+    f"upper bound {COARSE_UPPER_HITS_EXPECTED}/{COARSE_SECOND_HALF_EXPECTED}. "
+    "A miss aborts. It is not relabeled. "
+    "Attribution, not a winner: capacity contribution = structural_full hits "
+    "minus structural_cap1_first hits. Ranking or carrier contribution = "
+    "structural_cap1_first hits minus lexical_k12 hits, also compared with "
+    "lexical_capacity_matched. What remains is what a finer key can still "
+    "explain. No arm is declared the winner."
+)
+
 
 def _fail(message: str) -> None:
     print(f"FAIL: {message}", file=sys.stderr)
@@ -295,6 +389,26 @@ def _pattern(tool_name: str, command: str) -> str:
     return f"{tool}:{_shell_token(command)}"
 
 
+def _second_token(command: str) -> str:
+    text = command.strip()
+    if not text:
+        return "empty"
+    parts = text.split()
+    if len(parts) < 2:
+        return "empty"
+    token = parts[1].strip("'\"")
+    if "/" in token:
+        token = token.rsplit("/", 1)[-1]
+    token = token.casefold()
+    cleaned = re.sub(r"[^a-z0-9._+-]", "", token)
+    return cleaned or "empty"
+
+
+def _pattern_fine(tool_name: str, command: str) -> str:
+    tool = re.sub(r"[^a-z0-9._+-]", "", tool_name.casefold()) or "unknown_tool"
+    return f"{tool}:{_shell_token(command)}:{_second_token(command)}"
+
+
 def _effect(result_text: str) -> str:
     flat = " ".join(result_text.split())
     match = re.search(r"exit[_ ]?code\D{0,12}(-?\d+)", flat, re.IGNORECASE)
@@ -321,6 +435,8 @@ def _print_policy() -> None:
     print(HIT_DEFINITION)
     print(SUBGRAPH_RULE)
     print(INFLUENCE_RULE)
+    print(FINE_KEY_RULE)
+    print(ARM_RULES)
     print(
         "NOT MEASURED: task-success generalization (no grader verdict on these "
         "14 episodes, and this wave does not touch the paused live stack or "
@@ -547,6 +663,7 @@ def _parse_transcript(episode_dir: Path) -> dict[str, Any]:
                         "command": command,
                         "token": _shell_token(command),
                         "pattern": _pattern(tool_name, command),
+                        "pattern_fine": _pattern_fine(tool_name, command),
                         "result": "",
                         "item_index": len(items) - 1,
                     }
@@ -701,6 +818,7 @@ def _build_blocks(
         ref = _source_ref(row)
         calls: list[tuple[str, str]] = item["calls"]
         patterns = [_pattern(tool_name, command) for tool_name, command in calls]
+        patterns_fine = [_pattern_fine(tool_name, command) for tool_name, command in calls]
         if item["kind"] == "task":
             role = ROLE_TASK
             block_input = ""
@@ -752,6 +870,7 @@ def _build_blocks(
                 "block_id": block_id,
                 "kind": item["kind"],
                 "patterns": patterns,
+                "patterns_fine": patterns_fine,
                 "tool_name": calls[0][0] if calls else "",
                 "command": calls[0][1] if calls else "",
                 "result_text": item["text"] if item["kind"] == "tool_result" else "",
@@ -773,9 +892,10 @@ def _build_claims(
     omitted_seqs: set[int],
     watermark: str,
     ledger: dict[tuple[str, int], str],
-) -> tuple[list[InfluenceClaim], dict[str, list[str]], int]:
+) -> tuple[list[InfluenceClaim], dict[str, list[str]], dict[str, list[str]], int]:
     claims: list[InfluenceClaim] = []
     claim_patterns: dict[str, list[str]] = {}
+    claim_patterns_fine: dict[str, list[str]] = {}
     crossed = 0
     for left, right in zip(metas, metas[1:], strict=False):
         crosses = _omitted_between(left["sequence"], right["sequence"], omitted_seqs)
@@ -783,6 +903,7 @@ def _build_claims(
             crossed += 1
         need_evidence = False
         patterns: list[str] = []
+        patterns_fine: list[str] = []
         if crosses:
             relation = RELATION_SKIP
             artifact = "no-effect"
@@ -794,6 +915,7 @@ def _build_claims(
             effect = _effect(right["result_text"])
             need_evidence = True
             patterns = list(left["patterns"])
+            patterns_fine = list(left["patterns_fine"])
         elif left["kind"] == "tool_result" and right["kind"] == "tool_call":
             relation = RELATION_INFLUENCE
             artifact = right["tool_name"] or "unknown_tool"
@@ -802,6 +924,7 @@ def _build_claims(
                 effect = "action:empty"
             need_evidence = True
             patterns = list(right["patterns"])
+            patterns_fine = list(right["patterns_fine"])
         else:
             relation = RELATION_SKIP
             artifact = "no-effect"
@@ -831,7 +954,8 @@ def _build_claims(
             )
         )
         claim_patterns[claim_id] = patterns
-    return claims, claim_patterns, crossed
+        claim_patterns_fine[claim_id] = patterns_fine
+    return claims, claim_patterns, claim_patterns_fine, crossed
 
 
 def _coverage(
@@ -1099,10 +1223,11 @@ def _extract_episode(
     blocks, metas = _build_blocks(session_id, parsed)
     omitted_seqs = {item["ao"]["sequence"] for item in parsed["items"] if item["kind"] == "omitted"}
     coverage = _coverage(session_id, paged, blocks, {item["sequence"]: item for item in metas})
-    claims, claim_patterns, crossed = _build_claims(
+    claims, claim_patterns, claim_patterns_fine, crossed = _build_claims(
         metas, omitted_seqs, coverage.snapshot_watermark, ledger
     )
     block_patterns = {item["block_id"]: list(item["patterns"]) for item in metas}
+    block_patterns_fine = {item["block_id"]: list(item["patterns_fine"]) for item in metas}
     in_narrow = code in NARROW_CODES
     in_wide = code in WIDE_CODES
     subgraph = (
@@ -1136,11 +1261,13 @@ def _extract_episode(
     influence_n = sum(1 for claim in claims if claim.relation_type == RELATION_INFLUENCE)
     skip_n = sum(1 for claim in claims if claim.relation_type == RELATION_SKIP)
     tail_patterns: list[str] = []
+    tail_patterns_fine: list[str] = []
     if subgraph is not None:
         chosen = set(subgraph.block_ids)
         for meta in metas:
             if meta["block_id"] in chosen:
                 tail_patterns.extend(meta["patterns"])
+                tail_patterns_fine.extend(meta["patterns_fine"])
     record = {
         "schema": SCHEMA,
         "episode_dir": session_id,
@@ -1172,14 +1299,18 @@ def _extract_episode(
                 "tool": event["tool"],
                 "token": event["token"],
                 "pattern": event["pattern"],
+                "pattern_fine": event["pattern_fine"],
                 "command": _clip(event["command"], EVENT_TEXT_CLIP),
                 "result": _clip(event["result"], EVENT_TEXT_CLIP),
             }
             for event in parsed["tool_events"]
         ],
         "block_patterns": block_patterns,
+        "block_patterns_fine": block_patterns_fine,
         "claim_patterns": claim_patterns,
+        "claim_patterns_fine": claim_patterns_fine,
         "tail_patterns": tail_patterns,
+        "tail_patterns_fine": tail_patterns_fine,
         "revision": primary.to_dict(),
         "revision_wide": None if wide_revision is None else wide_revision.to_dict(),
         "in_narrow": in_narrow,
@@ -1559,26 +1690,29 @@ def _freeze_or_codes(
 
 def _card_patterns(
     card: Any, record_by_session: dict[str, dict[str, Any]], fork_owner: dict[str, str]
-) -> tuple[str, set[str]]:
+) -> tuple[str, list[str], list[str]]:
+    """Natural-order pattern lists. Coarse, then fine. Not sorted, not unique."""
     pointer = card.source_pointer or {}
     if card.kind in {"block_projection", "claim_projection"}:
         session_id = pointer.get("session_id")
         record = record_by_session.get(session_id)
         if record is None:
-            return "", set()
+            return "", [], []
         entity = pointer.get("block_or_claim_id") or ""
         if card.kind == "block_projection":
-            patterns = record["block_patterns"].get(entity, [])
+            patterns = list(record["block_patterns"].get(entity, []))
+            patterns_fine = list(record["block_patterns_fine"].get(entity, []))
         else:
-            patterns = record["claim_patterns"].get(entity, [])
-        return session_id, set(patterns)
+            patterns = list(record["claim_patterns"].get(entity, []))
+            patterns_fine = list(record["claim_patterns_fine"].get(entity, []))
+        return session_id, patterns, patterns_fine
     if card.kind in {"fork", "branch"}:
         owner = fork_owner.get(pointer.get("fork_node_id") or "")
         record = record_by_session.get(owner or "")
         if record is None:
-            return owner or "", set()
-        return owner or "", set(record["tail_patterns"])
-    return "", set()
+            return owner or "", [], []
+        return owner or "", list(record["tail_patterns"]), list(record["tail_patterns_fine"])
+    return "", [], []
 
 
 def _structural_search(
@@ -1627,7 +1761,7 @@ def _structural_search(
         result = facade.retrieve(query, principal_labels=WORKSPACE_LABELS, profile=L3_PROFILE)
         cards: list[dict[str, Any]] = []
         for card in result.cards[:K]:
-            owner, patterns = _card_patterns(card, record_by_session, fork_owner)
+            owner, patterns, patterns_fine = _card_patterns(card, record_by_session, fork_owner)
             family = ""
             if owner in record_by_session:
                 family = record_by_session[owner]["family"]
@@ -1636,7 +1770,8 @@ def _structural_search(
                     "kind": card.kind,
                     "owner": owner,
                     "family": family,
-                    "patterns": sorted(patterns),
+                    "patterns": patterns,
+                    "patterns_fine": patterns_fine,
                     "failure_fork": card.kind in {"fork", "branch"},
                 }
             )
@@ -1645,7 +1780,13 @@ def _structural_search(
     return search
 
 
-def _lexical_hits(query: str, corpus: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _lexical_hits(
+    query: str,
+    corpus: list[dict[str, Any]],
+    *,
+    limit: int = K,
+    pattern_field: str = "pattern",
+) -> list[dict[str, Any]]:
     documents: list[str] = []
     meta: list[dict[str, Any]] = []
     for record in corpus:
@@ -1656,6 +1797,7 @@ def _lexical_hits(query: str, corpus: list[dict[str, Any]]) -> list[dict[str, An
                     "owner": record["episode_dir"],
                     "family": record["family"],
                     "pattern": event["pattern"],
+                    "pattern_fine": event["pattern_fine"],
                     "index": event["index"],
                 }
             )
@@ -1665,14 +1807,14 @@ def _lexical_hits(query: str, corpus: list[dict[str, Any]]) -> list[dict[str, An
     ranked = [index for index, score in enumerate(scores) if score > 0.0]
     ranked.sort(key=lambda index: (-scores[index], meta[index]["owner"], meta[index]["index"]))
     hits = []
-    for index in ranked[:K]:
+    for index in ranked[:limit]:
         item = meta[index]
         hits.append(
             {
                 "kind": "lexical_event",
                 "owner": item["owner"],
                 "family": item["family"],
-                "patterns": [item["pattern"]],
+                "patterns": [item[pattern_field]],
                 "failure_fork": False,
             }
         )
@@ -1682,6 +1824,8 @@ def _lexical_hits(query: str, corpus: list[dict[str, Any]]) -> list[dict[str, An
 def _score_leave_one_out(
     held: dict[str, Any],
     cards: list[dict[str, Any]],
+    *,
+    pattern_field: str = "pattern",
 ) -> dict[str, Any]:
     events = held["events"]
     half = 0 if not events else math.ceil(len(events) / 2)
@@ -1692,7 +1836,7 @@ def _score_leave_one_out(
     nosurf_hits = 0
     nosurf_denom = 0
     for event in second:
-        matched = [card for card in cards if event["pattern"] in card["patterns"]]
+        matched = [card for card in cards if event[pattern_field] in card["patterns"]]
         if matched:
             struct_hits += 1
         cross = [card for card in matched if card["family"] and card["family"] != held["family"]]
@@ -1711,15 +1855,236 @@ def _score_leave_one_out(
     }
 
 
+def _cards_for_key(cards: list[dict[str, Any]], key_name: str) -> list[dict[str, Any]]:
+    field = "patterns" if key_name == "coarse" else "patterns_fine"
+    return [{**card, "patterns": list(card[field])} for card in cards]
+
+
+def _unique_in_order(patterns: list[str]) -> list[str]:
+    seen: list[str] = []
+    for pattern in patterns:
+        if pattern not in seen:
+            seen.append(pattern)
+    return seen
+
+
+def _union_size(cards: list[dict[str, Any]]) -> int:
+    seen: set[str] = set()
+    for card in cards:
+        seen.update(card["patterns"])
+    return len(seen)
+
+
+def _cap1_first(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{**card, "patterns": list(card["patterns"][:1])} for card in cards]
+
+
+def _cap1_oracle(
+    cards: list[dict[str, Any]], held: dict[str, Any], pattern_field: str
+) -> tuple[list[dict[str, Any]], int]:
+    """One pattern per card, maximum second-half coverage. Oracle upper bound."""
+    events = held["events"]
+    half = 0 if not events else math.ceil(len(events) / 2)
+    weights = Counter(event[pattern_field] for event in events[half:])
+    options = [_unique_in_order(card["patterns"]) for card in cards]
+    listed = {pattern for opts in options for pattern in opts}
+    useful = [pattern for pattern, weight in weights.items() if weight > 0 and pattern in listed]
+    useful.sort(key=lambda pattern: (-weights[pattern], pattern))
+    n_cards = len(cards)
+    start_choice = tuple(0 if opts else -1 for opts in options)
+    dp: dict[int, tuple[int, tuple[int, ...]]] = {0: (0, start_choice)}
+    holders: list[list[tuple[int, int]]] = []
+    for pattern in useful:
+        card_indexes = []
+        for card_index, opts in enumerate(options):
+            if pattern in opts:
+                card_indexes.append((card_index, opts.index(pattern)))
+        holders.append(card_indexes)
+    for pattern, card_indexes in zip(useful, holders, strict=False):
+        weight = weights[pattern]
+        updated = dict(dp)
+        for mask, (score, choice) in dp.items():
+            for card_index, opt_index in card_indexes:
+                bit = 1 << card_index
+                if mask & bit:
+                    continue
+                new_choice = choice[:card_index] + (opt_index,) + choice[card_index + 1 :]
+                new_score = score + weight
+                new_mask = mask | bit
+                current = updated.get(new_mask)
+                if (
+                    current is None
+                    or new_score > current[0]
+                    or (new_score == current[0] and new_choice < current[1])
+                ):
+                    updated[new_mask] = (new_score, new_choice)
+        dp = updated
+    best_score = -1
+    best_choice = start_choice
+    for score, choice in dp.values():
+        if score > best_score or (score == best_score and choice < best_choice):
+            best_score = score
+            best_choice = choice
+    useful_opts = [[pattern for pattern in opts if weights.get(pattern, 0) > 0] for opts in options]
+    product = 1
+    for opts in useful_opts:
+        product *= max(1, len(opts))
+    if product <= 100_000:
+        brute_best = 0
+
+        def _brute(index: int, used: set[str], score: int) -> None:
+            nonlocal brute_best
+            if index == n_cards:
+                if score > brute_best:
+                    brute_best = score
+                return
+            _brute(index + 1, used, score)
+            for pattern in useful_opts[index]:
+                if pattern in used:
+                    continue
+                used.add(pattern)
+                _brute(index + 1, used, score + weights[pattern])
+                used.remove(pattern)
+
+        _brute(0, set(), 0)
+        if brute_best != best_score:
+            _fail(f"oracle assignment {best_score} != brute {brute_best} on {held['episode_dir']}")
+    reduced = []
+    for card, opts, index in zip(cards, options, best_choice, strict=True):
+        if index < 0 or not opts:
+            kept: list[str] = []
+        else:
+            kept = [opts[index]]
+        reduced.append({**card, "patterns": kept})
+    return reduced, best_score
+
+
+def _corpus_bounds(records: list[dict[str, Any]], pattern_field: str) -> dict[str, Any]:
+    by_episode: dict[str, list[str]] = {}
+    counts: Counter[str] = Counter()
+    for record in records:
+        patterns = [event[pattern_field] for event in record["events"]]
+        by_episode[record["episode_dir"]] = patterns
+        counts.update(patterns)
+    mode, mode_count = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0]
+    control = FREQUENT_COARSE_PATTERN if pattern_field == "pattern" else mode
+    frequent_hits = 0
+    upper_hits = 0
+    denominator = 0
+    for episode_dir, patterns in by_episode.items():
+        half = 0 if not patterns else math.ceil(len(patterns) / 2)
+        others = {
+            pattern
+            for other, other_patterns in by_episode.items()
+            if other != episode_dir
+            for pattern in other_patterns
+        }
+        for pattern in patterns[half:]:
+            denominator += 1
+            if pattern == control:
+                frequent_hits += 1
+            if pattern in others:
+                upper_hits += 1
+    top = [{"pattern": pattern, "count": count} for pattern, count in counts.most_common(8)]
+    return {
+        "vocabulary": len(counts),
+        "event_count": sum(counts.values()),
+        "mode": mode,
+        "mode_count": mode_count,
+        "control_pattern": control,
+        "frequent_hits": frequent_hits,
+        "upper_hits": upper_hits,
+        "denominator": denominator,
+        "frequent_rate": _rate(frequent_hits, denominator),
+        "upper_bound": _rate(upper_hits, denominator),
+        "top": top,
+    }
+
+
+def _check_coarse_gates(bounds: dict[str, Any]) -> None:
+    if bounds["vocabulary"] != COARSE_VOCAB_EXPECTED:
+        _fail(f"coarse vocabulary {bounds['vocabulary']} != {COARSE_VOCAB_EXPECTED}")
+    if bounds["mode"] != FREQUENT_COARSE_PATTERN:
+        _fail(f"coarse mode {bounds['mode']!r} != {FREQUENT_COARSE_PATTERN!r}")
+    if bounds["frequent_hits"] != COARSE_FREQUENT_HITS_EXPECTED:
+        _fail(f"frequent-pattern hits {bounds['frequent_hits']} != {COARSE_FREQUENT_HITS_EXPECTED}")
+    if bounds["upper_hits"] != COARSE_UPPER_HITS_EXPECTED:
+        _fail(f"corpus upper bound {bounds['upper_hits']} != {COARSE_UPPER_HITS_EXPECTED}")
+    if bounds["denominator"] != COARSE_SECOND_HALF_EXPECTED:
+        _fail(f"second-half denominator {bounds['denominator']} != {COARSE_SECOND_HALF_EXPECTED}")
+
+
+def _episode_arm(held: dict[str, Any], score: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    row = {
+        "episode_dir": held["episode_dir"],
+        "family": held["family"],
+        "n_second_half": score["half_events"],
+        "hits": score["hits"],
+        "cross_family": score["cross_family"],
+        "no_surface_cross_family": score["no_surface_cross_family"],
+    }
+    row.update(extra)
+    return row
+
+
+def _pack_arm(rows: list[dict[str, Any]], **flags: Any) -> dict[str, Any]:
+    micro: dict[str, Any] = {"n": len(rows)}
+    for field, key in (
+        ("hits", "hits"),
+        ("cross_family", "cross_family"),
+        ("no_surface_cross_family", "no_surface"),
+    ):
+        micro[key] = _rate(
+            sum(row[field]["hits"] for row in rows),
+            sum(row[field]["denominator"] for row in rows),
+        )
+    packed: dict[str, Any] = {"micro": micro, "per_episode": rows}
+    packed.update(flags)
+    return packed
+
+
+def _same_hit_rows(left: list[dict[str, Any]], right: list[dict[str, Any]]) -> bool:
+    if len(left) != len(right):
+        return False
+    for a_row, b_row in zip(left, right, strict=True):
+        if (a_row["hits"], a_row["cross_family"], a_row["no_surface_cross_family"]) != (
+            b_row["hits"],
+            b_row["cross_family"],
+            b_row["no_surface_cross_family"],
+        ):
+            return False
+    return True
+
+
 def _run_l3(
     records: list[dict[str, Any]],
     fork_tables: dict[str, list[dict[str, Any]]],
     work: Path,
     tests: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    key_fields = (("coarse", "pattern"), ("fine", "pattern_fine"))
+    bounds = {
+        key_name: _corpus_bounds(records, pattern_field) for key_name, pattern_field in key_fields
+    }
+    for key_name, _pattern_field in key_fields:
+        item = bounds[key_name]
+        print(
+            f"CORPUS {key_name} vocab={item['vocabulary']} "
+            f"mode={item['mode']} count={item['mode_count']} "
+            f"control={item['control_pattern']} "
+            f"control_hits={item['frequent_hits']}/{item['denominator']} "
+            f"upper={item['upper_hits']}/{item['denominator']}"
+        )
+    _check_coarse_gates(bounds["coarse"])
+    family_of = {record["episode_dir"]: record["family"] for record in records}
     by_caliber: dict[str, Any] = {}
+    arm_rows: dict[str, dict[str, list[dict[str, Any]]]] = {
+        key_name: {} for key_name, _pattern_field in key_fields
+    }
     for caliber, fork_rows in fork_tables.items():
         per_episode = []
+        for key_name, _pattern_field in key_fields:
+            arm_rows[key_name][caliber] = []
         for held in records:
             corpus = [record for record in records if record["episode_dir"] != held["episode_dir"]]
             fork_corpus = [row for row in fork_rows if row["episode_dir"] != held["episode_dir"]]
@@ -1745,7 +2110,88 @@ def _run_l3(
                 f"xfamily_struct={structural_score['cross_family']['rate']} "
                 f"xfamily_lex={lexical_score['cross_family']['rate']}"
             )
+            x_corpus = [record for record in corpus if record["family"] != held["family"]]
+            x_forks = [
+                row for row in fork_corpus if family_of[row["episode_dir"]] != held["family"]
+            ]
+            x_structural = _structural_search(x_corpus, x_forks, work, f"{tag}-xfamily")(
+                held["query_prefix"]
+            )
+            for key_name, pattern_field in key_fields:
+                projected = _cards_for_key(structural, key_name)
+                full_score = _score_leave_one_out(held, projected, pattern_field=pattern_field)
+                cap1 = _cap1_first(projected)
+                cap1_score = _score_leave_one_out(held, cap1, pattern_field=pattern_field)
+                oracle_cards, oracle_weight = _cap1_oracle(projected, held, pattern_field)
+                oracle_score = _score_leave_one_out(held, oracle_cards, pattern_field=pattern_field)
+                if oracle_score["hits"]["hits"] != oracle_weight:
+                    _fail(
+                        f"oracle scorer {oracle_score['hits']['hits']} != "
+                        f"assignment {oracle_weight} {key_name} {held['episode_dir']}"
+                    )
+                union = _union_size(projected)
+                lexical_all = _lexical_hits(
+                    held["query_prefix"], corpus, limit=10**9, pattern_field=pattern_field
+                )
+                same_seats = len(projected)
+                lex_k = _score_leave_one_out(held, lexical_all[:K], pattern_field=pattern_field)
+                lex_cap = _score_leave_one_out(
+                    held, lexical_all[:union], pattern_field=pattern_field
+                )
+                lex_same = _score_leave_one_out(
+                    held, lexical_all[:same_seats], pattern_field=pattern_field
+                )
+                control = {
+                    "kind": "frequent_pattern_control",
+                    "owner": "",
+                    "family": "",
+                    "patterns": [bounds[key_name]["control_pattern"]],
+                    "failure_fork": False,
+                }
+                freq_score = _score_leave_one_out(held, [control], pattern_field=pattern_field)
+                x_projected = _cards_for_key(x_structural, key_name)
+                x_struct = _score_leave_one_out(held, x_projected, pattern_field=pattern_field)
+                x_lex = _lexical_hits(
+                    held["query_prefix"], x_corpus, limit=K, pattern_field=pattern_field
+                )
+                x_lex_score = _score_leave_one_out(held, x_lex, pattern_field=pattern_field)
+                if key_name == "coarse":
+                    if full_score != structural_score or lex_k != lexical_score:
+                        _fail(f"{caliber} {held['episode_dir']}: coarse arms drifted from R8a")
+                arm_rows[key_name][caliber].append(
+                    {
+                        "episode_dir": held["episode_dir"],
+                        "family": held["family"],
+                        "n_second_half": full_score["half_events"],
+                        "structural_cards": len(projected),
+                        "structural_pattern_union": union,
+                        "structural_full": _episode_arm(held, full_score),
+                        "structural_cap1_first": _episode_arm(held, cap1_score),
+                        "structural_cap1_oracle": _episode_arm(held, oracle_score),
+                        "lexical_k12": _episode_arm(held, lex_k),
+                        "lexical_capacity_matched": _episode_arm(held, lex_cap, seats=union),
+                        "lexical_same_events": _episode_arm(held, lex_same, seats=same_seats),
+                        "frequent_pattern_control": _episode_arm(held, freq_score),
+                        "cross_family_only": {
+                            "structural_full": _episode_arm(held, x_struct),
+                            "lexical_k12": _episode_arm(held, x_lex_score),
+                        },
+                    }
+                )
+                print(
+                    f"L3ARM {key_name} {caliber} {held['episode_dir']} "
+                    f"full={full_score['hits']['rate']} "
+                    f"cap1={cap1_score['hits']['rate']} "
+                    f"oracle={oracle_score['hits']['rate']} "
+                    f"lex={lex_k['hits']['rate']} "
+                    f"capmatch={lex_cap['hits']['rate']} seats={union} "
+                    f"same={lex_same['hits']['rate']} same_seats={same_seats} "
+                    f"freq={freq_score['hits']['rate']} "
+                    f"xfam_s={x_struct['hits']['rate']} xfam_l={x_lex_score['hits']['rate']}"
+                )
         micro = _micro(per_episode)
+        if micro != R8A_L3_MICRO[caliber]:
+            _fail(f"R8a L3 regression failed for {caliber}")
         demo = _test_demo(records, fork_rows, tests, work, caliber)
         by_caliber[caliber] = {
             "n_episodes": len(per_episode),
@@ -1753,12 +2199,86 @@ def _run_l3(
             "micro": micro,
             "test_prompt_demo": demo,
         }
+    arms: dict[str, Any] = {
+        "rules_printed_before_scores": True,
+        "fine_key_rule": FINE_KEY_RULE,
+        "arm_rules": ARM_RULES,
+        "attribution_definitions": {
+            "capacity_contribution": "structural_full hits minus structural_cap1_first hits",
+            "ranking_or_carrier_contribution": (
+                "structural_cap1_first hits minus lexical_k12 hits; "
+                "also compared with lexical_capacity_matched"
+            ),
+            "remaining": "whatever is left after capacity and ranking, read against the fine key",
+            "winner": "not declared",
+        },
+        "keys": {},
+    }
+    for key_name, _pattern_field in key_fields:
+        by_caliber_arms: dict[str, Any] = {}
+        identical = True
+        for caliber, rows in arm_rows[key_name].items():
+            same_rows = [row["lexical_same_events"] for row in rows]
+            k12_rows = [row["lexical_k12"] for row in rows]
+            seats_are_k = all(row["seats"] == K for row in same_rows)
+            same_arm = _same_hit_rows(same_rows, k12_rows) and seats_are_k
+            identical = identical and same_arm
+            by_caliber_arms[caliber] = {
+                "structural_full": _pack_arm([row["structural_full"] for row in rows]),
+                "structural_cap1_first": _pack_arm([row["structural_cap1_first"] for row in rows]),
+                "structural_cap1_oracle": _pack_arm(
+                    [row["structural_cap1_oracle"] for row in rows],
+                    oracle_upper_bound=True,
+                ),
+                "lexical_k12": _pack_arm([row["lexical_k12"] for row in rows]),
+                "lexical_capacity_matched": _pack_arm(
+                    [row["lexical_capacity_matched"] for row in rows]
+                ),
+                "lexical_same_events": _pack_arm(
+                    [row["lexical_same_events"] for row in rows],
+                    identical_to_lexical_k12=same_arm,
+                ),
+                "frequent_pattern_control": _pack_arm(
+                    [row["frequent_pattern_control"] for row in rows],
+                    control_pattern=bounds[key_name]["control_pattern"],
+                ),
+                "cross_family_only": {
+                    "structural_full": _pack_arm(
+                        [row["cross_family_only"]["structural_full"] for row in rows]
+                    ),
+                    "lexical_k12": _pack_arm(
+                        [row["cross_family_only"]["lexical_k12"] for row in rows]
+                    ),
+                },
+            }
+            full_hits = by_caliber_arms[caliber]["structural_full"]["micro"]["hits"]["hits"]
+            cap1_hits = by_caliber_arms[caliber]["structural_cap1_first"]["micro"]["hits"]["hits"]
+            lex_hits = by_caliber_arms[caliber]["lexical_k12"]["micro"]["hits"]["hits"]
+            matched_hits = by_caliber_arms[caliber]["lexical_capacity_matched"]["micro"]["hits"][
+                "hits"
+            ]
+            by_caliber_arms[caliber]["deltas"] = {
+                "capacity_contribution_hits": full_hits - cap1_hits,
+                "cap1_minus_lexical_k12_hits": cap1_hits - lex_hits,
+                "cap1_minus_lexical_capacity_matched_hits": cap1_hits - matched_hits,
+            }
+        if key_name == "coarse":
+            for caliber in ("narrow", "wide"):
+                freq_hits = by_caliber_arms[caliber]["frequent_pattern_control"]["micro"]["hits"]
+                if freq_hits["hits"] != COARSE_FREQUENT_HITS_EXPECTED:
+                    _fail(f"{caliber} frequent_pattern_control drifted from the corpus gate")
+        arms["keys"][key_name] = {
+            "corpus": bounds[key_name],
+            "lexical_same_events_identical_to_lexical_k12": identical,
+            "calibers": by_caliber_arms,
+        }
     return {
         "label": "retrieval-level only; not task-success generalization",
         "k": K,
         "profile": L3_PROFILE,
         "hit_definition": HIT_DEFINITION,
         "calibers": by_caliber,
+        "arms": arms,
     }
 
 
@@ -2004,7 +2524,9 @@ def main() -> None:
         l3 = _run_l3(records, forks, work, tests)
     report = _report(records, forks, control, l3)
     _dump(args.out, report)
+    digest = hashlib.sha256(args.out.read_bytes()).hexdigest()
     print(f"WROTE {args.out}")
+    print(f"REPORT_SHA256 {digest}")
     tool_total = sum(record["tool_calls"] for record in records)
     print(f"TOOL_CALLS_SUM {tool_total}")
 
