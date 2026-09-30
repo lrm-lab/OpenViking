@@ -9,7 +9,7 @@ Provides session management operations: session, sessions, add_message, commit, 
 import asyncio
 from dataclasses import replace
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from openviking.core.namespace import canonical_session_uri
 from openviking.server.config import ToolOutputExternalizationConfig
@@ -73,6 +73,7 @@ class SessionService:
         self._default_user_auto_commit_policy: Optional[Dict[str, Any]] = None
         self._usage_reporter: Optional["UsageReporter"] = None
         self._extraction_provider: Optional["ExtractionProvider"] = None
+        self._diagnosis_sink: Optional[Callable[..., None]] = None
         # Server-wide controls remain disabled until configured during app setup.
         self._session_auto_commit_config = SessionAutoCommitConfig()
         # Per-worker in-flight guard so bursts don't spawn duplicate commit
@@ -108,6 +109,14 @@ class SessionService:
         read from config.
         """
         self._extraction_provider = provider
+
+    def set_diagnosis_sink(self, sink: Optional[Callable[..., None]]) -> None:
+        """Set the post-extraction diagnosis callback for newly created sessions.
+
+        ``None`` does not read failure briefs. This is not read from config
+        and is not an agent tool.
+        """
+        self._diagnosis_sink = sink
 
     def set_default_user_memory_policy(self, memory_policy: Optional[Dict[str, Any]]) -> None:
         """Set the server fallback used when a User has no persisted policy."""
@@ -229,6 +238,7 @@ class SessionService:
             usage_reporter=self._usage_reporter,
             vlm_resolver=self._vlm_resolver,
             extraction_provider=self._extraction_provider,
+            diagnosis_sink=self._diagnosis_sink,
         )
 
     async def _get_user_memory_policy(self, ctx: RequestContext) -> Optional[Dict[str, Any]]:

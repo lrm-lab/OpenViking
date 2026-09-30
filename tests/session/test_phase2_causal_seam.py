@@ -21,6 +21,7 @@ from openviking.session.influence_view import (
 )
 from openviking.session.retrieval_wiring import build_retrieval_facade
 from openviking.session.session import Session
+from openviking.session.subgraph_forks import default_failure_grounding_position
 from openviking.session.trajectory_index_hook import PROJECTIONS_FILENAME, VIEWS_FILENAME
 from openviking.storage.queuefs.session_commit_msg import SessionCommitMsg
 from openviking_cli.session.user_id import UserIdentifier
@@ -46,6 +47,7 @@ async def _phase2(
     monkeypatch: pytest.MonkeyPatch,
     *,
     provider=None,
+    sink=None,
 ):
     """Commit (Phase 1 fallback) then resume the queued Phase 2 job."""
     from openviking.message.part import ToolPart
@@ -74,6 +76,7 @@ async def _phase2(
         session_id=SESSION_ID,
         session_uri=SESSION_URI,
         extraction_provider=provider,
+        diagnosis_sink=sink,
     )
     monkeypatch.setattr(session, "_generate_archive_summary_async", _summary)
     try:
@@ -115,8 +118,13 @@ def _done(session: Session, archive_uri: str) -> bool:
 async def test_phase2_without_provider_keeps_the_single_fallback_revision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    calls: list[object] = []
+
+    def _sink(briefs) -> None:
+        calls.append(briefs)
+
     try:
-        session, _message, committed = await _phase2(tmp_path, monkeypatch)
+        session, _message, committed = await _phase2(tmp_path, monkeypatch, sink=_sink)
         history = _history(session._viking_fs.root)
         assert _done(session, committed["archive_uri"])
         assert len(history) == 1
@@ -125,6 +133,7 @@ async def test_phase2_without_provider_keeps_the_single_fallback_revision(
         assert history[0].revision_id == ViewSupersedeIndex(
             session._viking_fs.root / VIEWS_FILENAME
         ).latest(SESSION_ID, PURPOSE_POST_RUN_INDEX).revision_id
+        assert calls == []
     finally:
         set_task_tracker(None)
 
@@ -228,6 +237,42 @@ async def test_phase2_replay_does_not_register_a_third_revision(
         set_task_tracker(None)
 
 
+@pytest.mark.asyncio
+async def test_phase2_completes_when_diagnosis_sink_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    received: list[tuple] = []
+
+    def _sink(briefs) -> None:
+        received.append(tuple(briefs))
+        raise RuntimeError("diagnosis sink failed")
+
+    try:
+        session, _message, committed = await _phase2(
+            tmp_path, monkeypatch, provider=_provider, sink=_sink
+        )
+        latest = ViewSupersedeIndex(session._viking_fs.root / VIEWS_FILENAME).latest(
+            SESSION_ID, PURPOSE_POST_RUN_INDEX
+        )
+        assert _done(session, committed["archive_uri"])
+        assert latest is not None
+        failures = [item for item in latest.retrieval_subgraphs if item.is_failure]
+        assert len(received) == 1
+        assert len(received[0]) == len(failures)
+        assert len(failures) >= 1
+        for brief, subgraph in zip(received[0], failures, strict=True):
+            assert brief.view_revision_id == latest.revision_id
+            assert brief.subgraph_id == subgraph.subgraph_id
+            assert brief.grounding_position == default_failure_grounding_position(
+                latest, subgraph.subgraph_id
+            )
+            assert brief.grounding_position[0] == "block"
+            assert brief.grounding_position[1].startswith("block:")
+            assert brief.fork_idempotency_key
+    finally:
+        set_task_tracker(None)
+
+
 def test_session_service_passes_extraction_provider() -> None:
     seen: list[tuple[str, str, str]] = []
 
@@ -245,3 +290,12 @@ def test_session_service_passes_extraction_provider() -> None:
     cleared = service.session(ctx, session_id="sess-cleared")
     assert cleared._extraction_provider is None
     assert seen == []
+
+    briefs: list[object] = []
+    sink = briefs.append
+    service.set_diagnosis_sink(sink)
+    wired = service.session(ctx, session_id="sess-sink")
+    assert wired._diagnosis_sink is sink
+    service.set_diagnosis_sink(None)
+    unwired = service.session(ctx, session_id="sess-no-sink")
+    assert unwired._diagnosis_sink is None

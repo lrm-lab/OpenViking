@@ -38,3 +38,4 @@ async def test_mcp_tools_advertise_behavior_annotations():
         observed[name] = tuple(annotations[field] for field in fields)
 
     assert observed == expected
+    assert len(tools) == 18

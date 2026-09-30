@@ -435,6 +435,7 @@ class Session:
         vlm_resolver: Optional["VLMResolver"] = None,
         *,
         extraction_provider: Optional["ExtractionProvider"] = None,
+        diagnosis_sink: Optional[Callable[..., None]] = None,
     ):
         self._viking_fs = viking_fs
         self._vikingdb_manager = vikingdb_manager
@@ -475,6 +476,7 @@ class Session:
         self._usage_reporter = usage_reporter
         self._vlm_resolver = vlm_resolver
         self._extraction_provider = extraction_provider
+        self._diagnosis_sink = diagnosis_sink
 
     async def _get_vlm_config(self):
         if self._vlm_resolver is None:
@@ -1936,26 +1938,34 @@ class Session:
             return {"contexts": contexts, "session_skills": skills}
         return contexts
 
-    @tracer("session.commit.phase2", ignore_result=True, ignore_args=True)
     def _run_post_extraction_causal_seam(self, task_id: str) -> None:
-        """Phase 2 trajectory index. Failures must not block ``.done``.
+        """Phase 2 trajectory index and optional diagnosis callback.
 
         No provider means the hook is not called: Phase 1 already froze the
         fallback revision, and another provider-less build would spend the
-        trajectory-index budget without changing that view.
+        trajectory-index budget without changing that view. No sink means
+        briefs are not read. Failures are logged; Phase 2 still writes ``.done``.
         """
         try:
             provider = self._extraction_provider
-            if provider is None:
+            if provider is not None:
+                maybe_index_session_trajectory(
+                    self,
+                    task_id,
+                    extraction_provider=provider,
+                )
+            sink = self._diagnosis_sink
+            if sink is None:
                 return
-            maybe_index_session_trajectory(
-                self,
-                task_id,
-                extraction_provider=provider,
-            )
+            from openviking.session.diagnosis_wiring import post_extraction_diagnosis_briefs
+
+            briefs = post_extraction_diagnosis_briefs(self)
+            if briefs:
+                sink(briefs)
         except Exception:
             logger.warning("post-extraction causal seam failed", exc_info=True)
 
+    @tracer("session.commit.phase2", ignore_result=True, ignore_args=True)
     async def _run_memory_extraction(
         self,
         task_id: str,
