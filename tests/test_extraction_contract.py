@@ -887,15 +887,23 @@ def test_stub_vlm_model_mode_lands_adaptive_revision(tmp_path: Path) -> None:
 
 
 def test_stub_vlm_token_cap_raises(tmp_path: Path) -> None:
+    """Token-cap on one episode is recorded; it must not abort the model round."""
     from benchmark.causal_memory import r9_model_extraction as runner
 
     handle = _FixedVLM("{}", {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 50})
-    with pytest.raises(ExtractionLimitError, match="MAX_TOTAL_TOKENS"):
-        runner.main(
-            ["--mode", "model", "--episode", "0008", "--out", str(tmp_path / "report.json")],
-            vlm_handle=handle,
-            max_total_tokens=1,
-        )
+    out = tmp_path / "report.json"
+    code = runner.main(
+        ["--mode", "model", "--episode", "0008", "--out", str(out)],
+        vlm_handle=handle,
+        max_total_tokens=1,
+    )
+    assert code == 0
+    report = json.loads(out.read_text(encoding="utf-8"))
+    episode = report["episodes"][0]
+    assert episode["compliant"] is False
+    assert episode["error"]["type"] == "ExtractionLimitError"
+    assert "MAX_TOTAL_TOKENS" in episode["error"]["message"]
+    assert report["summary"]["failures"] == 1
 
 
 def test_model_mode_without_provider_fails(
@@ -1049,3 +1057,70 @@ def test_handle_tracker_delta_still_trips_the_total_cap() -> None:
     assert provider.usage_source == "handle_tracker"
     assert provider.usage["total_tokens"] == 60
     assert handle.calls == 1
+
+
+class _NonJsonVLM:
+    """Handle that always returns non-JSON prose. Zero real model calls."""
+
+    def __init__(self, text: str = "这不是 JSON") -> None:
+        self.text = text
+        self.calls = 0
+
+    def get_completion_async(self, messages: list[dict[str, str]], max_tokens: int) -> Any:
+        del messages, max_tokens
+        self.calls += 1
+        return SimpleNamespace(
+            content=self.text,
+            finish_reason="stop",
+            usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        )
+
+
+def test_model_mode_non_json_episode_is_recorded_not_raised(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from benchmark.causal_memory import r9_model_extraction as runner
+
+    handle = _NonJsonVLM()
+    out = tmp_path / "report.json"
+    code = runner.main(
+        ["--mode", "model", "--episode", "0008", "--out", str(out)],
+        vlm_handle=handle,
+    )
+    assert code == 0
+    assert out.is_file()
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["snapshot_source"] == "ledger"
+    assert report["summary"]["failures"] >= 1
+    episode = report["episodes"][0]
+    assert episode["compliant"] is False
+    assert episode["error"]["type"]
+    assert "0008" in report["summary"]["failed_episodes"][0]
+    captured = capsys.readouterr()
+    assert "snapshot_source=ledger" in captured.out
+    assert "compliant=False" in captured.out
+
+
+def test_model_mode_isolates_two_non_json_episodes(tmp_path: Path) -> None:
+    from benchmark.causal_memory import r9_model_extraction as runner
+
+    api = runner._bind()
+    episode_dirs = api["sb"]._episode_dirs()
+    first = next(path for path in episode_dirs if path.name.startswith("0001"))
+    second = next(path for path in episode_dirs if path.name.startswith("0002"))
+    handle = _NonJsonVLM()
+    work = tmp_path / "work"
+    work.mkdir()
+    records = [
+        runner.run_model_episode(api, handle, first, 0, work),
+        runner.run_model_episode(api, handle, second, 1, work),
+    ]
+    assert all(item["compliant"] is False for item in records)
+    assert all(item["error"]["type"] for item in records)
+    report = runner._report("model", api["frozen_limits"](), records, snapshot_source="ledger")
+    out = tmp_path / "report.json"
+    runner._write_report(out, report)
+    loaded = json.loads(out.read_text(encoding="utf-8"))
+    assert loaded["summary"]["failures"] == 2
+    assert loaded["summary"]["failed_episodes"] == sorted([first.name, second.name])
+    assert handle.calls >= 2

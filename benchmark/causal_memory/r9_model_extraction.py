@@ -207,6 +207,41 @@ def episode_snapshot(
     return snapshot, parsed
 
 
+def _model_episode_usage(provider: Any | None) -> tuple[Any, str]:
+    """Usage fields for a model-episode record. Unmeasured stays ``unavailable``."""
+    if provider is None:
+        return "unavailable", "unavailable"
+    usage_source = getattr(provider, "usage_source", "unavailable")
+    if usage_source == "unavailable":
+        return "unavailable", usage_source
+    return dict(provider.usage), usage_source
+
+
+def _model_episode_failure(
+    episode_id: str, exc: BaseException, provider: Any | None
+) -> dict[str, Any]:
+    """Failure record for one model episode. Does not mark the episode compliant."""
+    usage_value, usage_source = _model_episode_usage(provider)
+    if provider is None:
+        calls, repairs, finish_reasons, truncated = 0, 0, [], 0
+    else:
+        calls = int(provider.calls)
+        repairs = int(provider.repairs)
+        finish_reasons = list(provider.finish_reasons)
+        truncated = int(provider.truncated)
+    return {
+        "episode_id": episode_id,
+        "compliant": False,
+        "error": {"type": type(exc).__name__, "message": str(exc)[:500]},
+        "calls": calls,
+        "repairs": repairs,
+        "usage": usage_value,
+        "usage_source": usage_source,
+        "finish_reasons": finish_reasons,
+        "truncated": truncated,
+    }
+
+
 def run_model_episode(
     api: dict[str, Any],
     vlm_handle: Any,
@@ -217,7 +252,11 @@ def run_model_episode(
     max_total_tokens: int | None = None,
     max_tokens_per_call: int | None = None,
 ) -> dict[str, Any]:
-    """One episode through the real ledger, the provider, and a frozen adaptive revision."""
+    """One episode through the real ledger, the provider, and a frozen adaptive revision.
+
+    Provider, freeze, and index errors become a failure record so one episode
+    cannot abort the round. The production parser and provider stay fail-closed.
+    """
     snapshot, parsed = episode_snapshot(api, episode_dir, episode_index, work)
     session_id = snapshot["session_id"]
     task_id = snapshot["task_run_id"]
@@ -226,46 +265,46 @@ def run_model_episode(
         kwargs["max_total_tokens"] = max_total_tokens
     if max_tokens_per_call is not None:
         kwargs["max_tokens_per_call"] = max_tokens_per_call
-    factory = api["model_extraction_provider"](vlm_handle, **kwargs)
-    provider = factory(snapshot)
-    payload = provider(session_id, task_id, "unspecified")
-    revision = api["freeze_extracted_view"](
-        session_id=session_id,
-        task_run_id=task_id,
-        view_id=snapshot["view_id"],
-        revision_id=f"post-run:{session_id}:{task_id}:adaptive",
-        frozen_at=FROZEN_AT,
-        blocks=payload.blocks,
-        claims=payload.claims,
-        coverage=payload.coverage,
-        retrieval_subgraphs=payload.retrieval_subgraphs,
-    )
-    index = api["ViewSupersedeIndex"](work / "views.json")
-    index.register(revision)
-    canvas = _checkpoint_revision(episode_dir.name)
-    ledger_cut = parsed.get("tail_class") == "tool_cut"
-    marked = any(item.failure_marked for item in payload.retrieval_subgraphs)
-    usage_source = getattr(provider, "usage_source", "unavailable")
-    if usage_source == "unavailable":
-        usage_value: Any = "unavailable"
-    else:
-        usage_value = dict(provider.usage)
-    return {
-        "episode_id": episode_dir.name,
-        "compliant": True,
-        "repairs": provider.repairs,
-        "calls": provider.calls,
-        "usage": usage_value,
-        "usage_source": usage_source,
-        "finish_reasons": list(provider.finish_reasons),
-        "truncated": provider.truncated,
-        "revision_id": revision.revision_id,
-        "construction_mode": revision.construction_mode,
-        "structure_counts": _counts(payload, canvas),
-        "ledger_cut": ledger_cut,
-        "failure_marked": marked,
-        "marker_matches_ledger_cut": marked == ledger_cut,
-    }
+    provider: Any | None = None
+    try:
+        factory = api["model_extraction_provider"](vlm_handle, **kwargs)
+        provider = factory(snapshot)
+        payload = provider(session_id, task_id, "unspecified")
+        revision = api["freeze_extracted_view"](
+            session_id=session_id,
+            task_run_id=task_id,
+            view_id=snapshot["view_id"],
+            revision_id=f"post-run:{session_id}:{task_id}:adaptive",
+            frozen_at=FROZEN_AT,
+            blocks=payload.blocks,
+            claims=payload.claims,
+            coverage=payload.coverage,
+            retrieval_subgraphs=payload.retrieval_subgraphs,
+        )
+        index = api["ViewSupersedeIndex"](work / "views.json")
+        index.register(revision)
+        canvas = _checkpoint_revision(episode_dir.name)
+        ledger_cut = parsed.get("tail_class") == "tool_cut"
+        marked = any(item.failure_marked for item in payload.retrieval_subgraphs)
+        usage_value, usage_source = _model_episode_usage(provider)
+        return {
+            "episode_id": episode_dir.name,
+            "compliant": True,
+            "repairs": provider.repairs,
+            "calls": provider.calls,
+            "usage": usage_value,
+            "usage_source": usage_source,
+            "finish_reasons": list(provider.finish_reasons),
+            "truncated": provider.truncated,
+            "revision_id": revision.revision_id,
+            "construction_mode": revision.construction_mode,
+            "structure_counts": _counts(payload, canvas),
+            "ledger_cut": ledger_cut,
+            "failure_marked": marked,
+            "marker_matches_ledger_cut": marked == ledger_cut,
+        }
+    except Exception as exc:
+        return _model_episode_failure(episode_dir.name, exc, provider)
 
 
 def main(
@@ -282,10 +321,12 @@ def main(
     args = parser.parse_args(argv)
     api = _bind()
     api["announce_frozen_limits"]()
+    # Model mode always reads the real ledger; argparse default "canvas" is not fact.
+    snapshot_source = "ledger" if args.mode == "model" else args.snapshot_source
     print(f"label={LABEL}", flush=True)
     print(f"frozen_at={FROZEN_AT}", flush=True)
     print(f"mode={args.mode}", flush=True)
-    print(f"snapshot_source={args.snapshot_source}", flush=True)
+    print(f"snapshot_source={snapshot_source}", flush=True)
     if args.mode == "model" and vlm_handle is None:
         print(
             "mode=model needs an extraction provider handle. "
@@ -339,15 +380,25 @@ def main(
                 max_total_tokens=max_total_tokens,
             )
             episodes.append(record)
-            usage = record["usage"]
-            token_text = usage["total_tokens"] if isinstance(usage, dict) else usage
-            print(
-                f"{episode_dir.name} compliant={record['compliant']} "
-                f"tokens={token_text} usage_source={record['usage_source']} "
-                f"repairs={record['repairs']}",
-                flush=True,
-            )
-    report = _report(args.mode, api["frozen_limits"](), episodes)
+            if record.get("compliant"):
+                usage = record["usage"]
+                token_text = usage["total_tokens"] if isinstance(usage, dict) else usage
+                print(
+                    f"{episode_dir.name} compliant={record['compliant']} "
+                    f"tokens={token_text} usage_source={record['usage_source']} "
+                    f"repairs={record['repairs']}",
+                    flush=True,
+                )
+            else:
+                error = record.get("error") or {}
+                print(
+                    f"{episode_dir.name} compliant=False "
+                    f"error={error.get('type', 'unknown')} "
+                    f"usage_source={record.get('usage_source', 'unavailable')} "
+                    f"repairs={record.get('repairs', 0)}",
+                    flush=True,
+                )
+    report = _report(args.mode, api["frozen_limits"](), episodes, snapshot_source=snapshot_source)
     _write_report(args.out, report)
     digest = hashlib.sha256(args.out.read_bytes()).hexdigest()
     print(f"sha256 {digest}", flush=True)
@@ -507,7 +558,13 @@ def _load_previous(path: Path) -> dict[str, dict[str, Any]]:
     }
 
 
-def _report(mode: str, limits: dict[str, Any], episodes: list[dict[str, Any]]) -> dict[str, Any]:
+def _report(
+    mode: str,
+    limits: dict[str, Any],
+    episodes: list[dict[str, Any]],
+    *,
+    snapshot_source: str | None = None,
+) -> dict[str, Any]:
     ordered = sorted(episodes, key=lambda item: item["episode_id"])
     summary: dict[str, Any] = {"episodes": len(ordered)}
     if mode == "fake":
@@ -515,6 +572,9 @@ def _report(mode: str, limits: dict[str, Any], episodes: list[dict[str, Any]]) -
         summary["diff_rows"] = sum(item.get("diff_count", 0) for item in ordered)
     else:
         summary["compliant"] = sum(1 for item in ordered if item.get("compliant"))
+        failed = [item["episode_id"] for item in ordered if not item.get("compliant")]
+        summary["failures"] = len(failed)
+        summary["failed_episodes"] = failed
         summary["repairs"] = sum(item.get("repairs", 0) for item in ordered)
         summary["usage_source"] = _aggregate_usage_source(ordered)
         summary["prompt_tokens"] = _aggregate_tokens(ordered, "prompt_tokens")
@@ -526,7 +586,7 @@ def _report(mode: str, limits: dict[str, Any], episodes: list[dict[str, Any]]) -
             1 for item in decided if item["marker_matches_ledger_cut"]
         )
         summary["marker_compared"] = len(decided)
-    return {
+    report: dict[str, Any] = {
         "label": LABEL,
         "schema": SCHEMA,
         "mode": mode,
@@ -535,6 +595,10 @@ def _report(mode: str, limits: dict[str, Any], episodes: list[dict[str, Any]]) -
         "episodes": ordered,
         "summary": summary,
     }
+    # Fake canvas reports stay byte-pinned; only model mode records the ledger source.
+    if mode == "model":
+        report["snapshot_source"] = snapshot_source or "ledger"
+    return report
 
 
 def _usage_number(item: dict[str, Any], key: str) -> int | None:
