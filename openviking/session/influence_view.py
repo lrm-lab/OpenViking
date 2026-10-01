@@ -26,6 +26,17 @@ from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
 BLOCK_ROLES = frozenset(("task", "orchestrator", "agent_action", "conclusion"))
+# ``block_kind`` refines ``role``. ``unknown`` is the missing-key default only.
+BLOCK_KINDS = frozenset(
+    ("task", "tool_call", "tool_result", "orchestrator", "conclusion", "unknown")
+)
+BLOCK_KIND_ROLES: dict[str, str] = {
+    "task": "task",
+    "tool_call": "agent_action",
+    "tool_result": "agent_action",
+    "orchestrator": "orchestrator",
+    "conclusion": "conclusion",
+}
 PURPOSES = frozenset(("post_run_index", "failure_diagnosis"))
 CLAIM_STATUSES = frozenset(("hypothesis", "supported", "contradicted", "insufficient"))
 CONSTRUCTION_MODES = frozenset(("adaptive", "fallback"))
@@ -366,6 +377,7 @@ class InfluenceBlock:
     granularity_reason: str
     source_content_hashes: tuple[str, ...]
     source_refs: tuple[SourceRef, ...]
+    block_kind: str = "unknown"
 
     def __post_init__(self) -> None:
         ordered = tuple(sorted(self.source_refs, key=lambda ref: (ref.sequence, ref.ao_id)))
@@ -377,6 +389,13 @@ class InfluenceBlock:
         """Reject cross-participant, cross-segment, empty, or gapped spans."""
         _require_str(self.block_id, "block_id")
         _require_choice(self.role, "role", BLOCK_ROLES)
+        _require_choice(self.block_kind, "block_kind", BLOCK_KINDS)
+        if self.block_kind != "unknown":
+            refined = BLOCK_KIND_ROLES[self.block_kind]
+            if refined != self.role:
+                raise ValueError(
+                    f"block_kind {self.block_kind!r} refines role {refined!r}, got {self.role!r}"
+                )
         _require_str(self.participant_id, "participant_id")
         if not isinstance(self.segment_ref, SegmentRef):
             raise ValueError("segment_ref must be a single SegmentRef")
@@ -427,6 +446,7 @@ class InfluenceBlock:
             "granularity_reason": self.granularity_reason,
             "source_content_hashes": list(self.source_content_hashes),
             "source_refs": [ref.to_dict() for ref in self.source_refs],
+            "block_kind": self.block_kind,
         }
 
     @classmethod
@@ -457,6 +477,9 @@ class InfluenceBlock:
             ),
             source_content_hashes=tuple(str(item) for item in hashes),
             source_refs=refs,
+            block_kind=_require_choice(
+                payload.get("block_kind", "unknown"), "block_kind", BLOCK_KINDS
+            ),
         )
 
 

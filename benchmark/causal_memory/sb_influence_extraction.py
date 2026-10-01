@@ -42,6 +42,7 @@ def _load_openviking() -> None:
     global AOLedger
     global AORange
     global BM25Index
+    global BLOCK_KINDS
     global CAUSAL_MEMORY_CAP
     global CausalExperiencesStore
     global CoverageManifest
@@ -84,6 +85,7 @@ def _load_openviking() -> None:
     from openviking.session.extraction_write import freeze_extracted_view
     from openviking.session.influence_projection import ProjectionRegistry
     from openviking.session.influence_view import (
+        BLOCK_KINDS,
         MAX_RETRIEVAL_SUBGRAPH_BLOCKS,
         PURPOSE_POST_RUN_INDEX,
         RELATION_INFLUENCE,
@@ -849,6 +851,9 @@ def _build_blocks(
             block_output = _clip(item["text"], TEXT_CLIP)
             summary = block_output or "orchestrator"
         block_id = f"b-{row['sequence']:06d}"
+        kind = item["kind"]
+        if not isinstance(kind, str) or kind not in BLOCK_KINDS or kind == "unknown":
+            _fail(f"{session_id}: block {block_id} kind {kind!r} is not a typed block kind")
         block = InfluenceBlock(
             block_id=block_id,
             role=role,
@@ -863,6 +868,7 @@ def _build_blocks(
             granularity_reason=GRANULARITY_REASON,
             source_content_hashes=(row["content_hash"],),
             source_refs=(ref,),
+            block_kind=kind,
         )
         blocks.append(block)
         metas.append(
@@ -2360,12 +2366,24 @@ def _test_prompts(catalog: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+def _block_kind_counts(blocks: list[dict[str, Any]]) -> dict[str, int]:
+    """Counts of ``block_kind`` on ``InfluenceBlock.to_dict()`` payloads."""
+    counts = dict.fromkeys(sorted(BLOCK_KINDS), 0)
+    for block in blocks:
+        kind = block.get("block_kind", "unknown")
+        if not isinstance(kind, str) or kind not in counts:
+            _fail(f"block payload kind {kind!r} is outside BLOCK_KINDS")
+        counts[kind] += 1
+    return counts
+
+
 def _episode_table(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = []
     for record in records:
         rows.append(
             {
                 "episode_dir": record["episode_dir"],
+                "block_kind_counts": _block_kind_counts(record["revision"]["blocks"]),
                 "episode_id": record["episode_id"],
                 "task_id": record["task_id"],
                 "family": record["family"],
@@ -2391,6 +2409,7 @@ def _report(
     control: dict[str, Any] | None,
     l3: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    episodes = _episode_table(records)
     return {
         "schema": SCHEMA,
         "hit_definition": HIT_DEFINITION,
@@ -2399,7 +2418,14 @@ def _report(
         "attempts_path": str(SB_ATTEMPTS),
         "episodes_path": str(SB_EPISODES),
         "not_task_success": True,
-        "episodes": _episode_table(records),
+        "episodes": episodes,
+        "block_kind_distribution": [
+            {
+                "episode_dir": row["episode_dir"],
+                "block_kind_counts": row["block_kind_counts"],
+            }
+            for row in episodes
+        ],
         "forks": forks,
         "control": control,
         "l3": l3,
@@ -2527,6 +2553,9 @@ def main() -> None:
     digest = hashlib.sha256(args.out.read_bytes()).hexdigest()
     print(f"WROTE {args.out}")
     print(f"REPORT_SHA256 {digest}")
+    print("BLOCK_KIND_DISTRIBUTION")
+    for row in report["block_kind_distribution"]:
+        print(f"  {row['episode_dir']} {row['block_kind_counts']}")
     tool_total = sum(record["tool_calls"] for record in records)
     print(f"TOOL_CALLS_SUM {tool_total}")
 
