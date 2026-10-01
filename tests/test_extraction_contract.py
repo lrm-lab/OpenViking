@@ -909,3 +909,143 @@ def test_model_mode_without_provider_fails(
     assert not out.exists()
     captured = capsys.readouterr()
     assert "does not fall back to mode=fake" in captured.err
+
+
+class _DeltaHandle:
+    """String completion plus two different cumulative usage readings."""
+
+    def __init__(self, text: str, before: dict[str, int], after: dict[str, int]) -> None:
+        self.text = text
+        self.before = before
+        self.after = after
+        self.phase = 0
+        self.calls = 0
+
+    def get_token_usage(self) -> dict[str, int]:
+        return dict(self.before if self.phase == 0 else self.after)
+
+    def get_completion_async(self, messages: list[dict[str, str]], max_tokens: int) -> str:
+        del messages, max_tokens
+        self.calls += 1
+        self.phase = 1
+        return self.text
+
+
+class _BareStringHandle:
+    """String completion and no usage interface at all."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.calls = 0
+
+    def get_completion_async(self, messages: list[dict[str, str]], max_tokens: int) -> str:
+        del messages, max_tokens
+        self.calls += 1
+        return self.text
+
+
+def test_string_response_accounts_the_handle_usage_delta() -> None:
+    snapshot, text = _happy()
+    before = {"prompt_tokens": 11, "completion_tokens": 2, "total_tokens": 13}
+    after = {"prompt_tokens": 46, "completion_tokens": 19, "total_tokens": 65}
+    handle = _DeltaHandle(text, before, after)
+    provider = model_extraction_provider(handle)(snapshot)
+    payload = provider(SESSION, TASK, "unspecified")
+    assert payload.blocks
+    assert handle.calls == 1
+    assert provider.usage_source == "handle_tracker"
+    assert provider.usage["prompt_tokens"] == 35
+    assert provider.usage["completion_tokens"] == 17
+    assert provider.usage["total_tokens"] == 52
+
+
+def test_string_response_without_usage_interface_is_unavailable() -> None:
+    snapshot, text = _happy()
+    handle = _BareStringHandle(text)
+    provider = model_extraction_provider(handle)(snapshot)
+    payload = provider(SESSION, TASK, "unspecified")
+    assert payload.blocks
+    assert handle.calls == 1
+    assert provider.usage_source == "unavailable"
+
+
+def test_response_usage_wins_over_the_handle_tracker() -> None:
+    snapshot, text = _happy()
+    handle = _DeltaHandle(
+        text,
+        {"prompt_tokens": 100, "completion_tokens": 100, "total_tokens": 200},
+        {"prompt_tokens": 900, "completion_tokens": 900, "total_tokens": 1800},
+    )
+
+    def get_completion_async(messages: list[dict[str, str]], max_tokens: int) -> Any:
+        del messages, max_tokens
+        handle.calls += 1
+        handle.phase = 1
+        return SimpleNamespace(
+            content=text,
+            usage={"prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8},
+            finish_reason="stop",
+        )
+
+    handle.get_completion_async = get_completion_async  # type: ignore[method-assign]
+    provider = model_extraction_provider(handle)(snapshot)
+    provider(SESSION, TASK, "unspecified")
+    assert provider.usage_source == "response"
+    assert provider.usage["total_tokens"] == 8
+    assert provider.usage["prompt_tokens"] == 3
+    assert provider.usage["completion_tokens"] == 5
+
+
+def test_token_tracker_to_dict_delta_is_used_when_get_token_usage_is_absent() -> None:
+    snapshot, text = _happy()
+
+    class _Tracker:
+        def __init__(self) -> None:
+            self.phase = 0
+
+        def to_dict(self) -> dict[str, Any]:
+            prompt = 4 if self.phase == 0 else 19
+            completion = 1 if self.phase == 0 else 8
+            return {
+                "total_usage": {
+                    "prompt_tokens": prompt,
+                    "completion_tokens": completion,
+                    "total_tokens": prompt + completion,
+                },
+                "usage_by_model": {},
+            }
+
+    class _Handle:
+        def __init__(self) -> None:
+            self.token_tracker = _Tracker()
+            self.calls = 0
+
+        def get_completion_async(self, messages: list[dict[str, str]], max_tokens: int) -> str:
+            del messages, max_tokens
+            self.calls += 1
+            self.token_tracker.phase = 1
+            return text
+
+    handle = _Handle()
+    provider = model_extraction_provider(handle)(snapshot)
+    payload = provider(SESSION, TASK, "unspecified")
+    assert payload.blocks
+    assert provider.usage_source == "handle_tracker"
+    assert provider.usage["prompt_tokens"] == 15
+    assert provider.usage["completion_tokens"] == 7
+    assert provider.usage["total_tokens"] == 22
+
+
+def test_handle_tracker_delta_still_trips_the_total_cap() -> None:
+    snapshot, text = _happy()
+    handle = _DeltaHandle(
+        text,
+        {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        {"prompt_tokens": 40, "completion_tokens": 20, "total_tokens": 60},
+    )
+    provider = model_extraction_provider(handle, max_total_tokens=1)(snapshot)
+    with pytest.raises(ExtractionLimitError, match="MAX_TOTAL_TOKENS"):
+        provider(SESSION, TASK, "unspecified")
+    assert provider.usage_source == "handle_tracker"
+    assert provider.usage["total_tokens"] == 60
+    assert handle.calls == 1

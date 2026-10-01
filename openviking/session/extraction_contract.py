@@ -451,6 +451,10 @@ class _SnapshotExtractionProvider:
         max_total_tokens: int,
     ) -> None:
         self.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        # ``unavailable`` until a call is actually measured. A zero counter is
+        # not a measurement, and the report must not treat it as one.
+        self.usage_source = "unavailable"
+        self.usage_sources: list[str] = []
         self.finish_reasons: list[str] = []
         self.repairs = 0
         self.calls = 0
@@ -465,9 +469,11 @@ class _SnapshotExtractionProvider:
     def __call__(self, session_id: str, task_run_id: str, outcome_status: str) -> ExtractionPayload:
         del session_id, task_run_id, outcome_status
         while True:
+            before = _handle_usage_counts(self._vlm_handle)
             response = _run_completion(self._vlm_handle, self._messages, self._max_tokens_per_call)
+            after = _handle_usage_counts(self._vlm_handle)
             self.calls += 1
-            self._account(response)
+            self._account(response, before, after)
             text = ""
             try:
                 text = _response_text(response)
@@ -487,28 +493,41 @@ class _SnapshotExtractionProvider:
                     }
                 )
 
-    def _account(self, response: Any) -> None:
-        usage = getattr(response, "usage", None)
-        if usage is None and isinstance(response, Mapping):
-            usage = response.get("usage")
-        if not isinstance(usage, Mapping):
-            usage = {}
-        prompt_tokens = _usage_int(usage.get("prompt_tokens"))
-        completion_tokens = _usage_int(usage.get("completion_tokens"))
-        total_tokens = usage.get("total_tokens")
-        total = (
-            _usage_int(total_tokens)
-            if total_tokens is not None
-            else prompt_tokens + completion_tokens
-        )
-        self.usage["prompt_tokens"] += prompt_tokens
-        self.usage["completion_tokens"] += completion_tokens
-        self.usage["total_tokens"] += total
+    def _account(
+        self,
+        response: Any,
+        before: tuple[int, int, int] | None,
+        after: tuple[int, int, int] | None,
+    ) -> None:
+        """Account one call. Response usage wins. Otherwise use the handle delta.
+
+        The handle delta is a measurement for the books and the report. It
+        does not change the frozen caps: the same three checks still run on
+        the accounted numbers, and a hit still raises. No reading at all is
+        ``unavailable`` — the zero counters are not reported as a cost.
+        """
+        measured = _measured_usage(response, before, after)
         reason = getattr(response, "finish_reason", None)
         if reason is None and isinstance(response, str):
             reason = "stop"
         reason_text = reason if isinstance(reason, str) else ""
         self.finish_reasons.append(reason_text)
+        if measured is None:
+            self.usage_sources.append("unavailable")
+            self.usage_source = "unavailable"
+            if reason_text in {"length", "max_tokens"}:
+                self.truncated += 1
+                raise ExtractionLimitError(
+                    f"per-call output was truncated (finish_reason={reason_text}); "
+                    f"MAX_TOKENS_PER_CALL={self._max_tokens_per_call}"
+                )
+            return
+        prompt_tokens, completion_tokens, total, source = measured
+        self.usage_sources.append(source)
+        self.usage_source = _collapse_usage_source(self.usage_sources)
+        self.usage["prompt_tokens"] += prompt_tokens
+        self.usage["completion_tokens"] += completion_tokens
+        self.usage["total_tokens"] += total
         if completion_tokens > self._max_tokens_per_call:
             raise ExtractionLimitError(
                 f"completion_tokens {completion_tokens} exceed "
@@ -536,6 +555,100 @@ def _usage_int(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         return 0
     return value
+
+
+_USAGE_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens")
+
+
+def _collapse_usage_source(sources: list[str]) -> str:
+    """One label for the calls so far. Unknown spend is never called a zero."""
+    if not sources or "unavailable" in sources:
+        return "unavailable"
+    if all(item == "handle_tracker" for item in sources):
+        return "handle_tracker"
+    if all(item == "response" for item in sources):
+        return "response"
+    return "response"
+
+
+def _response_usage(response: Any) -> Mapping[str, Any] | None:
+    """Usage carried on the response, or None when the response has none."""
+    usage = getattr(response, "usage", None)
+    if usage is None and isinstance(response, Mapping):
+        usage = response.get("usage")
+    if not isinstance(usage, Mapping):
+        return None
+    if not any(key in usage for key in _USAGE_KEYS):
+        return None
+    return usage
+
+
+def _usage_triple(usage: Mapping[str, Any]) -> tuple[int, int, int]:
+    prompt_tokens = _usage_int(usage.get("prompt_tokens"))
+    completion_tokens = _usage_int(usage.get("completion_tokens"))
+    total_tokens = usage.get("total_tokens")
+    total = (
+        _usage_int(total_tokens) if total_tokens is not None else prompt_tokens + completion_tokens
+    )
+    return prompt_tokens, completion_tokens, total
+
+
+def _coerce_usage_counts(raw: Any) -> tuple[int, int, int] | None:
+    """Normalize a flat usage dict or a tracker ``to_dict()`` payload."""
+    if not isinstance(raw, Mapping):
+        return None
+    body: Mapping[str, Any] = raw
+    nested = raw.get("total_usage")
+    if isinstance(nested, Mapping):
+        body = nested
+    if not any(key in body for key in _USAGE_KEYS):
+        return None
+    return _usage_triple(body)
+
+
+def _read_usage_reader(reader: Any) -> Any:
+    try:
+        return reader()
+    except Exception:
+        return None
+
+
+def _handle_usage_counts(handle: Any) -> tuple[int, int, int] | None:
+    """Cumulative prompt/completion/total on the handle, or None if it has none.
+
+    Prefer ``get_token_usage()``. Fall back to ``token_tracker.to_dict()``.
+    Neither interface is an error: the caller skips the reading.
+    """
+    getter = getattr(handle, "get_token_usage", None)
+    if callable(getter):
+        counts = _coerce_usage_counts(_read_usage_reader(getter))
+        if counts is not None:
+            return counts
+    tracker = getattr(handle, "token_tracker", None)
+    to_dict = getattr(tracker, "to_dict", None) if tracker is not None else None
+    if not callable(to_dict):
+        return None
+    return _coerce_usage_counts(_read_usage_reader(to_dict))
+
+
+def _measured_usage(
+    response: Any,
+    before: tuple[int, int, int] | None,
+    after: tuple[int, int, int] | None,
+) -> tuple[int, int, int, str] | None:
+    """Response usage, else the handle's before/after delta, else None."""
+    response_usage = _response_usage(response)
+    if response_usage is not None:
+        prompt_tokens, completion_tokens, total = _usage_triple(response_usage)
+        return prompt_tokens, completion_tokens, total, "response"
+    if before is None or after is None:
+        return None
+    return (
+        after[0] - before[0],
+        after[1] - before[1],
+        after[2] - before[2],
+        "handle_tracker",
+    )
 
 
 def _run_completion(vlm_handle: Any, messages: list[dict[str, str]], max_tokens: int) -> Any:
