@@ -16,6 +16,12 @@ from the commit hook that only knew that path. When a provider is injected,
 the build freezes that payload as ``construction_mode=adaptive``. The
 provider is not read from config and this hook does not call a model.
 
+``extraction_provider_factory`` is the other injection. It receives the
+commit snapshot, including ``ledger_rows``, and returns a provider. The
+builder stays the three-argument ``(session_id, task_run_id, outcome_status)``
+callable. Pass the provider or the factory, not both. Neither is read from
+config.
+
 On-disk layout, under the session directory:
 
 * ``views.json`` — ``ViewSupersedeIndex``
@@ -43,6 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from openviking.session.ao_ledger_reader import MAX_PAGE_LIMIT, list_ao_ledger
+from openviking.session.extraction_contract import ExtractionProviderFactory
 from openviking.session.extraction_write import ExtractionProvider, extraction_index_builder
 from openviking.session.influence_projection import ProjectionRegistry
 from openviking.session.influence_view import PURPOSE_POST_RUN_INDEX, ViewSupersedeIndex
@@ -224,6 +231,8 @@ def _index_commit(
     task_id: str,
     config: Any,
     extraction_provider: ExtractionProvider | None = None,
+    *,
+    extraction_provider_factory: ExtractionProviderFactory | None = None,
 ) -> None:
     if not isinstance(task_id, str) or not task_id.strip():
         return
@@ -236,9 +245,8 @@ def _index_commit(
     if session_dir is None:
         return
 
-    ao_records = [
-        _view_ao_record(item, session_id) for item in _page_ao_records(session_dir, session_id)
-    ]
+    ledger_rows = _page_ao_records(session_dir, session_id)
+    ao_records = [_view_ao_record(item, session_id) for item in ledger_rows]
     if not ao_records:
         return
 
@@ -264,13 +272,20 @@ def _index_commit(
             "frozen_at": job.enqueued_at,
             "snapshot_watermark": watermark,
             "ao_records": ao_records,
+            "ledger_rows": ledger_rows,
         }
 
+    if extraction_provider is not None and extraction_provider_factory is not None:
+        raise ValueError("pass extraction_provider or extraction_provider_factory, not both")
+    # Factory binds this commit's snapshot. The builder stays the 3-arg
+    # (session_id, task_run_id, outcome_status) callable, so existing builders
+    # are not given a new parameter.
+    provider = extraction_provider
+    if extraction_provider_factory is not None:
+        provider = extraction_provider_factory(fallback_session(job))
     service_kwargs: dict[str, Any] = {}
-    if extraction_provider is not None:
-        service_kwargs["builder"] = extraction_index_builder(
-            extraction_provider, frozen_at=job.enqueued_at
-        )
+    if provider is not None:
+        service_kwargs["builder"] = extraction_index_builder(provider, frozen_at=job.enqueued_at)
     service = TrajectoryIndexService(
         session_dir / TRAJECTORY_INDEX_FILENAME,
         ViewSupersedeIndex(session_dir / VIEWS_FILENAME),
@@ -281,7 +296,7 @@ def _index_commit(
     )
     service.enqueue(job)
     result = service.process_next(_policy(config))
-    if extraction_provider is not None:
+    if provider is not None:
         _log_phase2_index_result(result)
 
 
@@ -336,17 +351,25 @@ def maybe_index_session_trajectory(
     *,
     config: Any = None,
     extraction_provider: ExtractionProvider | None = None,
+    extraction_provider_factory: ExtractionProviderFactory | None = None,
 ) -> None:
     """Causal-only Phase 1 hook. Legacy is a single boolean check and returns.
 
     ``extraction_provider`` defaults to ``None``, which keeps the deterministic
     ledger fallback. A provider is called only from the index builder, as
     ``(session_id, task_run_id, outcome_status)``, and must return an
-    ``ExtractionPayload``.
+    ``ExtractionPayload``. ``extraction_provider_factory`` receives the commit
+    snapshot and returns that provider. Both default to ``None``.
     """
     try:
         if not is_causal_mode_enabled(config, session_id=getattr(session, "session_id", None)):
             return
-        _index_commit(session, task_id, config, extraction_provider=extraction_provider)
+        _index_commit(
+            session,
+            task_id,
+            config,
+            extraction_provider=extraction_provider,
+            extraction_provider_factory=extraction_provider_factory,
+        )
     except Exception:
         logger.warning("trajectory index hook failed", exc_info=True)

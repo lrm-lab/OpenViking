@@ -82,6 +82,7 @@ from openviking_cli.utils.config import get_openviking_config
 if TYPE_CHECKING:
     from openviking.config.vlm import VLMResolver
     from openviking.session.compressor_v3 import SessionCompressorV3 as SessionCompressor
+    from openviking.session.extraction_contract import ExtractionProviderFactory
     from openviking.session.extraction_write import ExtractionProvider
     from openviking.storage import VikingDBManager
     from openviking.storage.queuefs.session_commit_msg import SessionCommitMsg
@@ -435,6 +436,7 @@ class Session:
         vlm_resolver: Optional["VLMResolver"] = None,
         *,
         extraction_provider: Optional["ExtractionProvider"] = None,
+        extraction_provider_factory: Optional["ExtractionProviderFactory"] = None,
         diagnosis_sink: Optional[Callable[..., None]] = None,
     ):
         self._viking_fs = viking_fs
@@ -476,6 +478,7 @@ class Session:
         self._usage_reporter = usage_reporter
         self._vlm_resolver = vlm_resolver
         self._extraction_provider = extraction_provider
+        self._extraction_provider_factory = extraction_provider_factory
         self._diagnosis_sink = diagnosis_sink
 
     async def _get_vlm_config(self):
@@ -1941,18 +1944,21 @@ class Session:
     def _run_post_extraction_causal_seam(self, task_id: str) -> None:
         """Phase 2 trajectory index and optional diagnosis callback.
 
-        No provider means the hook is not called: Phase 1 already froze the
-        fallback revision, and another provider-less build would spend the
-        trajectory-index budget without changing that view. No sink means
-        briefs are not read. Failures are logged; Phase 2 still writes ``.done``.
+        No provider and no provider factory means the hook is not called:
+        Phase 1 already froze the fallback revision, and another provider-less
+        build would spend the trajectory-index budget without changing that
+        view. No sink means briefs are not read. Failures are logged; Phase 2
+        still writes ``.done``.
         """
         try:
             provider = self._extraction_provider
-            if provider is not None:
+            factory = self._extraction_provider_factory
+            if provider is not None or factory is not None:
                 maybe_index_session_trajectory(
                     self,
                     task_id,
                     extraction_provider=provider,
+                    extraction_provider_factory=factory,
                 )
             sink = self._diagnosis_sink
             if sink is None:

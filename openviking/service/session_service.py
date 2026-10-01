@@ -49,6 +49,7 @@ logger = get_logger(__name__)
 if TYPE_CHECKING:
     from openviking.config.vlm import VLMResolver
     from openviking.session.compressor_v3 import SessionCompressorV3
+    from openviking.session.extraction_contract import ExtractionProviderFactory
     from openviking.session.extraction_write import ExtractionProvider
     from openviking.usage_reporter import UsageReporter
 
@@ -73,6 +74,7 @@ class SessionService:
         self._default_user_auto_commit_policy: Optional[Dict[str, Any]] = None
         self._usage_reporter: Optional["UsageReporter"] = None
         self._extraction_provider: Optional["ExtractionProvider"] = None
+        self._extraction_provider_factory: Optional["ExtractionProviderFactory"] = None
         self._diagnosis_sink: Optional[Callable[..., None]] = None
         # Server-wide controls remain disabled until configured during app setup.
         self._session_auto_commit_config = SessionAutoCommitConfig()
@@ -109,6 +111,17 @@ class SessionService:
         read from config.
         """
         self._extraction_provider = provider
+
+    def set_extraction_provider_factory(
+        self, factory: Optional["ExtractionProviderFactory"]
+    ) -> None:
+        """Set the Phase 2 extraction provider factory for newly created sessions.
+
+        The factory receives the commit snapshot and returns an
+        ``ExtractionProvider``. ``None`` leaves the factory unset. This is not
+        read from config.
+        """
+        self._extraction_provider_factory = factory
 
     def set_diagnosis_sink(self, sink: Optional[Callable[..., None]]) -> None:
         """Set the post-extraction diagnosis callback for newly created sessions.
@@ -238,6 +251,7 @@ class SessionService:
             usage_reporter=self._usage_reporter,
             vlm_resolver=self._vlm_resolver,
             extraction_provider=self._extraction_provider,
+            extraction_provider_factory=self._extraction_provider_factory,
             diagnosis_sink=self._diagnosis_sink,
         )
 
