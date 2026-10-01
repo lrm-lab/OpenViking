@@ -800,3 +800,112 @@ async def test_factory_contract_error_leaves_fallback_latest(
         assert loaded.revision_id == fallback_id
     finally:
         set_task_tracker(None)
+
+
+def _stub_contract(model_input: dict[str, Any]) -> str:
+    """One legal block over the first live row. The rest of the page is omitted by the parser."""
+    rows = model_input["rows"]
+    first = rows[0]
+    document = {
+        "schema_version": EXTRACTION_CONTRACT_VERSION,
+        "blocks": [
+            {
+                "block_id": "b-stub",
+                "role": "agent_action",
+                "block_kind": "tool_call",
+                "participant_id": first["participant_id"],
+                "segment_id": first["segment_id"],
+                "ao_start_seq": first["sequence"],
+                "ao_end_seq": first["sequence"],
+                "summary": "stub span",
+                "input": "",
+                "output": "",
+                "authorship": "stub",
+                "granularity_reason": "one live row",
+            }
+        ],
+        "claims": [],
+        "subgraphs": [],
+        "coverage": {
+            "total_ao_start_seq": min(row["sequence"] for row in rows),
+            "total_ao_end_seq": max(row["sequence"] for row in rows),
+            "inspected_ao_ids": [row["ao_id"] for row in rows],
+            "snapshot_watermark": model_input["snapshot_watermark"],
+        },
+    }
+    return json.dumps(document)
+
+
+class _FixedVLM:
+    def __init__(self, content: str, usage: dict[str, int], finish_reason: str = "stop") -> None:
+        self.content = content
+        self.usage = usage
+        self.finish_reason = finish_reason
+        self.calls = 0
+
+    def get_completion_async(self, messages: list[dict[str, str]], max_tokens: int) -> Any:
+        del messages, max_tokens
+        self.calls += 1
+        return SimpleNamespace(
+            content=self.content, finish_reason=self.finish_reason, usage=dict(self.usage)
+        )
+
+
+def test_stub_vlm_model_mode_lands_adaptive_revision(tmp_path: Path) -> None:
+    from benchmark.causal_memory import r9_model_extraction as runner
+
+    api = runner._bind()
+    episode_dirs = api["sb"]._episode_dirs()
+    episode_dir = next(path for path in episode_dirs if path.name.startswith("0008"))
+    episode_index = next(index for index, path in enumerate(episode_dirs) if path == episode_dir)
+    snapshot, _parsed = runner.episode_snapshot(api, episode_dir, episode_index, tmp_path / "prep")
+    model_input = build_model_input(snapshot)
+    handle = _FixedVLM(
+        _stub_contract(model_input),
+        {"prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8},
+    )
+    out = tmp_path / "report.json"
+    code = runner.main(
+        ["--mode", "model", "--episode", "0008", "--out", str(out)],
+        vlm_handle=handle,
+    )
+    assert code == 0
+    assert handle.calls == 1
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["label"] == "契约与管道测试，不回答检索价值／不回答模型是否更好"
+    assert report["summary"]["compliant"] == 1
+    assert report["summary"]["total_tokens"] == 8
+    episode = report["episodes"][0]
+    assert episode["construction_mode"] == "adaptive"
+    assert episode["usage"]["total_tokens"] == 8
+    assert episode["revision_id"].endswith(":adaptive")
+    index = ViewSupersedeIndex(tmp_path / "views.json")
+    latest = index.latest(snapshot["session_id"], PURPOSE_POST_RUN_INDEX)
+    assert latest is not None
+    assert latest.revision_id == episode["revision_id"]
+    assert latest.construction_mode == "adaptive"
+
+
+def test_stub_vlm_token_cap_raises(tmp_path: Path) -> None:
+    from benchmark.causal_memory import r9_model_extraction as runner
+
+    handle = _FixedVLM("{}", {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 50})
+    with pytest.raises(ExtractionLimitError, match="MAX_TOTAL_TOKENS"):
+        runner.main(
+            ["--mode", "model", "--episode", "0008", "--out", str(tmp_path / "report.json")],
+            vlm_handle=handle,
+            max_total_tokens=1,
+        )
+
+
+def test_model_mode_without_provider_fails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from benchmark.causal_memory import r9_model_extraction as runner
+
+    out = tmp_path / "report.json"
+    code = runner.main(["--mode", "model", "--episode", "0008", "--out", str(out)])
+    assert code == 2
+    assert not out.exists()
+    captured = capsys.readouterr()
+    assert "does not fall back to mode=fake" in captured.err
