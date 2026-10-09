@@ -5,7 +5,8 @@
 Cards carry a semantic summary, an embedding stub, and a source pointer.
 They do not store the view body or raw AO text. Verified promotion follows
 validated ForkRevision grounding (Q113-A). An ACL change withdraws every
-card from that session and keeps an audit record (Q114-A).
+card from that session, keeps an audit record (Q114-A), and notifies each
+withdrawn source view revision once, in card-id order.
 """
 
 from __future__ import annotations
@@ -508,7 +509,12 @@ class ProjectionRegistry:
         session_id: str,
         new_labels: Sequence[str],
     ) -> tuple[RemovalRecord, ...]:
-        """Withdraw every active card from ``session_id`` and keep an audit row."""
+        """Withdraw every active card from ``session_id`` and keep an audit row.
+
+        Each withdrawn card's source ``view_revision_id`` is notified once.
+        Order follows the audit rows (card id). The withdrawal records themselves
+        stay the same.
+        """
         session = _require_str(session_id, "session_id")
         labels = _normalize_labels(new_labels, "new_labels")
         with self._lock:
@@ -524,7 +530,7 @@ class ProjectionRegistry:
             )
             if removed:
                 self._save_locked()
-                self._notify_revalidation_locked(session)
+                self._notify_withdrawn_revisions_locked(removed)
             return removed
 
     def withdraw_superseded(

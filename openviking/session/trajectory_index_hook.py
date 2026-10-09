@@ -27,23 +27,32 @@ On-disk layout, under the session directory:
 * ``views.json`` — ``ViewSupersedeIndex``
 * ``trajectory-index.json`` — ``TrajectoryIndexService`` queue snapshot
 * ``projections.json`` — ``ProjectionRegistry`` of cards for this session
+* ``needs-revalidation.json`` — revision ids notified for revalidation
 
 A session whose owner cannot be resolved still freezes the view and the
 index. Projection cards are skipped in that case: visibility fails closed,
-and indexing itself is not an access check. ``revalidation_callback`` only
-logs the notified revision id. Nothing persists ``needs_revalidation``.
+and indexing itself is not an access check. The same ``revalidation_callback``
+is given to the index service and to ``ProjectionRegistry``. It appends each
+notified revision id to ``needs-revalidation.json`` in the session directory:
+a JSON array, deduplicated, original order kept. An ACL withdrawal therefore
+records the source view revision of each card it removes. When the session
+exposes ``causal_experiences.mark_needs_revalidation``, that method is called
+with the same revision id and does not rewrite the revision.
 
 ``task_run_id`` is this commit's ``task_id``. There is no task-run entity.
-``priority`` is ``2`` and ``outcome_status`` is ``"unspecified"``: commit
-cannot see task success or failure, and the priority enum has no neutral
-member. ``2`` is the lowest-urgency legal value; it is not a success verdict.
+When the session exposes ``index_outcome_status`` as ``evaluation``,
+``failed``, or ``succeeded``, the job is queued at priority 0, 1, or 2 with
+that outcome. Otherwise ``priority`` is ``2`` and ``outcome_status`` is
+``"unspecified"``: commit cannot see task success or failure, and the
+priority enum has no neutral member. ``2`` is the lowest-urgency legal value;
+it is not a success verdict.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -55,9 +64,12 @@ from openviking.session.influence_projection import ProjectionRegistry
 from openviking.session.influence_view import PURPOSE_POST_RUN_INDEX, ViewSupersedeIndex
 from openviking.session.session_acl import session_acl_callback
 from openviking.session.trajectory_index import (
+    PRIORITY_EVALUATION,
+    PRIORITY_FAILED,
     PRIORITY_SUCCEEDED,
     IndexJob,
     IndexedResult,
+    Priority,
     SkippedResult,
     TrajectoryIndexService,
     WorkspacePolicy,
@@ -72,10 +84,16 @@ from openviking_cli.utils.config.memory_config import (
 VIEWS_FILENAME = "views.json"
 TRAJECTORY_INDEX_FILENAME = "trajectory-index.json"
 PROJECTIONS_FILENAME = "projections.json"
+NEEDS_REVALIDATION_FILENAME = "needs-revalidation.json"
 
 # Lowest-urgency legal priority. Not a claim that the task succeeded.
 COMMIT_INDEX_PRIORITY = PRIORITY_SUCCEEDED
 COMMIT_INDEX_OUTCOME_STATUS = "unspecified"
+_INDEX_OUTCOME_PRIORITY: dict[str, Priority] = {
+    "evaluation": PRIORITY_EVALUATION,
+    "failed": PRIORITY_FAILED,
+    "succeeded": PRIORITY_SUCCEEDED,
+}
 UNSPECIFIED_PARTICIPANT_ID = "unspecified"
 
 logger = get_logger(__name__)
@@ -214,6 +232,70 @@ def _stable_snapshot_watermark(session_id: str, ao_records: list[Mapping[str, An
     return f"ao-ledger:{digest}"
 
 
+def _commit_index_priority(session: Any) -> tuple[Priority, str]:
+    """Map ``index_outcome_status`` onto the queue. Unknown values stay unspecified."""
+    raw = getattr(session, "index_outcome_status", None)
+    if isinstance(raw, str):
+        priority = _INDEX_OUTCOME_PRIORITY.get(raw)
+        if priority is not None:
+            return priority, raw
+    return COMMIT_INDEX_PRIORITY, COMMIT_INDEX_OUTCOME_STATUS
+
+
+def _read_needs_revalidation(path: Path) -> list[str]:
+    if not path.is_file():
+        return []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, list) or any(not isinstance(item, str) for item in payload):
+        raise ValueError(f"{path.name} must be a JSON array of revision ids")
+    return payload
+
+
+def _append_needs_revalidation(session_dir: Path, revision_id: str) -> None:
+    """Record one notified revision id. Duplicates stay in their original place."""
+    if not isinstance(revision_id, str) or not revision_id.strip():
+        raise ValueError("revision_id must be a non-empty str")
+    path = session_dir / NEEDS_REVALIDATION_FILENAME
+    current = _read_needs_revalidation(path)
+    if revision_id in current:
+        logger.warning(
+            "revalidation_callback notified revision %s; already recorded in %s",
+            revision_id,
+            NEEDS_REVALIDATION_FILENAME,
+        )
+        return
+    current.append(revision_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(current, ensure_ascii=False, indent=2) + "\n"
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(text, encoding="utf-8")
+    temporary.replace(path)
+    logger.warning(
+        "revalidation_callback notified revision %s; appended to %s",
+        revision_id,
+        NEEDS_REVALIDATION_FILENAME,
+    )
+
+
+def _mark_causal_needs_revalidation(session: Any, revision_id: str) -> None:
+    """Flag intervention history when the session store can do that.
+
+    Sessions without ``causal_experiences``, or stores without
+    ``mark_needs_revalidation``, are left unchanged.
+    """
+    experiences = getattr(session, "causal_experiences", None)
+    mark = getattr(experiences, "mark_needs_revalidation", None)
+    if not callable(mark):
+        return
+    mark(revision_id)
+
+
+def _record_needs_revalidation(session: Any, session_dir: Path, revision_id: str) -> None:
+    """Persist one notified revision id and flag causal history when present."""
+    _append_needs_revalidation(session_dir, revision_id)
+    _mark_causal_needs_revalidation(session, revision_id)
+
+
 def _policy(config: Any) -> WorkspacePolicy:
     try:
         section = resolve_trajectory_index_config(config)
@@ -251,12 +333,13 @@ def _index_commit(
         return
 
     watermark = _stable_snapshot_watermark(session_id, ao_records)
+    priority, outcome_status = _commit_index_priority(session)
     job = IndexJob(
         job_id=f"post-run:{session_id}:{task_run_id}",
         session_id=session_id,
         task_run_id=task_run_id,
-        priority=COMMIT_INDEX_PRIORITY,
-        outcome_status=COMMIT_INDEX_OUTCOME_STATUS,
+        priority=priority,
+        outcome_status=outcome_status,
         enqueued_at=datetime.now(timezone.utc).isoformat(),
     )
 
@@ -286,12 +369,16 @@ def _index_commit(
     service_kwargs: dict[str, Any] = {}
     if provider is not None:
         service_kwargs["builder"] = extraction_index_builder(provider, frozen_at=job.enqueued_at)
+
+    def revalidation_callback(revision_id: str) -> None:
+        _record_needs_revalidation(session, session_dir, revision_id)
+
     service = TrajectoryIndexService(
         session_dir / TRAJECTORY_INDEX_FILENAME,
         ViewSupersedeIndex(session_dir / VIEWS_FILENAME),
         fallback_session=fallback_session,
-        projection_registry=_projection_registry(session, session_dir),
-        revalidation_callback=_warn_revalidation_not_persisted,
+        projection_registry=_projection_registry(session, session_dir, revalidation_callback),
+        revalidation_callback=revalidation_callback,
         **service_kwargs,
     )
     service.enqueue(job)
@@ -300,11 +387,17 @@ def _index_commit(
         _log_phase2_index_result(result)
 
 
-def _projection_registry(session: Any, session_dir: Path) -> ProjectionRegistry | None:
+def _projection_registry(
+    session: Any,
+    session_dir: Path,
+    revalidation_callback: Callable[[str], None],
+) -> ProjectionRegistry | None:
     """Build this commit's registry, or skip it when the owner is unknown.
 
     Indexing still runs. The missing registry is the visibility failure, not
-    a reason to drop the frozen view.
+    a reason to drop the frozen view. ``revalidation_callback`` is the same
+    function the index service uses, so an ACL withdrawal writes
+    ``needs-revalidation.json`` too.
     """
     try:
         session_acl = session_acl_callback(session)
@@ -317,6 +410,7 @@ def _projection_registry(session: Any, session_dir: Path) -> ProjectionRegistry 
     return ProjectionRegistry(
         session_dir / PROJECTIONS_FILENAME,
         session_acl=session_acl,
+        revalidation_callback=revalidation_callback,
     )
 
 
@@ -334,14 +428,6 @@ def _log_phase2_index_result(result: IndexedResult | SkippedResult) -> None:
         result.revision.revision_id,
         result.revision.construction_mode,
         result.job.job_id,
-    )
-
-
-def _warn_revalidation_not_persisted(revision_id: str) -> None:
-    """Log a revalidation notice. Production has no consumer to persist it."""
-    logger.warning(
-        "revalidation_callback notified revision %s; needs_revalidation was not persisted",
-        revision_id,
     )
 
 

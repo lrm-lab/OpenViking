@@ -16,6 +16,7 @@ from openviking.message import TextPart, ToolPart
 from openviking.session.ao_ledger import LEDGER_FILENAME, AOLedger
 from openviking.session.ao_ledger_reader import MAX_PAGE_LIMIT
 from openviking.session.ao_ledger_recorder import ATTRIBUTION_FILENAME
+from openviking.session.influence_projection import REMOVAL_ACL_CHANGE, ProjectionRegistry
 from openviking.session.influence_view import (
     CONSTRUCTION_MODE_FALLBACK,
     DETERMINISTIC_FALLBACK_REASON,
@@ -30,6 +31,7 @@ from openviking.session.trajectory_index import (
     TrajectoryIndexService,
 )
 from openviking.session.trajectory_index_hook import (
+    NEEDS_REVALIDATION_FILENAME,
     TRAJECTORY_INDEX_FILENAME,
     VIEWS_FILENAME,
     maybe_index_session_trajectory,
@@ -147,6 +149,15 @@ def _append_segment(
 
 def _revision(root: Path, session_id: str = SESSION_ID):
     return ViewSupersedeIndex(root / VIEWS_FILENAME).latest(session_id, PURPOSE_POST_RUN_INDEX)
+
+
+class _FakeCausalExperiences:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def mark_needs_revalidation(self, view_revision_id: str) -> int:
+        self.calls.append(view_revision_id)
+        return len(self.calls)
 
 
 def _install_commit_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -294,6 +305,145 @@ def test_ledger_pages_past_the_first_page(tmp_path: Path, monkeypatch: pytest.Mo
     found = [ref.ao_id for block in revision.blocks for ref in block.source_refs]
     assert found == expected
     assert len(revision.blocks) == MAX_PAGE_LIMIT + 1
+
+
+def test_paused_failed_outcome_enqueues_priority_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A paused session with a failed outcome still queues at failed priority."""
+    _forbid_synthetic(monkeypatch)
+    ledger = AOLedger(tmp_path, SESSION_ID)
+    _append_segment(ledger, segment_id="seg-a", participant_id="agent-a", tool="read_file")
+    session = _bound_session(tmp_path)
+    session.index_outcome_status = "failed"
+
+    maybe_index_session_trajectory(
+        session,
+        "task-1",
+        config=_causal_config(paused=True),
+    )
+
+    assert _revision(tmp_path) is None
+    service = TrajectoryIndexService(
+        tmp_path / TRAJECTORY_INDEX_FILENAME,
+        ViewSupersedeIndex(tmp_path / "reloaded-views.json"),
+        fallback_session=lambda _job: {},
+    )
+    pending = service.pending_jobs()
+    assert len(pending) == 1
+    job = pending[0]
+    assert job.job_id == f"post-run:{SESSION_ID}:task-1"
+    assert job.priority == 1
+    assert job.outcome_status == "failed"
+
+
+def test_new_ao_then_later_task_records_previous_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A superseding task records the previous revision id for revalidation.
+
+    Indexing the same ledger again does not register another view.
+    """
+    _forbid_synthetic(monkeypatch)
+    ledger = AOLedger(tmp_path, SESSION_ID)
+    _append_segment(ledger, segment_id="seg-a", participant_id="agent-a", tool="read_file")
+    session = _bound_session(tmp_path)
+    config = _causal_config()
+    first_revision_id = f"post-run:{SESSION_ID}:task-1"
+
+    maybe_index_session_trajectory(session, "task-1", config=config)
+    first = _revision(tmp_path)
+    assert first is not None
+    assert first.revision_id == first_revision_id
+
+    _append_segment(ledger, segment_id="seg-b", participant_id="agent-b", tool="search")
+    maybe_index_session_trajectory(session, "task-2", config=config)
+
+    recorded = json.loads((tmp_path / "needs-revalidation.json").read_text(encoding="utf-8"))
+    assert recorded == [first_revision_id]
+    history = ViewSupersedeIndex(tmp_path / VIEWS_FILENAME).history(
+        SESSION_ID, PURPOSE_POST_RUN_INDEX
+    )
+    assert [item.revision_id for item in history] == [
+        first_revision_id,
+        f"post-run:{SESSION_ID}:task-2",
+    ]
+
+    maybe_index_session_trajectory(session, "task-2", config=config)
+    history = ViewSupersedeIndex(tmp_path / VIEWS_FILENAME).history(
+        SESSION_ID, PURPOSE_POST_RUN_INDEX
+    )
+    assert [item.revision_id for item in history] == [
+        first_revision_id,
+        f"post-run:{SESSION_ID}:task-2",
+    ]
+    recorded_again = json.loads((tmp_path / "needs-revalidation.json").read_text(encoding="utf-8"))
+    assert recorded_again == [first_revision_id]
+
+
+def test_second_content_change_marks_causal_experiences_with_old_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later content change flags the previous view revision on the store.
+
+    The first index has nothing to supersede, so the store is not called.
+    The second call receives that earlier revision id, never the session id.
+    """
+    _forbid_synthetic(monkeypatch)
+    ledger = AOLedger(tmp_path, SESSION_ID)
+    _append_segment(ledger, segment_id="seg-a", participant_id="agent-a", tool="read_file")
+    session = _bound_session(tmp_path)
+    store = _FakeCausalExperiences()
+    session.causal_experiences = store
+    config = _causal_config()
+    first_revision_id = f"post-run:{SESSION_ID}:task-1"
+
+    maybe_index_session_trajectory(session, "task-1", config=config)
+    assert store.calls == []
+
+    _append_segment(ledger, segment_id="seg-b", participant_id="agent-b", tool="search")
+    maybe_index_session_trajectory(session, "task-2", config=config)
+
+    assert store.calls
+    assert all(call == first_revision_id for call in store.calls)
+    assert SESSION_ID not in store.calls
+    recorded = json.loads((tmp_path / NEEDS_REVALIDATION_FILENAME).read_text(encoding="utf-8"))
+    assert recorded == [first_revision_id]
+
+
+def test_acl_withdrawal_records_source_view_revisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hook's registry uses the same callback, so ACL withdrawal is persisted."""
+    _forbid_synthetic(monkeypatch)
+    registries: list[ProjectionRegistry] = []
+    original_init = ProjectionRegistry.__init__
+
+    def _capture(self: ProjectionRegistry, *args: object, **kwargs: object) -> None:
+        original_init(self, *args, **kwargs)
+        registries.append(self)
+
+    monkeypatch.setattr(ProjectionRegistry, "__init__", _capture)
+    ledger = AOLedger(tmp_path, SESSION_ID)
+    _append_segment(ledger, segment_id="seg-a", participant_id="agent-a", tool="read_file")
+    _append_segment(ledger, segment_id="seg-b", participant_id="agent-b", tool="search")
+    maybe_index_session_trajectory(_bound_session(tmp_path), "task-1", config=_causal_config())
+
+    assert len(registries) == 1
+    removed = registries[0].handle_acl_change(SESSION_ID, ("user:other",))
+    revision_ids: list[str] = []
+    for record in removed:
+        revision_id = record.card.source_pointer.view_revision_id
+        if revision_id not in revision_ids:
+            revision_ids.append(revision_id)
+    assert len(removed) == 2
+    assert len(revision_ids) == 1
+    assert revision_ids == [f"post-run:{SESSION_ID}:task-1"]
+    assert all(record.reason == REMOVAL_ACL_CHANGE for record in removed)
+    assert all(record.session_id == SESSION_ID for record in removed)
+    recorded = json.loads((tmp_path / NEEDS_REVALIDATION_FILENAME).read_text(encoding="utf-8"))
+    assert recorded == revision_ids
+    assert SESSION_ID not in recorded
 
 
 def test_paused_leaves_the_job_queued(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

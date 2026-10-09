@@ -368,26 +368,63 @@ def test_promote_rejects_static_positions_without_fork_provenance(tmp_path) -> N
     )
 
 
-def test_acl_change_calls_revalidation_callback_with_session(tmp_path) -> None:
+def test_acl_change_notifies_each_withdrawn_view_revision_once(tmp_path) -> None:
+    """ACL withdrawal notifies source view revisions, not the session id.
+
+    Cards that share a view revision notify once. Order follows the audit
+    rows, which are already sorted by card id. Another session is left alone.
+    """
     seen: list[str] = []
     registry = _registry(tmp_path, revalidation_callback=seen.append)
-    registry.register(_fallback(SESSION, "rev-1"), acl_labels=("team-a",))
-    registry.register(_fallback(OTHER, "rev-2"), acl_labels=("team-b",))
+    registry.register(_revision_with_claim(SESSION, "rev-claim"), acl_labels=("team-a",))
+    registry.register(
+        _fallback(SESSION, "rev-diag", purpose=PURPOSE_FAILURE_DIAGNOSIS),
+        acl_labels=("team-a",),
+    )
+    registry.register(_fallback(OTHER, "rev-other"), acl_labels=("team-b",))
     removed = registry.handle_acl_change(SESSION, ("team-b",))
-    assert len(removed) == 1
-    assert seen == [SESSION]
+    expected: list[str] = []
+    for record in removed:
+        revision_id = record.card.source_pointer.view_revision_id
+        if revision_id not in expected:
+            expected.append(revision_id)
+    assert sum(record.card.source_pointer.view_revision_id == "rev-claim" for record in removed) >= 2
+    assert [record.reason for record in removed] == [REMOVAL_ACL_CHANGE] * len(removed)
+    assert {record.session_id for record in removed} == {SESSION}
+    assert all(record.new_labels == ("team-b",) for record in removed)
+    assert all(record.card.acl_labels == ("team-a",) for record in removed)
+    assert len(expected) == 2
+    assert len(set(expected)) == 2
+    assert "rev-claim" in expected
+    assert "rev-diag" in expected
+    assert seen == expected
+    assert SESSION not in seen
+    assert "rev-other" not in seen
+    assert registry.search(principal_labels=("team-b",))[0].session_id == OTHER
 
 
-def test_acl_change_without_revalidation_callback_warns_once(tmp_path, caplog) -> None:
+def test_acl_change_without_revalidation_callback_warns_once(tmp_path) -> None:
     registry = _registry(tmp_path)
     registry.register(_fallback(SESSION, "rev-1"), acl_labels=("team-a",))
     registry.register(_fallback(OTHER, "rev-2"), acl_labels=("team-b",))
-    with caplog.at_level(logging.WARNING):
+    captured: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            captured.append(record)
+
+    handler = _Capture(level=logging.WARNING)
+    module_logger = logging.getLogger("openviking.session.influence_projection")
+    module_logger.addHandler(handler)
+    try:
         registry.handle_acl_change(SESSION, ("team-c",))
         registry.handle_acl_change(OTHER, ("team-d",))
-    warnings = [record for record in caplog.records if "revalidation_callback" in record.message]
+    finally:
+        module_logger.removeHandler(handler)
+    warnings = [record for record in captured if "revalidation_callback" in record.getMessage()]
     assert len(warnings) == 1
     assert warnings[0].levelno == logging.WARNING
+    assert "rev-1" in warnings[0].getMessage()
 
 
 def test_withdraw_superseded_calls_revalidation_callback(tmp_path) -> None:

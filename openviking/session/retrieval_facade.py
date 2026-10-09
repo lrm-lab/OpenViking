@@ -38,8 +38,8 @@ not calling it is an agent-side fence.
 ``retrieve_historical_subgraphs(view_revision_id, subgraph_id, principal_labels)``
 is the diagnostic read. The server resolves that subgraph on the named frozen
 revision and requires ``is_failure``. The corpus is retrieval subgraphs on
-other ``post_run_index`` revisions. Ranking this wave is BM25 on a stand-in
-subgraph text (``SUBGRAPH_TEXT_POLICY_VERSION``); there is no vector tier.
+other ``post_run_index`` revisions. Ranking is BM25 on the shared subgraph
+text (``SUBGRAPH_TEXT_POLICY_VERSION``); there is no vector tier.
 The read uses ``ViewSupersedeIndex.revisions_for_purpose`` and does not call
 ``ViewSupersedeIndex.to_dict``. It does not write forks and ``retrieve`` does
 not call it. The querying revision's session must have ACL labels visible to
@@ -132,14 +132,13 @@ HYBRID_VECTOR_WEIGHT = 0.75
 BRANCH_SYNOPSIS_LIMIT = 8
 BRANCH_SYNOPSIS_LINE_CHARS = 180
 BRANCH_SUMMARY_CHARS = 720
-# Pending parameter. A diagnostic subgraph hit compares one failure subgraph
-# with historical retrieval subgraphs. Design does not fix the document text
-# or a vector similarity. SUBGRAPH_TEXT_POLICY_VERSION marks this stand-in:
-# non-empty summary, input, output, carried_artifact, and downstream_effect
-# only, in stored member order. This wave ranks that string with BM25.
-# There is no vector tier on this path.
-SUBGRAPH_TEXT_POLICY_VERSION = "subgraph-text-pending-v0"
+# Diagnostic subgraph query and historical documents share one BM25 string.
+# Prose stays in stored member order. A bounded typed-token section is
+# appended after it. SUBGRAPH_TEXT_POLICY_VERSION is that accepted policy.
+# There is no vector tier, hybrid fusion, or structural score on this path.
+SUBGRAPH_TEXT_POLICY_VERSION = "diagnostic-subgraph-text-v1"
 DIAGNOSTIC_SUBGRAPH_HIT_CAP = 3
+_RELATION_PROFILE_COUNT_CAP = 99
 
 CardKind = Literal[
     "fork",
@@ -1445,6 +1444,42 @@ def _nonempty_text(value: str) -> str:
     return value.strip()
 
 
+def _canonical_token_value(value: object) -> str:
+    """Lowercase token value. Other characters become underscores.
+
+    Empty, whitespace-only, and non-text values are the explicit ``unknown``
+    token. Underscores produced from punctuation are kept.
+    """
+    if not isinstance(value, str):
+        return "unknown"
+    stripped = value.strip().lower()
+    if not stripped:
+        return "unknown"
+    normalized = "".join(
+        char if ("a" <= char <= "z") or ("0" <= char <= "9") or char == "_" else "_"
+        for char in stripped
+    )
+    return normalized or "unknown"
+
+
+def _relation_profile_token(claims: Sequence[InfluenceClaim]) -> str:
+    """Canonical relation counts, sorted by normalized relation name.
+
+    No member claims yields ``relation_profile:unknown``. A count above
+    ``_RELATION_PROFILE_COUNT_CAP`` is written as that cap.
+    """
+    if not claims:
+        return "relation_profile:unknown"
+    counts: dict[str, int] = {}
+    for claim in claims:
+        name = _canonical_token_value(claim.relation_type)
+        counts[name] = counts.get(name, 0) + 1
+    body = ",".join(
+        f"{name}:{min(counts[name], _RELATION_PROFILE_COUNT_CAP)}" for name in sorted(counts)
+    )
+    return f"relation_profile:{body}"
+
+
 def _subgraph_members(
     revision: InfluenceViewRevision, subgraph: RetrievalSubgraph
 ) -> tuple[tuple[InfluenceBlock, ...], tuple[InfluenceClaim, ...]]:
@@ -1467,11 +1502,17 @@ def _subgraph_members(
 def _subgraph_retrieval_text(
     revision: InfluenceViewRevision, subgraph: RetrievalSubgraph
 ) -> str:
-    """Stand-in document for one retrieval subgraph. See ``SUBGRAPH_TEXT_POLICY_VERSION``.
+    """Shared diagnostic document. See ``SUBGRAPH_TEXT_POLICY_VERSION``.
 
-    Query and candidate both use this string. Schema labels, ids, roles,
-    relation types, the failure marker, guidance, and raw AO text are omitted
-    so two subgraphs with disjoint prose do not share tokens.
+    Query and candidate both use this string. Prose stays in stored member
+    order: block summary, input, output, then claim carried_artifact and
+    downstream_effect. Typed tokens are appended after that prose, one field
+    per line: subgraph failure, then each block's role, kind, and failure,
+    then each claim's relation and failure, then the relation profile.
+
+    Block and claim records have no failure field, so those lines are
+    ``unknown`` and are not omitted. Ids, participant ids, guidance, evidence
+    refs, ACL, raw AO text, and AO range numbers stay out of this string.
     """
     blocks, claims = _subgraph_members(revision, subgraph)
     parts: list[str] = []
@@ -1485,6 +1526,16 @@ def _subgraph_retrieval_text(
             text = _nonempty_text(value)
             if text:
                 parts.append(text)
+    failure = "true" if subgraph.failure_marked else "false"
+    parts.append(f"subgraph_failure:{failure}")
+    for block in blocks:
+        parts.append(f"block_role:{_canonical_token_value(block.role)}")
+        parts.append(f"block_kind:{_canonical_token_value(block.block_kind)}")
+        parts.append("block_failure:unknown")
+    for claim in claims:
+        parts.append(f"claim_relation:{_canonical_token_value(claim.relation_type)}")
+        parts.append("claim_failure:unknown")
+    parts.append(_relation_profile_token(claims))
     return "\n".join(parts)
 
 
