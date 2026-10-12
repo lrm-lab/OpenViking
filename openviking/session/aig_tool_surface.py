@@ -582,6 +582,26 @@ def _validate(blocks: Mapping[str, _Block], edges: Sequence[_Edge], row_count: i
         prev_start, prev_end, prev_id, prev_kind = spans[index - 1]
         if start > prev_end:
             continue
+        shared_start = max(start, prev_start)
+        shared_end = min(end, prev_end)
+        repairs = []
+        for block_id_, kind_, block_start, block_end in (
+            (prev_id, prev_kind, prev_start, prev_end),
+            (block_id, kind, start, end),
+        ):
+            keep_start, keep_end = block_start, shared_start - 1
+            if keep_start > keep_end:
+                keep_start, keep_end = shared_end + 1, block_end
+            if keep_start > keep_end:
+                continue
+            repairs.append(
+                {
+                    "apply_with": "modify_block",
+                    "block_id": block_id_,
+                    "kind": kind_,
+                    "new_step_refs": list(range(keep_start, keep_end + 1)),
+                }
+            )
         raise ToolSurfaceError(
             "step_refs_overlap",
             {
@@ -594,12 +614,12 @@ def _validate(blocks: Mapping[str, _Block], edges: Sequence[_Edge], row_count: i
                     {"block_id": block_id, "kind": kind, "span": [start, end]},
                 ],
                 "hint": (
-                    "each row index may belong to at most one block; "
-                    "free the shared rows by sending modify_block for the listed "
-                    "block with step_refs = its span minus shared_rows, or pick a "
-                    "disjoint span for the new block"
+                    "each row index may belong to at most one block; apply one "
+                    "entry from repairs (modify_block with the given step_refs) "
+                    "to free the shared rows, or pick a disjoint span"
                 ),
-                "shared_rows": list(range(max(start, prev_start), min(end, prev_end) + 1)),
+                "repairs": repairs,
+                "shared_rows": list(range(shared_start, shared_end + 1)),
             },
         )
     seen: set[tuple[str, str]] = set()

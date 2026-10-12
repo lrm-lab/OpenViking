@@ -369,3 +369,72 @@ def test_step_refs_empty_error_teaches_the_shrink_move(tmp_path: Path) -> None:
         assert info.code == "step_refs_empty"
         assert info.detail is not None
         assert "smaller" in info.detail["hint"]
+
+
+def test_step_refs_overlap_offers_ready_repair(tmp_path: Path) -> None:
+    snapshot = AoSnapshot(
+        records=(_record(0, "ask"), _record(1, "open"), _record(2, "answer")),
+        watermark="wm-schema-3",
+        question=None,
+    )
+    surface = AigToolSurface(snapshot, root=tmp_path, run_id="schema-repair")
+    surface.call(
+        "add_block",
+        {
+            "kind": "task",
+            "block_id": "t",
+            "fields": {"content": "q", "operative_brief": "b", "step_refs": [0]},
+        },
+    )
+    surface.call(
+        "add_block",
+        {
+            "kind": "agent",
+            "block_id": "a",
+            "fields": {
+                "agent_name": "w",
+                "authorship": "authored",
+                "input": "i",
+                "output": "o",
+                "summary": "s",
+                "step_refs": [1, 2],
+            },
+        },
+    )
+    try:
+        surface.call(
+            "add_block",
+            {
+                "kind": "conclusion",
+                "block_id": "c",
+                "fields": {"content": "done", "step_refs": [2]},
+            },
+        )
+        raise AssertionError("expected step_refs_overlap")
+    except ToolSurfaceError as info:
+        assert info.code == "step_refs_overlap"
+        assert info.detail is not None
+        detail = info.detail
+    # a=[1,2] keeps row 1 when the shared row 2 is freed; c=[2] has nothing
+    # left, so exactly one repair is offered.
+    assert detail["repairs"] == [
+        {
+            "apply_with": "modify_block",
+            "block_id": "a",
+            "kind": "agent",
+            "new_step_refs": [1],
+        }
+    ]
+    surface.call(
+        "modify_block", {"block_id": "a", "fields": {"step_refs": [1], "summary": "s"}}
+    )
+    surface.call(
+        "add_block",
+        {
+            "kind": "conclusion",
+            "block_id": "c",
+            "fields": {"content": "done", "step_refs": [2]},
+        },
+    )
+    overview = surface.get_overview()
+    assert [item["block_id"] for item in overview["draft_blocks"]] == ["t", "a", "c"]
