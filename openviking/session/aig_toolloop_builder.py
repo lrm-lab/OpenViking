@@ -48,8 +48,8 @@ BUILDER_SYSTEM_PROMPT = (
     "只把日志里真实存在的步骤合入节点（step_refs 必须落在快照内；服务端逐调用校验）。\n- 四类节点：task=用户问题（唯一根）；orchestrator=调度回合；"
     "agent=工作回合（唯一带 input/output/authorship 的类型）；conclusion=最终答案（唯一汇）。\n- 边只能从较早节点指向较晚节点。相邻继承用 "
     "add_inheritance_note；跨接归因用 add_skip_attribution。inherited 写\"后一节点复用了前一节点的什么\"，effect "
-    "写\"它在下游如何出错\"——没有失效相关复用就不要加边。\n- 节点不重叠；summary 是抽象不是抄录；authorship 如实（authored/relayed/executed"
-    "）。\n- 发现某节点输出未满足下发的 instruction_or_question 却被提交下游，用 mark_defect_recorded 标记。\n停止条件：图完整后调用 "
+    "写\"它在下游如何出错\"——没有失效相关复用就不要加边。\n- 节点不重叠（每个行号只属于一个块；行号冲突时先用 modify_block 调整已有块的 step_refs）；summary 是抽象不是抄录；authorship 如实（authored/relayed/executed"
+    "）。\n- 发现某节点输出未满足下发的 instruction_or_question 却被提交下游，用 mark_defect_recorded 标记。\n停止条件：submit 前自检三件事——有且仅有一个 task 根；有且仅有一个 conclusion 汇；其余节点都经边连通到 conclusion。三者齐备才调用 "
     "submit（一次性，不可撤销）。预算耗尽由服务端截断。"
 )
 
@@ -60,9 +60,9 @@ BUILDER_SUCCESS_PROMPT = (
     "只把日志里真实存在的步骤合入节点（step_refs 必须落在快照内；服务端逐调用校验）。\n- 四类节点：task=用户问题（唯一根）；orchestrator=调度回合；"
     "agent=工作回合（唯一带 input/output/authorship 的类型）；conclusion=最终答案（唯一汇）。\n- 边只能从较早节点指向较晚节点。相邻继承用 "
     "add_inheritance_note；跨接归因用 add_skip_attribution。inherited 写\"后一节点复用了前一节点的什么\"，effect "
-    "写\"这次复用如何促成最终正确结果\"——没有促成正确结果的复用就不要加边。\n- 节点不重叠；summary 是抽象不是抄录；authorship 如实（authored/relayed/executed"
+    "写\"这次复用如何促成最终正确结果\"——没有促成正确结果的复用就不要加边。\n- 节点不重叠（每个行号只属于一个块；行号冲突时先用 modify_block 调整已有块的 step_refs）；summary 是抽象不是抄录；authorship 如实（authored/relayed/executed"
     "）。\n- 发现某节点输出未满足下发的 instruction_or_question 却被提交下游，用 mark_defect_recorded 标记。成功轨迹仍可有未达标记录。"
-    "\n停止条件：图完整后调用 submit（一次性，不可撤销）。预算耗尽由服务端截断。"
+    "\n停止条件：submit 前自检三件事——有且仅有一个 task 根；有且仅有一个 conclusion 汇；其余节点都经边连通到 conclusion。三者齐备才调用 submit（一次性，不可撤销）。预算耗尽由服务端截断。"
 )
 
 

@@ -582,7 +582,8 @@ def _validate(blocks: Mapping[str, _Block], edges: Sequence[_Edge], row_count: i
                 ],
                 "hint": (
                     "each row index may belong to at most one block; "
-                    "choose a span disjoint from the listed blocks"
+                    "shrink or move the conflicting block's step_refs with "
+                    "modify_block, or choose a disjoint span"
                 ),
                 "shared_rows": list(range(max(start, prev_start), min(end, prev_end) + 1)),
             },
