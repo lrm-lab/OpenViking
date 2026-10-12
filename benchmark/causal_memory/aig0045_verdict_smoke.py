@@ -319,12 +319,21 @@ def run_smoke(
         for spec in materials:
             attempt_rows = groups[spec.run_id]
             submitting = [row for row, _extra in attempt_rows if row.get("submit") is True]
-            best = dict(submitting[0] if submitting else attempt_rows[-1][0])
+            clean = [
+                row
+                for row, _extra in attempt_rows
+                if row.get("submit") is True
+                and row.get("phi_violations_after_refine") == 0
+            ]
+            source = (clean or submitting or [attempt_rows[-1][0]])[0]
+            best = dict(source)
             best["run_id"] = spec.run_id
             best["submit"] = bool(submitting)
             best["attempts"] = [
                 {
                     "fallback_reason": row.get("fallback_reason"),
+                    "phi_violations_after_refine": row.get("phi_violations_after_refine"),
+                    "reader_schema_ok": row.get("reader_schema_ok"),
                     "run_id": row["run_id"],
                     "submit": row.get("submit") is True,
                 }
