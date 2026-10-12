@@ -643,7 +643,9 @@ def _run_one(
         mode=mode,
     )
     graph = surface.get_graph()
-    row["phi_violations_after_refine"] = len(evaluate_phi(graph).violations)
+    violations = evaluate_phi(graph).violations
+    row["phi_violations_after_refine"] = len(violations)
+    row["phi_violation_ids"] = [item.violation_id for item in violations]
     if cycle.status != "frozen" or cycle.revision is None:
         row["fallback_reason"] = (cycle.fallback_marker or {}).get("reason") or cycle.status
         return row, extra
