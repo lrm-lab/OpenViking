@@ -490,6 +490,11 @@ def main(argv: list[str] | None = None) -> int:
         "gets its own provider instance; call stats land in the report only.",
     )
     parser.add_argument(
+        "--model",
+        default=None,
+        help="Override the gemma provider model (e.g. gpt-oss-120b cross-backbone probe).",
+    )
+    parser.add_argument(
         "--attempts",
         type=int,
         default=1,
@@ -525,15 +530,16 @@ def main(argv: list[str] | None = None) -> int:
         factory = _fake_builder
     elif args.jobs > 1:
         try:
-            LenovoGemmaProvider()  # fail fast on a missing key; instance discarded
+            LenovoGemmaProvider(model=args.model)  # fail fast; instance discarded
         except LenovoGemmaError as exc:
             print(f"gemma provider failed ({exc.code}); export {API_KEY_ENV}", file=sys.stderr)
             return 2
-        factory = _parallel_gemma_factory()
+        factory = _parallel_gemma_factory(args.model)
     else:
         try:
             shared = LenovoGemmaProvider(
                 audit_path=work / "provider_audit.jsonl",
+                model=args.model,
             )
         except LenovoGemmaError as exc:
             print(f"gemma provider failed ({exc.code}); export {API_KEY_ENV}", file=sys.stderr)
@@ -757,11 +763,13 @@ def _fake_builder(mode: str) -> ToolloopProvider:
     return FakeToolloopProvider(legal_builder_script(mode))
 
 
-def _parallel_gemma_factory() -> Callable[[str], ToolloopProvider]:
+def _parallel_gemma_factory(
+    model: str | None = None,
+) -> Callable[[str], ToolloopProvider]:
     """One provider per material: isolated in-memory stats, no audit file."""
 
     def factory(mode: str) -> ToolloopProvider:
-        return LenovoGemmaProvider()
+        return LenovoGemmaProvider(model=model) if model else LenovoGemmaProvider()
 
     return factory
 
