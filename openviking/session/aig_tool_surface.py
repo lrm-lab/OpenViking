@@ -92,7 +92,11 @@ _LINK_KIND_ADJACENT = "adjacent"
 _LINK_KIND_SKIP = "skip"
 
 TOOL_CATALOG: tuple[tuple[str, str], ...] = (
-    ("get_overview", "Compact log metadata: row count, participant, segment, and size."),
+    (
+        "get_overview",
+        "Compact log metadata: row count, participant, segment, and size. "
+        "call once; row_count and participants are shown here",
+    ),
     ("read_full_log", "Return every snapshot row joined as text."),
     ("read_step", "Return one snapshot row. Argument index (alias i) is the row handle."),
     ("read_step_range", "Return a closed row interval. Arguments start/end (aliases a/b)."),
@@ -102,19 +106,180 @@ TOOL_CATALOG: tuple[tuple[str, str], ...] = (
     ("list_block_kinds", "Closed paper block vocabulary and required fields."),
     ("get_story", "Render the current draft as Markdown."),
     ("get_graph", "Return the current draft as a JSON object."),
-    ("add_block", "Create a task, orchestrator, agent, or conclusion block."),
+    (
+        "add_block",
+        "Create a task, orchestrator, agent, or conclusion block. "
+        "block_id must be unique (duplicate_block_id rejected); "
+        "step_refs are row indices in [0, row_count); "
+        "one block's step_refs must not overlap another block's (step_refs_overlap rejected); "
+        "required fields per kind: task(content, operative_brief, step_refs) "
+        "orchestrator(agent_name, summary, authorship, step_refs) "
+        "agent(agent_name, summary, input, output, authorship, step_refs) "
+        "conclusion(content, step_refs).",
+    ),
     (
         "add_inheritance_note",
-        "Attach inherited/effect on an adjacent earlier-to-later edge.",
+        "Attach inherited/effect on an adjacent earlier-to-later edge. "
+        '"from" must reference an earlier block than "to" (edges go early → late).',
     ),
-    ("add_skip_attribution", "Attach inherited/effect on a non-adjacent forward edge."),
+    (
+        "add_skip_attribution",
+        "Attach inherited/effect on a non-adjacent forward edge. "
+        '"from" must reference an earlier block than "to" (edges go early → late).',
+    ),
     ("modify_block", "Replace fields of an existing block. Kind and id stay fixed."),
     ("delete_block", "Delete a block and every edge that touches it."),
     ("delete_inheritance_note", "Remove an adjacent inheritance note."),
     ("delete_skip_attribution", "Remove a non-adjacent skip attribution."),
     ("mark_defect_recorded", "Record that an agent block missed its instruction."),
-    ("submit", "Seal the draft once. Structural Phi is not judged here."),
+    (
+        "submit",
+        "Seal the draft once. Structural Phi is not judged here. "
+        "seals the draft; no further build verbs after it.",
+    ),
 )
+
+
+def _json_object(
+    properties: dict[str, Any], required: Sequence[str] = ()
+) -> dict[str, Any]:
+    return {
+        "additionalProperties": False,
+        "properties": properties,
+        "required": list(required),
+        "type": "object",
+    }
+
+
+def _block_fields_schema() -> dict[str, Any]:
+    return _json_object(
+        {
+            "agent_name": {"type": "string"},
+            "authorship": {"enum": list(AUTHORSHIP_VALUES), "type": "string"},
+            "content": {"type": "string"},
+            "defect_recorded": {"type": "string"},
+            "input": {"type": "string"},
+            "operative_brief": {"type": "string"},
+            "output": {"type": "string"},
+            "step_refs": {"items": {"type": "integer"}, "type": "array"},
+            "summary": {"type": "string"},
+        }
+    )
+
+
+def _edge_ref_items() -> dict[str, Any]:
+    return _json_object(
+        {
+            "block_id": {"type": "string"},
+            "effect": {"type": "string"},
+            "inherited": {"type": "string"},
+        },
+        ("block_id", "inherited", "effect"),
+    )
+
+
+# Allowed/required keys for each verb. Must stay locked to AigToolSurface._exact_args.
+TOOL_EXACT_ARGS: Mapping[str, tuple[frozenset[str], frozenset[str]]] = {
+    "add_block": (
+        frozenset({"kind", "block_id", "fields", "from_refs", "to_refs"}),
+        frozenset({"kind", "fields"}),
+    ),
+    "add_inheritance_note": (
+        frozenset({"from", "to", "inherited", "effect"}),
+        frozenset({"from", "to", "inherited", "effect"}),
+    ),
+    "add_skip_attribution": (
+        frozenset({"from", "to", "inherited", "effect"}),
+        frozenset({"from", "to", "inherited", "effect"}),
+    ),
+    "delete_block": (frozenset({"block_id"}), frozenset({"block_id"})),
+    "delete_inheritance_note": (frozenset({"from", "to"}), frozenset({"from", "to"})),
+    "delete_skip_attribution": (frozenset({"from", "to"}), frozenset({"from", "to"})),
+    "get_graph": (frozenset(), frozenset()),
+    "get_overview": (frozenset(), frozenset()),
+    "get_question": (frozenset(), frozenset()),
+    "get_story": (frozenset(), frozenset()),
+    "list_agents": (frozenset(), frozenset()),
+    "list_block_kinds": (frozenset(), frozenset()),
+    "mark_defect_recorded": (frozenset({"block_id", "note"}), frozenset({"block_id", "note"})),
+    "modify_block": (frozenset({"block_id", "fields"}), frozenset({"block_id", "fields"})),
+    "read_full_log": (frozenset(), frozenset()),
+    "read_step": (frozenset({"index", "i"}), frozenset()),
+    "read_step_range": (frozenset({"start", "end", "a", "b"}), frozenset()),
+    "search": (frozenset({"pattern", "flags"}), frozenset({"pattern"})),
+    "submit": (frozenset(), frozenset()),
+}
+
+TOOL_SCHEMAS: Mapping[str, dict[str, Any]] = {
+    "add_block": _json_object(
+        {
+            "block_id": {
+                "description": (
+                    "Optional. Omit to let the server allocate an id and return it "
+                    "in the response."
+                ),
+                "type": "string",
+            },
+            "fields": _block_fields_schema(),
+            "from_refs": {"items": _edge_ref_items(), "type": "array"},
+            "kind": {"enum": list(PAPER_KINDS), "type": "string"},
+            "to_refs": {"items": _edge_ref_items(), "type": "array"},
+        },
+        ("kind", "fields"),
+    ),
+    "add_inheritance_note": _json_object(
+        {
+            "effect": {"type": "string"},
+            "from": {"type": "string"},
+            "inherited": {"type": "string"},
+            "to": {"type": "string"},
+        },
+        ("from", "to", "inherited", "effect"),
+    ),
+    "add_skip_attribution": _json_object(
+        {
+            "effect": {"type": "string"},
+            "from": {"type": "string"},
+            "inherited": {"type": "string"},
+            "to": {"type": "string"},
+        },
+        ("from", "to", "inherited", "effect"),
+    ),
+    "delete_block": _json_object({"block_id": {"type": "string"}}, ("block_id",)),
+    "delete_inheritance_note": _json_object(
+        {"from": {"type": "string"}, "to": {"type": "string"}},
+        ("from", "to"),
+    ),
+    "delete_skip_attribution": _json_object(
+        {"from": {"type": "string"}, "to": {"type": "string"}},
+        ("from", "to"),
+    ),
+    "get_graph": _json_object({}),
+    "get_overview": _json_object({}),
+    "get_question": _json_object({}),
+    "get_story": _json_object({}),
+    "list_agents": _json_object({}),
+    "list_block_kinds": _json_object({}),
+    "mark_defect_recorded": _json_object(
+        {"block_id": {"type": "string"}, "note": {"type": "string"}},
+        ("block_id", "note"),
+    ),
+    "modify_block": _json_object(
+        {"block_id": {"type": "string"}, "fields": _block_fields_schema()},
+        ("block_id", "fields"),
+    ),
+    "read_full_log": _json_object({}),
+    "read_step": _json_object({"index": {"type": "integer"}}, ("index",)),
+    "read_step_range": _json_object(
+        {"end": {"type": "integer"}, "start": {"type": "integer"}},
+        ("start", "end"),
+    ),
+    "search": _json_object(
+        {"flags": {"type": "string"}, "pattern": {"type": "string"}},
+        ("pattern",),
+    ),
+    "submit": _json_object({}),
+}
 
 
 class ToolSurfaceError(ValueError):
@@ -273,6 +438,11 @@ def _exact_args(
     missing = [key for key in required if key not in arguments]
     if missing:
         raise ToolSurfaceError("invalid_args")
+
+
+def _require_verb_args(verb: str, arguments: Mapping[str, Any]) -> None:
+    allowed, required = TOOL_EXACT_ARGS[verb]
+    _exact_args(arguments, allowed, required)
 
 
 def _parse_step_refs(value: Any, row_count: int) -> tuple[int, ...]:
@@ -724,7 +894,7 @@ class AigToolSurface:
         raise ToolSurfaceError("stored_record_invalid")
 
     def _get_overview(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
-        _exact_args(arguments, frozenset(), frozenset())
+        _require_verb_args("get_overview", arguments)
         rows = []
         for index, record in enumerate(self._records):
             rows.append(
@@ -745,18 +915,18 @@ class AigToolSurface:
         return payload
 
     def _read_full_log(self, arguments: Mapping[str, Any]) -> str:
-        _exact_args(arguments, frozenset(), frozenset())
+        _require_verb_args("read_full_log", arguments)
         return "\n\n".join(
             _step_text(index, record) for index, record in enumerate(self._records)
         )
 
     def _read_step(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
-        _exact_args(arguments, frozenset({"index", "i"}), frozenset())
+        _require_verb_args("read_step", arguments)
         index = _row_index(_one_of(arguments, "index", "i"), len(self._records))
         return {"index": index, "record": self._records[index].to_dict()}
 
     def _read_step_range(self, arguments: Mapping[str, Any]) -> list[dict[str, Any]]:
-        _exact_args(arguments, frozenset({"start", "end", "a", "b"}), frozenset())
+        _require_verb_args("read_step_range", arguments)
         start = _row_index(_one_of(arguments, "start", "a"), len(self._records))
         end = _row_index(_one_of(arguments, "end", "b"), len(self._records))
         if start > end:
@@ -767,7 +937,7 @@ class AigToolSurface:
         ]
 
     def _list_agents(self, arguments: Mapping[str, Any]) -> list[dict[str, str]]:
-        _exact_args(arguments, frozenset(), frozenset())
+        _require_verb_args("list_agents", arguments)
         if self._agents:
             return [
                 {
@@ -794,13 +964,13 @@ class AigToolSurface:
         return found
 
     def _get_question(self, arguments: Mapping[str, Any]) -> dict[str, str]:
-        _exact_args(arguments, frozenset(), frozenset())
+        _require_verb_args("get_question", arguments)
         if self._question is None:
             raise ToolSurfaceError("question_missing")
         return {"question": self._question}
 
     def _search(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
-        _exact_args(arguments, frozenset({"pattern", "flags"}), frozenset({"pattern"}))
+        _require_verb_args("search", arguments)
         pattern = arguments["pattern"]
         if not isinstance(pattern, str) or pattern == "":
             raise ToolSurfaceError("invalid_pattern")
@@ -825,7 +995,7 @@ class AigToolSurface:
         return {"matches": matches, "truncated": truncated}
 
     def _list_block_kinds(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
-        _exact_args(arguments, frozenset(), frozenset())
+        _require_verb_args("list_block_kinds", arguments)
         kinds = {}
         for kind in PAPER_KINDS:
             kinds[kind] = {
@@ -835,7 +1005,7 @@ class AigToolSurface:
         return {"kinds": kinds, "authorship": list(AUTHORSHIP_VALUES)}
 
     def _get_story(self, arguments: Mapping[str, Any]) -> str:
-        _exact_args(arguments, frozenset(), frozenset())
+        _require_verb_args("get_story", arguments)
         graph = self._graph()
         lines = ["# Influence graph", ""]
         if not graph["blocks"]:
@@ -862,7 +1032,7 @@ class AigToolSurface:
         return "\n".join(lines)
 
     def _get_graph(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
-        _exact_args(arguments, frozenset(), frozenset())
+        _require_verb_args("get_graph", arguments)
         return self._graph()
 
     def _graph(self) -> dict[str, Any]:
@@ -890,11 +1060,7 @@ class AigToolSurface:
 
     def _add_block(self, arguments: Mapping[str, Any]) -> dict[str, str]:
         self._require_open()
-        _exact_args(
-            arguments,
-            frozenset({"kind", "block_id", "fields", "from_refs", "to_refs"}),
-            frozenset({"kind", "fields"}),
-        )
+        _require_verb_args("add_block", arguments)
         stored = self._plan_add(self._blocks, arguments)
         new_blocks, new_edges = self._apply_add(self._blocks, self._edges, stored)
         self._commit(new_blocks, new_edges, "add_block", stored, False)
@@ -989,11 +1155,7 @@ class AigToolSurface:
         self, arguments: Mapping[str, Any], verb: str, expected: str
     ) -> dict[str, str]:
         self._require_open()
-        _exact_args(
-            arguments,
-            frozenset({"from", "to", "inherited", "effect"}),
-            frozenset({"from", "to", "inherited", "effect"}),
-        )
+        _require_verb_args(verb, arguments)
         stored = {
             "from": arguments["from"],
             "to": arguments["to"],
@@ -1030,7 +1192,7 @@ class AigToolSurface:
 
     def _modify_block(self, arguments: Mapping[str, Any]) -> dict[str, str]:
         self._require_open()
-        _exact_args(arguments, frozenset({"block_id", "fields"}), frozenset({"block_id", "fields"}))
+        _require_verb_args("modify_block", arguments)
         block_id = arguments["block_id"]
         if not isinstance(block_id, str) or block_id not in self._blocks:
             raise ToolSurfaceError("unknown_block")
@@ -1069,7 +1231,7 @@ class AigToolSurface:
 
     def _delete_block(self, arguments: Mapping[str, Any]) -> dict[str, str]:
         self._require_open()
-        _exact_args(arguments, frozenset({"block_id"}), frozenset({"block_id"}))
+        _require_verb_args("delete_block", arguments)
         block_id = arguments["block_id"]
         stored = {"block_id": block_id}
         new_blocks, new_edges = self._apply_delete_block(self._blocks, self._edges, stored)
@@ -1104,7 +1266,7 @@ class AigToolSurface:
         self, arguments: Mapping[str, Any], verb: str, expected: str
     ) -> dict[str, str]:
         self._require_open()
-        _exact_args(arguments, frozenset({"from", "to"}), frozenset({"from", "to"}))
+        _require_verb_args(verb, arguments)
         stored = {"from": arguments["from"], "to": arguments["to"]}
         new_blocks, new_edges = self._apply_delete_note(self._blocks, self._edges, stored, expected)
         self._commit(new_blocks, new_edges, verb, stored, False)
@@ -1139,7 +1301,7 @@ class AigToolSurface:
 
     def _mark_defect_recorded(self, arguments: Mapping[str, Any]) -> dict[str, str]:
         self._require_open()
-        _exact_args(arguments, frozenset({"block_id", "note"}), frozenset({"block_id", "note"}))
+        _require_verb_args("mark_defect_recorded", arguments)
         stored = {"block_id": arguments["block_id"], "note": arguments["note"]}
         new_blocks, new_edges = self._apply_defect(self._blocks, self._edges, stored)
         self._commit(new_blocks, new_edges, "mark_defect_recorded", stored, False)
@@ -1170,7 +1332,7 @@ class AigToolSurface:
 
     def _submit(self, arguments: Mapping[str, Any]) -> dict[str, bool]:
         self._require_open()
-        _exact_args(arguments, frozenset(), frozenset())
+        _require_verb_args("submit", arguments)
         _validate(self._blocks, self._edges, len(self._records))
         self._commit(dict(self._blocks), list(self._edges), "submit", {}, True)
         return {"submitted": True}

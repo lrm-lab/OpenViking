@@ -135,7 +135,10 @@ def test_dead_loop_exhausts_call_budget(tmp_path: Path) -> None:
     assert marker["calls_used"] == 3
     assert marker["construction_mode"] == "fallback"
     assert len(result.audit) == 3
-    assert all(item.verb == "get_overview" and item.ok for item in result.audit)
+    assert all(item.verb == "get_overview" for item in result.audit)
+    assert result.audit[0].ok and result.audit[1].ok
+    assert result.audit[2].ok is False
+    assert result.audit[2].error_code == "repeat_call"
     assert DEFAULT_MAX_CALLS == 64
     assert CONSTRUCTION_FALLBACK == CONSTRUCTION_MODE_FALLBACK
 

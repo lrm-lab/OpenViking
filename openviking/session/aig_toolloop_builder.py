@@ -35,6 +35,11 @@ CONSTRUCTION_FALLBACK = CONSTRUCTION_MODE_FALLBACK
 DEFAULT_MAX_CALLS = 64
 DEFAULT_MAX_SECONDS = 120.0
 _FALLBACK_VIEW = "build_minimal_fallback_view"
+REPEAT_CALL_CODE = "repeat_call"
+REPEAT_LOOP_REASON = "repeat_loop"
+_REPEAT_TRIP = 3
+_REPEAT_STOP = 5
+_REPEAT_MESSAGE = "identical call repeated; change arguments or proceed"
 
 BUILDER_SYSTEM_PROMPT = (
     "你从空图构建一条失败轨迹的自适应影响图。你有一组检查工具（T_log：概览/读单步/读区间/正则搜索/列智能体/看问题/看当前图）与一组构建工具（T_build）。日志步骤即 AO "
@@ -110,6 +115,7 @@ class ToolAuditRecord:
     error_code: str | None
     result_summary: str
     elapsed_ms: int
+    repeat_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -163,7 +169,7 @@ def run_toolloop(
     clock: Callable[[], float] | None = None,
     mode: str = "fail",
 ) -> ToolloopResult:
-    """Run inspect/build turns until ``submit`` or the budget is exhausted."""
+    """Run inspect/build turns until ``submit``, budget, or a repeat loop."""
     if not isinstance(question, str) or not question.strip():
         raise ToolloopError("question_missing")
     if not callable(provider):
@@ -192,6 +198,8 @@ def run_toolloop(
     audit: list[ToolAuditRecord] = []
     started = now()
     system_prompt = builder_prompt_for_mode(mode)
+    last_call_key: tuple[str, str] | None = None
+    repeat_count = 0
     while True:
         if len(audit) >= max_calls or now() - started >= max_seconds:
             return _fallback(run_id, bound.watermark, audit)
@@ -220,6 +228,29 @@ def run_toolloop(
             continue
         if not isinstance(arguments, dict):
             arguments = {}
+        call_key = _repeat_key(invocation.verb, arguments)
+        if call_key == last_call_key:
+            repeat_count += 1
+        else:
+            last_call_key = call_key
+            repeat_count = 1
+        if repeat_count >= _REPEAT_TRIP:
+            _record(
+                audit,
+                history,
+                invocation.verb,
+                arguments,
+                ok=False,
+                error_code=REPEAT_CALL_CODE,
+                result={"code": REPEAT_CALL_CODE, "message": _REPEAT_MESSAGE},
+                elapsed_ms=0,
+                repeat_count=repeat_count,
+            )
+            if repeat_count >= _REPEAT_STOP:
+                return _fallback(
+                    run_id, bound.watermark, audit, reason=REPEAT_LOOP_REASON
+                )
+            continue
         call_started = now()
         try:
             result = surface.call(invocation.verb, arguments)
@@ -234,6 +265,7 @@ def run_toolloop(
                 error_code=exc.code,
                 result=None,
                 elapsed_ms=elapsed,
+                repeat_count=repeat_count,
             )
             continue
         elapsed = _elapsed_ms(call_started, now())
@@ -246,6 +278,7 @@ def run_toolloop(
             error_code=None,
             result=result,
             elapsed_ms=elapsed,
+            repeat_count=repeat_count,
         )
         if invocation.verb == "submit":
             return ToolloopResult(
@@ -257,18 +290,26 @@ def run_toolloop(
             )
 
 
-def _fallback(run_id: str, watermark: str, audit: Sequence[ToolAuditRecord]) -> ToolloopResult:
-    marker = {
+def _fallback(
+    run_id: str,
+    watermark: str,
+    audit: Sequence[ToolAuditRecord],
+    *,
+    reason: str = "budget_exhausted",
+) -> ToolloopResult:
+    marker: dict[str, Any] = {
         "accepted_as_aig": False,
         "calls_used": len(audit),
         "construction_mode": CONSTRUCTION_FALLBACK,
         "deterministic_view": _FALLBACK_VIEW,
-        "reason": "budget_exhausted",
+        "reason": reason,
         "run_id": run_id,
         "watermark": watermark,
     }
+    if reason == REPEAT_LOOP_REASON:
+        marker["repeat_count"] = audit[-1].repeat_count if audit else 0
     return ToolloopResult(
-        status="budget_exhausted",
+        status=reason,
         construction_mode=CONSTRUCTION_FALLBACK,
         draft=None,
         audit=tuple(audit),
@@ -286,6 +327,7 @@ def _record(
     error_code: str | None,
     result: Any,
     elapsed_ms: int,
+    repeat_count: int = 0,
 ) -> None:
     summary = error_code if error_code is not None else _result_summary(verb, result)
     audit.append(
@@ -296,6 +338,7 @@ def _record(
             error_code=error_code,
             result_summary=summary or "ok",
             elapsed_ms=elapsed_ms,
+            repeat_count=repeat_count,
         )
     )
     history.append(
@@ -307,6 +350,13 @@ def _record(
             "result": result,
         }
     )
+
+
+def _repeat_key(verb: str, arguments: Mapping[str, Any]) -> tuple[str, str]:
+    try:
+        return (verb, canonical_dumps(dict(arguments)))
+    except (TypeError, ValueError):
+        return (verb, "{}")
 
 
 def _arguments_summary(arguments: Mapping[str, Any]) -> str:

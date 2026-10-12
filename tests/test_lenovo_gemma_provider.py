@@ -16,14 +16,13 @@ from benchmark.causal_memory.lenovo_gemma_provider import (
     API_KEY_ENV,
     DEFAULT_MODEL,
     GATEWAY_URL,
-    TOOL_ARGUMENT_NAMES,
     LenovoGemmaError,
     LenovoGemmaProvider,
     openai_tools_from_catalog,
     parse_tool_invocation,
     request_body_from_turn,
 )
-from openviking.session.aig_tool_surface import TOOL_CATALOG
+from openviking.session.aig_tool_surface import TOOL_CATALOG, TOOL_SCHEMAS
 from openviking.session.aig_toolloop_builder import ToolloopTurn
 
 
@@ -78,8 +77,9 @@ def test_request_body_maps_system_tools_and_history() -> None:
     assert names == [verb for verb, _text in TOOL_CATALOG]
     add_block = next(item for item in body["tools"] if item["function"]["name"] == "add_block")
     props = add_block["function"]["parameters"]["properties"]
-    assert set(props) == set(TOOL_ARGUMENT_NAMES["add_block"])
+    assert set(props) == set(TOOL_SCHEMAS["add_block"]["properties"])
     assert add_block["function"]["parameters"]["additionalProperties"] is False
+    assert "properties" in props["fields"]
 
 
 def test_messages_from_turn_cover_catalog_verbs() -> None:

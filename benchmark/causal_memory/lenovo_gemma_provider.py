@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from openviking.session.aig_native_protocol import canonical_dumps
-from openviking.session.aig_tool_surface import TOOL_CATALOG
+from openviking.session.aig_tool_surface import TOOL_CATALOG, TOOL_SCHEMAS
 from openviking.session.aig_toolloop_builder import ToolInvocation, ToolloopError, ToolloopTurn
 
 GATEWAY_URL = "https://modelfactory.lenovo.com/llm/v1/chat/completions"
@@ -29,36 +29,6 @@ API_KEY_ENV = "LENOVO_GATEWAY_API_KEY"
 DEFAULT_TIMEOUT_SECONDS = 120.0
 RETRY_BACKOFF_SECONDS = 0.25
 MAX_NETWORK_RETRIES = 1
-
-# Known argument names copied from AigToolSurface._exact_args. A bare
-# ``{"type": "object"}`` would let the model invent keys that the server
-# rejects as invalid_args; listing the closed set keeps the schema aligned
-# with the call that actually runs.
-TOOL_ARGUMENT_NAMES: Mapping[str, tuple[str, ...]] = {
-    "get_overview": (),
-    "read_full_log": (),
-    "read_step": ("index", "i"),
-    "read_step_range": ("start", "end", "a", "b"),
-    "list_agents": (),
-    "get_question": (),
-    "search": ("pattern", "flags"),
-    "list_block_kinds": (),
-    "get_story": (),
-    "get_graph": (),
-    "add_block": ("kind", "block_id", "fields", "from_refs", "to_refs"),
-    "add_inheritance_note": ("from", "to", "inherited", "effect"),
-    "add_skip_attribution": ("from", "to", "inherited", "effect"),
-    "modify_block": ("block_id", "fields"),
-    "delete_block": ("block_id",),
-    "delete_inheritance_note": ("from", "to"),
-    "delete_skip_attribution": ("from", "to"),
-    "mark_defect_recorded": ("block_id", "note"),
-    "submit": (),
-}
-
-_OBJECT_KEYS = frozenset({"fields"})
-_ARRAY_KEYS = frozenset({"from_refs", "to_refs"})
-_INTEGER_KEYS = frozenset({"index", "i", "start", "end", "a", "b"})
 
 
 class LenovoGemmaError(ToolloopError):
@@ -77,33 +47,22 @@ class ProviderCallStat:
 def openai_tools_from_catalog(
     catalog: Sequence[tuple[str, str]] = TOOL_CATALOG,
 ) -> list[dict[str, Any]]:
-    """Convert ``TOOL_CATALOG`` into OpenAI function tools."""
+    """Map ``TOOL_CATALOG`` descriptions onto server ``TOOL_SCHEMAS``."""
     tools: list[dict[str, Any]] = []
     for verb, description in catalog:
-        names = TOOL_ARGUMENT_NAMES.get(verb, ())
-        properties: dict[str, Any] = {}
-        for name in names:
-            if name in _OBJECT_KEYS:
-                schema: dict[str, Any] = {"type": "object"}
-            elif name in _ARRAY_KEYS:
-                schema = {"type": "array"}
-            elif name in _INTEGER_KEYS:
-                schema = {"type": "integer"}
-            else:
-                schema = {"type": "string"}
-            properties[name] = schema
-        parameters: dict[str, Any] = {"type": "object", "additionalProperties": False}
-        if properties:
-            parameters["properties"] = properties
-        else:
-            parameters["properties"] = {}
-        extra = f" Known arguments: {', '.join(names)}." if names else " No arguments."
+        schema = TOOL_SCHEMAS[verb]
+        parameters = {
+            "additionalProperties": False,
+            "properties": dict(schema.get("properties", {})),
+            "required": list(schema.get("required", [])),
+            "type": "object",
+        }
         tools.append(
             {
                 "type": "function",
                 "function": {
                     "name": verb,
-                    "description": description + extra,
+                    "description": description,
                     "parameters": parameters,
                 },
             }
