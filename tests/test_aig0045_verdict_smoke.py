@@ -241,3 +241,55 @@ def test_export_derives_text_turns_when_ledger_is_absent(tmp_path: Path) -> None
     assert summary["records"] == 1
     assert summary["source_derived_sessions"] == 1
     assert summary["source_ledger_sessions"] == 0
+
+
+def test_jobs_parallel_rows_match_serial(tmp_path: Path) -> None:
+    materials = synthetic_materials()
+    factory = lambda mode: FakeToolloopProvider(legal_builder_script(mode))  # noqa: E731
+    serial = run_smoke(materials, root=tmp_path / "serial", builder_factory=factory)
+    parallel = run_smoke(
+        materials, root=tmp_path / "parallel", builder_factory=factory, jobs=4
+    )
+
+    def strip_timing(rows):
+        rows = json.loads(json.dumps(rows))
+        for row in rows:
+            for entry in row.get("toolloop_audit") or []:
+                entry.pop("elapsed_ms", None)
+        return rows
+
+    assert serial["settings"]["jobs"] == 1
+    assert parallel["settings"]["jobs"] == 4
+    assert strip_timing(parallel["materials"]) == strip_timing(serial["materials"])
+    assert parallel["provider_audit"] == serial["provider_audit"]
+    assert parallel["gates"] == serial["gates"]
+
+
+def test_parallel_batch_isolates_driver_exceptions(tmp_path: Path) -> None:
+    def factory(mode: str):
+        if mode == "success":
+            raise RuntimeError("boom")
+        return FakeToolloopProvider(legal_builder_script(mode))
+
+    report = run_smoke(synthetic_materials(), root=tmp_path, builder_factory=factory, jobs=3)
+    rows = {row["run_id"]: row for row in report["materials"]}
+    crashed = [row for row in rows.values() if row["verdict"] == "driver_exception"]
+    assert crashed, "success-mode materials must crash the factory"
+    for row in crashed:
+        assert row["submit"] is False
+        assert row["triggered"] is True
+        assert row["fallback_reason"] == "driver_exception:RuntimeError"
+    survivors = [row for row in rows.values() if row["verdict"] != "driver_exception"]
+    assert any(row["submit"] is True for row in survivors), (
+        "fail-mode materials must still run to submit"
+    )
+
+
+def test_cli_jobs_flag_records_setting(tmp_path: Path) -> None:
+    from benchmark.causal_memory.aig0045_verdict_smoke import main
+
+    out = tmp_path / "report.json"
+    code = main(["--material", "synthetic", "--dry-run", "--jobs", "3", "--out", str(out)])
+    assert code == 0
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["settings"]["jobs"] == 3

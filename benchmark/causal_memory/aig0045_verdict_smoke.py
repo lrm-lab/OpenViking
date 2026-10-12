@@ -15,6 +15,7 @@ import json
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -273,20 +274,28 @@ def run_smoke(
     dry_run: bool = False,
     builder: ToolloopProvider | None = None,
     builder_factory: Callable[[str], ToolloopProvider] | None = None,
+    jobs: int = 1,
 ) -> dict[str, Any]:
-    """Run every material. ``builder_factory(mode)`` is used when set."""
+    """Run every material. ``builder_factory(mode)`` is used when set.
+
+    ``jobs > 1`` runs materials on a thread pool. Rows keep input order and
+    one material's exception becomes a ``driver_exception`` row instead of
+    aborting the batch. A shared ``builder`` would then be called from
+    several threads, so the CLI passes a per-material factory instead.
+    """
+    outcomes = _run_all(
+        materials,
+        root=root,
+        max_calls=max_calls,
+        max_seconds=max_seconds,
+        dry_run=dry_run,
+        builder=builder,
+        builder_factory=builder_factory,
+        jobs=jobs,
+    )
     rows: list[dict[str, Any]] = []
     provider_audit: list[dict[str, Any]] = []
-    for spec in materials:
-        row, extra = _run_one(
-            spec,
-            root=root,
-            max_calls=max_calls,
-            max_seconds=max_seconds,
-            dry_run=dry_run,
-            builder=builder,
-            builder_factory=builder_factory,
-        )
+    for row, extra in outcomes:
         rows.append(row)
         provider_audit.extend(extra)
     gates = score_gates(rows)
@@ -297,10 +306,73 @@ def run_smoke(
         "schema": SCHEMA,
         "settings": {
             "dry_run": dry_run,
+            "jobs": jobs,
             "max_calls": max_calls,
             "max_seconds": max_seconds,
         },
     }
+
+
+def _run_all(
+    materials: Sequence[MaterialSpec],
+    *,
+    root: Path,
+    max_calls: int,
+    max_seconds: float,
+    dry_run: bool,
+    builder: ToolloopProvider | None,
+    builder_factory: Callable[[str], ToolloopProvider] | None,
+    jobs: int,
+) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
+    if jobs <= 1 or len(materials) <= 1:
+        return [
+            _run_one(
+                spec,
+                root=root,
+                max_calls=max_calls,
+                max_seconds=max_seconds,
+                dry_run=dry_run,
+                builder=builder,
+                builder_factory=builder_factory,
+            )
+            for spec in materials
+        ]
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        futures = [
+            pool.submit(
+                _run_one_safe,
+                spec,
+                root=root,
+                max_calls=max_calls,
+                max_seconds=max_seconds,
+                dry_run=dry_run,
+                builder=builder,
+                builder_factory=builder_factory,
+            )
+            for spec in materials
+        ]
+        return [future.result() for future in futures]
+
+
+def _run_one_safe(spec: MaterialSpec, **kwargs: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """``_run_one`` plus batch isolation: one crash must not kill the others."""
+    try:
+        return _run_one(spec, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - recorded as a failed material
+        row: dict[str, Any] = {
+            "budget_exhausted": False,
+            "decisive_refs_in_snapshot": None,
+            "domain": spec.domain_kind,
+            "fallback_reason": f"driver_exception:{type(exc).__name__}",
+            "mode": None,
+            "phi_violations_after_refine": None,
+            "reader_schema_ok": None,
+            "run_id": spec.run_id,
+            "submit": False,
+            "triggered": True,
+            "verdict": "driver_exception",
+        }
+        return row, []
 
 
 def score_gates(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -370,6 +442,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-calls", type=int, default=DEFAULT_MAX_CALLS)
     parser.add_argument("--max-seconds", type=float, default=DEFAULT_MAX_SECONDS)
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="Material-level parallelism. With gemma and jobs>1 each material "
+        "gets its own provider instance; call stats land in the report only.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--out", type=Path, default=ROOT / DEFAULT_REPORT)
     parser.add_argument("--work-root", type=Path, default=None)
@@ -396,6 +475,13 @@ def main(argv: list[str] | None = None) -> int:
         factory = None
     elif builder_choice == "fake":
         factory = _fake_builder
+    elif args.jobs > 1:
+        try:
+            LenovoGemmaProvider()  # fail fast on a missing key; instance discarded
+        except LenovoGemmaError as exc:
+            print(f"gemma provider failed ({exc.code}); export {API_KEY_ENV}", file=sys.stderr)
+            return 2
+        factory = _parallel_gemma_factory()
     else:
         try:
             shared = LenovoGemmaProvider(
@@ -412,6 +498,7 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=args.dry_run,
         builder=shared,
         builder_factory=factory,
+        jobs=max(1, args.jobs),
     )
     write_report(report, args.out)
     if shared is not None:
@@ -619,6 +706,15 @@ def _safe_run_id(run_id: str) -> str:
 
 def _fake_builder(mode: str) -> ToolloopProvider:
     return FakeToolloopProvider(legal_builder_script(mode))
+
+
+def _parallel_gemma_factory() -> Callable[[str], ToolloopProvider]:
+    """One provider per material: isolated in-memory stats, no audit file."""
+
+    def factory(mode: str) -> ToolloopProvider:
+        return LenovoGemmaProvider()
+
+    return factory
 
 
 def _provider_stats(provider: Any, *, skip: int = 0) -> list[dict[str, Any]]:
