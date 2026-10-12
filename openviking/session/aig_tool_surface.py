@@ -129,7 +129,11 @@ TOOL_CATALOG: tuple[tuple[str, str], ...] = (
         "Attach inherited/effect on a non-adjacent forward edge. "
         '"from" must reference an earlier block than "to" (edges go early → late).',
     ),
-    ("modify_block", "Replace fields of an existing block. Kind and id stay fixed."),
+    (
+        "modify_block",
+        "Replace fields of an existing block. Kind and id stay fixed. "
+        "To change a block's span, resend fields with a new step_refs.",
+    ),
     ("delete_block", "Delete a block and every edge that touches it."),
     ("delete_inheritance_note", "Remove an adjacent inheritance note."),
     ("delete_skip_attribution", "Remove a non-adjacent skip attribution."),
@@ -463,7 +467,16 @@ def _parse_step_refs(value: Any, row_count: int) -> tuple[int, ...]:
     if not isinstance(value, list):
         raise ToolSurfaceError("invalid_step_refs")
     if not value:
-        raise ToolSurfaceError("step_refs_empty")
+        raise ToolSurfaceError(
+            "step_refs_empty",
+            {
+                "hint": (
+                    "step_refs must be a non-empty contiguous run of row "
+                    "indices; when shrinking a block, resend its new smaller "
+                    "span (drop the rows you are freeing)"
+                )
+            },
+        )
     numbers: list[int] = []
     for item in value:
         if isinstance(item, bool) or not isinstance(item, int):
@@ -582,8 +595,9 @@ def _validate(blocks: Mapping[str, _Block], edges: Sequence[_Edge], row_count: i
                 ],
                 "hint": (
                     "each row index may belong to at most one block; "
-                    "shrink or move the conflicting block's step_refs with "
-                    "modify_block, or choose a disjoint span"
+                    "free the shared rows by sending modify_block for the listed "
+                    "block with step_refs = its span minus shared_rows, or pick a "
+                    "disjoint span for the new block"
                 ),
                 "shared_rows": list(range(max(start, prev_start), min(end, prev_end) + 1)),
             },

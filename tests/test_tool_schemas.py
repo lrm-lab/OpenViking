@@ -347,3 +347,25 @@ def test_builder_history_carries_overlap_detail_to_provider(tmp_path: Path) -> N
     assert rejected["error_code"] == "step_refs_overlap"
     assert isinstance(rejected["result"], dict)
     assert rejected["result"]["shared_rows"] == [1]
+
+
+def test_step_refs_empty_error_teaches_the_shrink_move(tmp_path: Path) -> None:
+    surface = _surface(tmp_path)
+    surface.call(
+        "add_block",
+        {
+            "kind": "task",
+            "block_id": "t",
+            "fields": {"content": "q", "operative_brief": "b", "step_refs": [0, 1]},
+        },
+    )
+    try:
+        surface.call(
+            "modify_block",
+            {"block_id": "t", "fields": {"content": "q", "step_refs": []}},
+        )
+        raise AssertionError("expected step_refs_empty")
+    except ToolSurfaceError as info:
+        assert info.code == "step_refs_empty"
+        assert info.detail is not None
+        assert "smaller" in info.detail["hint"]
