@@ -14,8 +14,8 @@ from openviking.service.session_service import SessionService
 from openviking.service.task_tracker import set_task_tracker
 from openviking.session.influence_projection import REMOVAL_SUPERSEDED, ProjectionRegistry
 from openviking.session.influence_view import (
-    CONSTRUCTION_MODE_ADAPTIVE,
     CONSTRUCTION_MODE_FALLBACK,
+    CONSTRUCTION_MODE_NATIVE_SINGLE_PASS,
     PURPOSE_POST_RUN_INDEX,
     ViewSupersedeIndex,
 )
@@ -157,7 +157,7 @@ async def test_phase2_with_provider_registers_adaptive_beside_fallback(
         assert [item.revision_id for item in history] == [fallback_id, adaptive_id]
         assert [item.construction_mode for item in history] == [
             CONSTRUCTION_MODE_FALLBACK,
-            CONSTRUCTION_MODE_ADAPTIVE,
+            CONSTRUCTION_MODE_NATIVE_SINGLE_PASS,
         ]
         assert latest is not None
         assert latest.revision_id == adaptive_id

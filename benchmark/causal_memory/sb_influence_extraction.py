@@ -448,9 +448,10 @@ def _print_policy() -> None:
     )
     print(
         f"write path: freeze_extracted_view purpose={PURPOSE_POST_RUN_INDEX} "
-        "construction_mode=adaptive. "
+        "construction_mode=native_single_pass_aig. "
         f"granularity_reason={GRANULARITY_REASON}. "
-        f"frozen_at={FROZEN_AT}. revision_id=r8a:{{episode_dir}}."
+        f"frozen_at={FROZEN_AT}. revision_id=r8a:{{episode_dir}}. "
+        "legacy write is an explicit offline-audit opt-in only (P11)."
     )
 
 
@@ -1081,13 +1082,14 @@ def _freeze(
             claims=claims,
             coverage=coverage,
             retrieval_subgraphs=subgraphs,
+            legacy_audit_opt_in=True,
         )
     except HighSeverityViolation as exc:
         print(f"FREEZE REFUSED {session_id} {revision_id}")
         for violation in exc.violations:
             print(json.dumps(violation.to_dict(), ensure_ascii=False, sort_keys=True))
         raise SystemExit(1) from exc
-    if revision.construction_mode != "adaptive":
+    if revision.construction_mode != "native_single_pass_aig":
         _fail(f"{session_id}: construction_mode={revision.construction_mode!r}")
     if revision.purpose != PURPOSE_POST_RUN_INDEX:
         _fail(f"{session_id}: purpose={revision.purpose!r}")
@@ -1407,6 +1409,7 @@ def _write_fork(
         diagnosis_run_id=f"r8a:{record['episode_dir']}",
         model_version=MODEL_VERSION,
         contemporaneous_basis=payload["contemporaneous_basis"],
+        legacy_audit_opt_in=True,
     )
 
 
@@ -1520,6 +1523,7 @@ def _write_fork_with_labels(
         diagnosis_run_id=f"r8a:{record['episode_dir']}",
         model_version=MODEL_VERSION,
         contemporaneous_basis=payload["contemporaneous_basis"],
+        legacy_audit_opt_in=True,
     )
 
 
@@ -1681,6 +1685,7 @@ def _freeze_or_codes(
             claims=claims,
             coverage=revision.coverage,
             retrieval_subgraphs=subgraphs,
+            legacy_audit_opt_in=True,
         )
     except HighSeverityViolation as exc:
         codes = [item.code for item in exc.violations]
@@ -1764,7 +1769,10 @@ def _structural_search(
     record_by_session = {record["episode_dir"]: record for record in corpus}
 
     def search(query: str) -> list[dict[str, Any]]:
-        result = facade.retrieve(query, principal_labels=WORKSPACE_LABELS, profile=L3_PROFILE)
+        # ADR-0043: the active retrieve() path no longer returns claim, cut,
+        # or legacy fork cards. This arm scores exactly those cards, so it
+        # reads the explicit offline-audit lane instead.
+        result = facade.audit_legacy(query, principal_labels=WORKSPACE_LABELS, profile=L3_PROFILE)
         cards: list[dict[str, Any]] = []
         for card in result.cards[:K]:
             owner, patterns, patterns_fine = _card_patterns(card, record_by_session, fork_owner)
@@ -2459,11 +2467,18 @@ def _selected_dirs(stage: str, dirs: list[Path]) -> list[Path]:
 
 
 def main() -> None:
+    global SB_DATA, SB_EPISODES, SB_ATTEMPTS
     parser = argparse.ArgumentParser(description="R8a SkillsBench influence and fork extraction")
     parser.add_argument("--out", type=Path, default=Path("/tmp/sb-influence/report.json"))
     parser.add_argument("--stage", choices=("1", "2", "3", "all"), default="all")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--episodes", type=Path, default=SB_EPISODES)
+    parser.add_argument("--sb-data", type=Path, default=SB_DATA)
+    parser.add_argument("--attempts", type=Path, default=SB_ATTEMPTS)
     args = parser.parse_args()
+    SB_EPISODES = args.episodes
+    SB_DATA = args.sb_data
+    SB_ATTEMPTS = args.attempts
     _print_policy()
     work = args.out.parent
     work.mkdir(parents=True, exist_ok=True)

@@ -259,7 +259,33 @@ def _write(store: CausalExperiencesStore, revision, subgraph_id: str, **override
         "contemporaneous_basis": [_basis(anchor_sequence)],
     }
     fields.update(overrides)
+    fields.setdefault("legacy_audit_opt_in", True)
     return write_failure_subgraph_fork(store, revision, subgraph_id, **fields)
+
+
+def test_failure_subgraph_fork_refuses_unless_legacy_audit_opt_in(tmp_path: Path) -> None:
+    from openviking.session.legacy_write_gate import LegacyWriteRefused
+
+    revision = _release_revision()
+    store = _store(tmp_path)
+    with pytest.raises(LegacyWriteRefused):
+        write_failure_subgraph_fork(
+            store,
+            revision,
+            "sg-cutover",
+            seven_sections=_sections("错误率升高就切回蓝"),
+            branches=[],
+            position_kind="block",
+            position_ref="block:b-rate",
+            workspace_id="team-a",
+            workspace_labels=_PRINCIPAL,
+            diagnosis_run_id="diag-cutover",
+            model_version="diag-model-v1",
+            contemporaneous_basis=[_basis(2)],
+        )
+    assert _revision_files(tmp_path / "store") == []
+    written = _write(store, revision, "sg-cutover")
+    assert written.fork_node_id
 
 
 def test_one_failure_subgraph_writes_one_ordinary_fork(tmp_path: Path) -> None:

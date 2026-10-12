@@ -758,7 +758,7 @@ async def test_factory_lands_adaptive_and_keeps_fallback_readable(
         assert [item.revision_id for item in history] == [fallback_id, adaptive_id]
         assert latest is not None
         assert latest.revision_id == adaptive_id
-        assert latest.construction_mode == "adaptive"
+        assert latest.construction_mode == "native_single_pass_aig"
         assert history[0].construction_mode == "fallback"
         facade = build_retrieval_facade(
             session=session, ctx=session.ctx, viking_fs=session._viking_fs
@@ -876,14 +876,14 @@ def test_stub_vlm_model_mode_lands_adaptive_revision(tmp_path: Path) -> None:
     assert report["summary"]["compliant"] == 1
     assert report["summary"]["total_tokens"] == 8
     episode = report["episodes"][0]
-    assert episode["construction_mode"] == "adaptive"
+    assert episode["construction_mode"] == "native_single_pass_aig"
     assert episode["usage"]["total_tokens"] == 8
     assert episode["revision_id"].endswith(":adaptive")
     index = ViewSupersedeIndex(tmp_path / "views.json")
     latest = index.latest(snapshot["session_id"], PURPOSE_POST_RUN_INDEX)
     assert latest is not None
     assert latest.revision_id == episode["revision_id"]
-    assert latest.construction_mode == "adaptive"
+    assert latest.construction_mode == "native_single_pass_aig"
 
 
 def test_stub_vlm_token_cap_raises(tmp_path: Path) -> None:

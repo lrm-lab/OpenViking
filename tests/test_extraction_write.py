@@ -19,7 +19,7 @@ from openviking.session.extraction_write import (
     freeze_extracted_view,
 )
 from openviking.session.influence_view import (
-    CONSTRUCTION_MODE_ADAPTIVE,
+    CONSTRUCTION_MODE_NATIVE_SINGLE_PASS,
     CONSTRUCTION_MODE_FALLBACK,
     DETERMINISTIC_FALLBACK_REASON,
     PURPOSE_POST_RUN_INDEX,
@@ -228,6 +228,7 @@ def _freeze_kwargs(
         "claims": claims,
         "coverage": coverage,
         "retrieval_subgraphs": subgraphs,
+        "legacy_audit_opt_in": True,
     }
 
 
@@ -255,7 +256,9 @@ def _service(root: Path, provider) -> TrajectoryIndexService:
     return TrajectoryIndexService(
         root / "trajectory-index.json",
         ViewSupersedeIndex(root / VIEWS_FILENAME),
-        builder=extraction_index_builder(provider, frozen_at=FROZEN),
+        builder=extraction_index_builder(
+            provider, frozen_at=FROZEN, legacy_audit_opt_in=True
+        ),
     )
 
 
@@ -355,7 +358,7 @@ def _illegal(case: str, session_id: str):
 def test_extracted_payload_freezes_adaptive_view_roundtrip() -> None:
     blocks, claims, coverage, subgraphs = _happy_parts(SESSION)
     revision = freeze_extracted_view(**_freeze_kwargs(blocks, claims, coverage, subgraphs))
-    assert revision.construction_mode == CONSTRUCTION_MODE_ADAPTIVE
+    assert revision.construction_mode == CONSTRUCTION_MODE_NATIVE_SINGLE_PASS
     assert revision.purpose == PURPOSE_POST_RUN_INDEX
     assert [block.block_id for block in revision.blocks] == ["b-script", "b-rate", "b-note"]
     assert [claim.claim_id for claim in revision.claims] == ["c-cutover", "c-note"]
@@ -550,7 +553,22 @@ def test_unconfigured_provider_keeps_ledger_fallback(
     assert (tmp_path / VIEWS_FILENAME).is_file()
 
 
-def test_configured_provider_freezes_payload_through_process_next(
+def test_freeze_extracted_view_refuses_unless_legacy_audit_opt_in() -> None:
+    from openviking.session.legacy_write_gate import LegacyWriteRefused
+
+    blocks, claims, coverage, subgraphs = _happy_parts(SESSION)
+    kwargs = _freeze_kwargs(blocks, claims, coverage, subgraphs)
+    kwargs["legacy_audit_opt_in"] = False
+    with pytest.raises(LegacyWriteRefused):
+        freeze_extracted_view(**kwargs)
+    refused = extraction_index_builder(lambda *_args: _payload_for(SESSION), frozen_at=FROZEN)
+    with pytest.raises(LegacyWriteRefused):
+        refused(SESSION, TASK, "unspecified")
+    allowed = freeze_extracted_view(**_freeze_kwargs(blocks, claims, coverage, subgraphs))
+    assert allowed.claims
+
+
+def test_configured_claim_provider_does_not_freeze_a_claim_view(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import openviking.session.trajectory_index as index_mod
@@ -572,19 +590,9 @@ def test_configured_provider_freezes_payload_through_process_next(
         config=_causal_config(),
         extraction_provider=_provider,
     )
-    revision = ViewSupersedeIndex(tmp_path / VIEWS_FILENAME).latest(
-        HOOK_SESSION, PURPOSE_POST_RUN_INDEX
-    )
     assert seen == [(HOOK_SESSION, HOOK_TASK, "unspecified")]
-    assert revision is not None
-    assert revision.construction_mode == CONSTRUCTION_MODE_ADAPTIVE
-    assert revision.revision_id == f"post-run:{HOOK_SESSION}:{HOOK_TASK}:adaptive"
-    assert [item.subgraph_id for item in revision.retrieval_subgraphs] == ["sg-cutover", "sg-note"]
-    assert revision.retrieval_subgraphs[1].is_failure is True
-    assert InfluenceViewRevision.from_dict(revision.to_dict()) == revision
-    disk = (tmp_path / VIEWS_FILENAME).read_text(encoding="utf-8")
-    assert "subtask" not in disk
-    assert (tmp_path / VIEWS_FILENAME).is_file()
+    assert not (tmp_path / VIEWS_FILENAME).exists()
+    assert not (tmp_path / "native-edges.json").exists()
 
 
 def test_repeat_extraction_does_not_register_a_second_view(tmp_path: Path) -> None:
@@ -600,13 +608,8 @@ def test_repeat_extraction_does_not_register_a_second_view(tmp_path: Path) -> No
     maybe_index_session_trajectory(
         session, "task-extract-2", config=config, extraction_provider=_provider
     )
-    history = ViewSupersedeIndex(tmp_path / VIEWS_FILENAME).history(
-        HOOK_SESSION, PURPOSE_POST_RUN_INDEX
-    )
-    assert len(history) == 1
-    assert history[0].task_run_id == HOOK_TASK
-    assert history[0].construction_mode == CONSTRUCTION_MODE_ADAPTIVE
-    assert history[0].revision_id == f"post-run:{HOOK_SESSION}:{HOOK_TASK}:adaptive"
+    assert not (tmp_path / VIEWS_FILENAME).exists()
+    assert not (tmp_path / "native-edges.json").exists()
 
 
 @pytest.mark.asyncio

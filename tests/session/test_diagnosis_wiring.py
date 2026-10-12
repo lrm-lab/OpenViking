@@ -148,6 +148,23 @@ def test_owner_can_retrieve_and_a_disjoint_principal_raises(tmp_path: Path) -> N
         )
 
 
+def test_diagnosis_fork_refuses_unless_legacy_audit_opt_in() -> None:
+    from openviking.session.legacy_write_gate import LegacyWriteRefused
+
+    with pytest.raises(LegacyWriteRefused):
+        write_diagnosis_fork(
+            None,
+            None,
+            None,
+            subgraph_id="sg-cutover",
+            seven_sections={},
+            branches=[],
+            diagnosis_run_id="diag",
+            model_version="model",
+            contemporaneous_basis=[],
+        )
+
+
 def test_fork_write_uses_the_owner_label_and_rejects_a_disjoint_label_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -166,7 +183,9 @@ def test_fork_write_uses_the_owner_label_and_rejects_a_disjoint_label_set(
         "contemporaneous_basis": [_basis(2)],
     }
 
-    written = write_diagnosis_fork(session, session.ctx, session._viking_fs, **fields)
+    written = write_diagnosis_fork(
+        session, session.ctx, session._viking_fs, legacy_audit_opt_in=True, **fields
+    )
     assert written.workspace_id == session_owner_label(session)
     assert written.workspace_id == "user:default"
     written_files = _fork_files(user_root)
@@ -178,6 +197,7 @@ def test_fork_write_uses_the_owner_label_and_rejects_a_disjoint_label_set(
             session.ctx,
             session._viking_fs,
             workspace_labels=("user:stranger",),
+            legacy_audit_opt_in=True,
             **fields,
         )
     assert _fork_files(user_root) == written_files

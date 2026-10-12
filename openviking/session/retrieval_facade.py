@@ -147,6 +147,11 @@ CardKind = Literal[
     "claim_projection",
     "segment",
     "atom",
+    "native_block",
+    "native_edge",
+    "fork_overlay",
+    "strategy_pattern",
+    "guidance",
 ]
 CardChannel = Literal["verified", "provisional", "fact"]
 SelectionMode = Literal["exploitation", "exploration"]
@@ -154,7 +159,19 @@ RankMode = Literal["bm25", "hybrid"]
 EmbedFn = Callable[[str], Sequence[float]]
 
 CARD_KINDS = frozenset(
-    ("fork", "branch", "block_projection", "claim_projection", "segment", "atom")
+    (
+        "fork",
+        "branch",
+        "block_projection",
+        "claim_projection",
+        "segment",
+        "atom",
+        "native_block",
+        "native_edge",
+        "fork_overlay",
+        "strategy_pattern",
+        "guidance",
+    )
 )
 CARD_CHANNELS = frozenset(("verified", "provisional", "fact"))
 SELECTION_MODES = frozenset(("exploitation", "exploration"))
@@ -1981,13 +1998,14 @@ def _allocate_stateful(
 
 
 class HybridRetrievalFacade:
-    """One retrieve call over fork/branch, projection, and segment/atom.
+    """Active retrieve reads native edges, overlays, patterns, and guidance.
 
-    Online code must not call ``materialize_strength(None)``, ``events()``,
-    ``list_bridges``, or ``ProjectionRegistry.to_dict``. Those are offline
-    management paths and do not apply principal ACL.
-    Diagnostic subgraph retrieval is ``retrieve_historical_subgraphs`` and is
-    not part of ``retrieve``.
+    ``audit_legacy`` is the explicit Claim/Cut/legacy-fork audit path.
+    ``retrieve`` does not call it. Online code must not call
+    ``materialize_strength(None)``, ``events()``, ``list_bridges``, or
+    ``ProjectionRegistry.to_dict``. Those are offline management paths and
+    do not apply principal ACL. Diagnostic subgraph retrieval is
+    ``retrieve_historical_subgraphs`` and is not part of ``retrieve``.
     """
 
     def __init__(
@@ -2003,10 +2021,12 @@ class HybridRetrievalFacade:
         fact_lane_paused: bool | None = None,
         embedder: EmbedFn | None = None,
         retrieval_subgraph: RetrievalSubgraphAdapter | None = None,
+        active_corpus: Any = None,
     ) -> None:
         self.fork_branch = fork_branch
         self.projection = projection
         self.segment_atom = segment_atom
+        self.active_corpus = active_corpus
         if retrieval_subgraph is not None and not isinstance(
             retrieval_subgraph, RetrievalSubgraphAdapter
         ):
@@ -2030,8 +2050,34 @@ class HybridRetrievalFacade:
         principal_labels: Sequence[str],
         profile: RetrievalProfile | Mapping[str, Any] | None = None,
     ) -> RetrievalResult:
-        """Filter inside each adapter, then clamp reranked cards back to 12.
+        """Active retrieval. Claim, cut, and legacy fork cards are not returned.
 
+        The fact lane and the claim projection adapter are not consulted.
+        ``audit_legacy`` keeps that older path for explicit audit reads.
+        """
+        from openviking.session.active_retrieval import retrieve_active
+
+        return retrieve_active(
+            self.active_corpus,
+            query,
+            principal_labels,
+            profile,
+            rerank=self.rerank,
+            acl_filter=self.acl_filter,
+            feature_version=self.feature_version,
+            seed=self.seed,
+            embedder=self.embedder,
+        )
+
+    def audit_legacy(
+        self,
+        query: RetrievalQuery | Mapping[str, Any] | str | None,
+        principal_labels: Sequence[str],
+        profile: RetrievalProfile | Mapping[str, Any] | None = None,
+    ) -> RetrievalResult:
+        """Legacy-audit retrieval over claim projections and legacy forks.
+
+        This is not the active path. ``retrieve`` does not call it.
         While the fact lane is paused this does not call ``segment_atom.search``
         and does not backfill those seats. ``materialize_strength(None)``,
         ``events()``, ``list_bridges``, and ``ProjectionRegistry.to_dict`` are
@@ -2116,6 +2162,24 @@ class HybridRetrievalFacade:
             )
         return fork_cards, projection_cards, fact_cards
 
+    def audit_expand_claim_neighborhood(
+        self,
+        view_revision_id: str | None = None,
+        claim_id: str | None = None,
+        max_entities: int = PATH_MAX_ENTITIES,
+        *,
+        card_id: str | None = None,
+        principal_labels: Sequence[str] = (),
+    ) -> AssembledPath:
+        """Legacy-audit claim neighborhood. ``retrieve`` does not call this."""
+        return self.expand_claim_neighborhood(
+            view_revision_id,
+            claim_id,
+            max_entities=max_entities,
+            card_id=card_id,
+            principal_labels=principal_labels,
+        )
+
     def expand_claim_neighborhood(
         self,
         view_revision_id: str | None = None,
@@ -2125,7 +2189,7 @@ class HybridRetrievalFacade:
         card_id: str | None = None,
         principal_labels: Sequence[str] = (),
     ) -> AssembledPath:
-        """Claim-neighborhood expand for the Memory Agent.
+        """Legacy-audit claim neighborhood. Not an active retrieve object.
 
         OpenViking only provides this entry. Whether a diagnostic agent may
         call it is an agent-side fence and is not checked here.

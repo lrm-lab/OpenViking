@@ -1,0 +1,16 @@
+{
+  "schema_version": "coordinator-boundary-v1",
+  "object_kind": "coordinator_failure_gate_event",
+  "content_hash": "6221342066d08cf4c550f6aea0cc7f06d8a365e5b2ea99f1bd9fc940f173cb66",
+  "body": {
+    "action": "diagnostic_advice",
+    "commit_id": "commit-diagnose-1",
+    "decision": "uncertain",
+    "orchestration_run_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "policy_version": "outcome-evidence-v1",
+    "reason": "criteria_not_explicit",
+    "request_content_hash": "0a6411579d2605aa95c22836b4e15e325e1bfd824cd610223451f9669fcdb53d",
+    "task_id": "task-diagnose",
+    "trigger": "memory_diagnose"
+  }
+}

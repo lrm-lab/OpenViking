@@ -1,0 +1,44 @@
+{
+  "body": {
+    "applicability": {
+      "action_skill_role": "applicable",
+      "anchor_state": "partially_applicable",
+      "failure_mode": "applicable",
+      "task_decision_type": "applicable"
+    },
+    "author_role": "reader",
+    "base_revision_id": "rev-aig-frozen-1",
+    "report_hash": "cf899129e58b27f8d77082b97e54eb9ee59f99d5fe25843472d5e30a1cc8ec70",
+    "required_capabilities": [
+      "replay-sandbox"
+    ],
+    "retrieval_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "risk": "retry may repeat the failed rollout",
+    "source_fork_id": "fork-overlay-1",
+    "steps": [
+      {
+        "evidence_refs": [
+          {
+            "ao_id": "ao-eval-1",
+            "archive_commit_watermark": null,
+            "captured_state": "committed",
+            "evidence_content_hash": "hash-eval-1",
+            "evidence_role": "hindsight_attribution",
+            "source_archive_id": null,
+            "source_read_snapshot_watermark": "wm-1",
+            "source_sequence": 4,
+            "source_session_id": "sess-1"
+          }
+        ],
+        "imagined_node_id": "img-narrow-retry",
+        "statement": "retry the call with a narrower timeout",
+        "step_id": "step-retry"
+      }
+    ],
+    "target_role": "task_agent",
+    "task_id": "task-1"
+  },
+  "content_hash": "893800bd825fcc4991a27506ed99ff3fce19eb1c94896aa4c1be3f9bfa0e81e0",
+  "object_kind": "guided_counterfactual_branch",
+  "schema_version": "aig-native-v2"
+}

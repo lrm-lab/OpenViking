@@ -616,7 +616,7 @@ async def expand_causal_neighborhood(card_id: str, session_id: str) -> dict:
         raise InvalidArgumentError("card_id is required")
     session_id = _require_causal_session_id(session_id)
     ctx, facade = await _open_causal_facade(session_id)
-    path = facade.expand_claim_neighborhood(
+    path = facade.audit_expand_claim_neighborhood(
         card_id=card_id.strip(),
         principal_labels=tuple(acl_principals(ctx)),
     )

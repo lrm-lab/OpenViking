@@ -1,0 +1,27 @@
+{
+  "body": {
+    "claim": {
+      "carried_artifact": "error-rate",
+      "claim_id": "claim-rate-to-rollback",
+      "critic_verdict": null,
+      "downstream_effect": "rollback decided",
+      "relation_type": "influence",
+      "source_block_id": "blk-rate",
+      "source_evidence_refs": [],
+      "status": "hypothesis",
+      "target_block_id": "blk-rollback",
+      "target_evidence_refs": []
+    },
+    "cut_grounding": {
+      "content_hash": "f9f0a079c9a0c13bf13390a7213a409f6141575fe5ed9a80f58e7efa83a43025",
+      "grounded_at": "2026-10-10T00:00:00.000Z",
+      "position_kind": "cut",
+      "position_ref": "cut:blk-rate:blk-rollback",
+      "semantic_summary_snapshot": "gap between the rate check and the rollback",
+      "view_revision_id": "rev-legacy-1"
+    }
+  },
+  "content_hash": "13ccf85f06557bfec5d7790b765769b13d22497374ec7675ac3ebe9adfc5e0ce",
+  "object_kind": "legacy_claim_cut",
+  "schema_version": "legacy-claim-cut-v1"
+}

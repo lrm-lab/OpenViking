@@ -6,7 +6,7 @@
 
 Oracle upper bound on the content axis only. Human-written ``observation``
 text is copied into ``InfluenceBlock.summary`` and frozen through
-``freeze_extracted_view`` (``construction_mode=adaptive``, no claims, no
+``freeze_extracted_view`` (``construction_mode=native_single_pass_aig``, no claims, no
 edges). The same questions were written by the same authors, and observation
 does not cover every message, so a gain here is an optimistic ceiling on
 summary text. It is not evidence for cross-message structure.
@@ -89,6 +89,9 @@ from openviking.session.retrieval_facade import (
 
 SCHEMA = "r7c-oracle-v1"
 FROZEN_AT = "2026-09-30T00:00:00.000Z"
+FROZEN_RULES = (
+    "legacy write is an explicit offline-audit opt-in only (P11).",
+)
 METRICS = ("legacy", "ranked")
 VARIANTS = ("oracle", "oracle_only", "placeholder")
 CONFIGS = ("no_resolver", "with_resolver")
@@ -167,11 +170,12 @@ def _print_policy() -> None:
     )
     print(
         "write path: freeze_extracted_view purpose=post_run_index "
-        "construction_mode=adaptive. "
+        "construction_mode=native_single_pass_aig. "
         f"granularity_reason={DETERMINISTIC_FALLBACK_REASON} "
         "(copied from the fallback block the library already built). "
         "revision_id=r7c:{variant}:{session_id} (fixed, not a uuid). "
-        f"frozen_at={FROZEN_AT}."
+        f"frozen_at={FROZEN_AT}. "
+        f"{FROZEN_RULES[0]}"
     )
     print(
         "summary: multiple observations for one dia are joined with a newline "
@@ -440,10 +444,11 @@ def _freeze_variant(
             claims=(),
             coverage=coverage,
             retrieval_subgraphs=(),
+            legacy_audit_opt_in=True,
         )
     except (HighSeverityViolation, TypeError, ValueError) as exc:
         _fail(f"{session_id} {variant}: freeze_extracted_view refused: {exc}")
-    if revision.construction_mode != "adaptive":
+    if revision.construction_mode != "native_single_pass_aig":
         _fail(f"{session_id} {variant}: construction_mode={revision.construction_mode!r}")
     if revision.purpose != PURPOSE_POST_RUN_INDEX:
         _fail(f"{session_id} {variant}: purpose={revision.purpose!r}")

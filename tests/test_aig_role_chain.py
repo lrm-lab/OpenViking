@@ -42,7 +42,7 @@ def _chain_report(run_id: str, report: dict) -> str:
 
 def test_default_mode_failure_is_provisional_fallback_not_ig():
     fresh = AigConstructionRun("fresh")
-    assert fresh.construction_mode == "adaptive_agentic_aig"
+    assert fresh.construction_mode == "native_single_pass_aig"
     assert fresh.construction_mode != "fixed_partition_single_pass_ig"
 
     built = AigConstructionRun("built")
@@ -57,7 +57,7 @@ def test_default_mode_failure_is_provisional_fallback_not_ig():
     failed["trust"] = "frozen"
     assert built.construction_mode == "fallback"
     assert built.trust == "provisional"
-    assert fresh.construction_mode == "adaptive_agentic_aig"
+    assert fresh.construction_mode == "native_single_pass_aig"
 
     fresh_failed = fresh.fail()
     assert fresh_failed == {"constructionMode": "fallback", "trust": "provisional"}
@@ -71,7 +71,7 @@ def test_default_mode_failure_is_provisional_fallback_not_ig():
     done.read_verify(done_sessions["reader"], {"verdict": "ok"})
     done.freeze_report(done_sessions["reader"])
     assert done.trust == "frozen"
-    assert done.construction_mode == "adaptive_agentic_aig"
+    assert done.construction_mode == "native_single_pass_aig"
     downgraded = done.fail()
     assert downgraded == {"constructionMode": "fallback", "trust": "provisional"}
     assert done.construction_mode == "fallback"
@@ -297,7 +297,7 @@ def test_read_verify_phase_gate_and_fork_after_freeze():
     assert proposed["readerReportHash"] == report_hash
     assert proposed["fork"] == {"bridge": "cut-blue"}
     assert run.reader_report_hash == report_hash
-    assert run.construction_mode == "adaptive_agentic_aig"
+    assert run.construction_mode == "native_single_pass_aig"
     assert run.construction_mode != "fixed_partition_single_pass_ig"
 
     proposed["fork"]["bridge"] = "mutated"
@@ -425,7 +425,7 @@ def test_evidence_exposure_climbs_one_tier_and_never_returns_raw_ao():
     assert run.reader_report_hash == report_hash
     assert run.phase == "READ_VERIFY"
     assert run.trust == "draft"
-    assert run.construction_mode == "adaptive_agentic_aig"
+    assert run.construction_mode == "native_single_pass_aig"
     assert "ao" not in granted
     for value in vars(run).values():
         if isinstance(value, str):
@@ -526,3 +526,68 @@ def test_evidence_escalation_only_reader_during_read_verify():
     )
     assert provisional.evidence_tier == "summary"
     assert provisional.phase == "FALLBACK"
+
+
+def test_outcome_write_is_reader_only_and_critic_violation_is_not_failure():
+    run = AigConstructionRun("run-outcome-auth")
+    sessions = _sessions(run)
+    for role in ("builder", "critic", "refiner"):
+        _assert_code(
+            lambda role=role: run.authorize_outcome_write(sessions[role]),
+            "outcome_write_forbidden",
+        )
+    _assert_code(
+        lambda: run.authorize_outcome_write(sessions["reader"]),
+        "report_not_frozen",
+    )
+
+    run.submit_draft(sessions["builder"], {"graph": []})
+    assert run.critique(sessions["critic"], [{"code": "gap", "severity": "high"}]) == 1
+    assert run.trust == "draft"
+    assert run.phase == "CRITIQUE"
+    assert run.reader_report_hash is None
+    _assert_code(
+        lambda: run.authorize_outcome_write(sessions["critic"]),
+        "outcome_write_forbidden",
+    )
+    _assert_code(
+        lambda: run.authorize_outcome_write(sessions["reader"]),
+        "report_not_frozen",
+    )
+
+    run.refine(sessions["refiner"], {"graph": ["n"]})
+    report_hash = run.read_verify(sessions["reader"], {"verdict": "supported"})
+    _assert_code(
+        lambda: run.authorize_outcome_write(sessions["reader"]),
+        "report_not_frozen",
+    )
+    assert run.freeze_report(sessions["reader"]) == report_hash
+    assert run.phase == "SYNTHESIZE_PROPOSE"
+    assert run.trust == "frozen"
+    assert run.authorize_outcome_write(sessions["reader"]) == report_hash
+    assert run.authorize_outcome_write(run.session_for("diagnosis")) == report_hash
+    assert run.phase == "SYNTHESIZE_PROPOSE"
+    assert run.trust == "frozen"
+    assert run.reader_report_hash == report_hash
+    for role in ("builder", "critic", "refiner"):
+        _assert_code(
+            lambda role=role: run.authorize_outcome_write(sessions[role]),
+            "outcome_write_forbidden",
+        )
+
+    foreign = AigConstructionRun("run-outcome-other")
+    _assert_code(
+        lambda: run.authorize_outcome_write(foreign.session_for("reader")),
+        "session_role_mismatch",
+    )
+    assert run.fail() == {"constructionMode": "fallback", "trust": "provisional"}
+    _assert_code(
+        lambda: run.authorize_outcome_write(sessions["reader"]),
+        "fallback_is_provisional",
+    )
+    _assert_code(
+        lambda: run.authorize_outcome_write(sessions["critic"]),
+        "outcome_write_forbidden",
+    )
+    assert run.reader_report_hash == report_hash
+    assert run.construction_mode == "fallback"

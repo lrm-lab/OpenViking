@@ -1,6 +1,10 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-"""Typed hybrid retrieval facade (slice S13)."""
+"""Legacy-audit coverage of the hybrid retrieval facade (slice S13).
+
+These tests call ``audit_legacy``. Active retrieve, which does not return
+Claim, Cut, or legacy fork cards, is covered by ``test_p11_contract.py``.
+"""
 
 from __future__ import annotations
 
@@ -359,7 +363,7 @@ def test_corpus_quotas_and_profile_over_cap(tmp_path: Path) -> None:
     assert facade.fact_lane_paused is FACT_LANE_PAUSED is True
     assert DEFAULT_SEGMENT_ATOM_QUOTA == 2
     assert CAUSAL_MEMORY_CAP == 12
-    result = facade.retrieve({}, _PRINCIPAL, RetrievalProfile())
+    result = facade.audit_legacy({}, _PRINCIPAL, RetrievalProfile())
     forks = [card for card in result.cards if card.kind == "fork"]
     projections = [card for card in result.cards if card.kind.endswith("_projection")]
     facts = [card for card in result.cards if card.kind in {"segment", "atom"}]
@@ -384,7 +388,7 @@ def test_corpus_quotas_and_profile_over_cap(tmp_path: Path) -> None:
         views=[revision],
         fact_lane_paused=False,
     )
-    resumed_result = resumed.retrieve({}, _PRINCIPAL, RetrievalProfile())
+    resumed_result = resumed.audit_legacy({}, _PRINCIPAL, RetrievalProfile())
     resumed_forks = [card for card in resumed_result.cards if card.kind == "fork"]
     resumed_projections = [
         card for card in resumed_result.cards if card.kind.endswith("_projection")
@@ -398,7 +402,7 @@ def test_corpus_quotas_and_profile_over_cap(tmp_path: Path) -> None:
     assert len(resumed_result.cards) == 12
 
     with pytest.raises(QuotaError) as raised:
-        facade.retrieve(
+        facade.audit_legacy(
             {},
             _PRINCIPAL,
             RetrievalProfile(fork_branch=7, projection=4, segment_atom=2),
@@ -434,7 +438,7 @@ def test_branch_cards_follow_parent_channel(tmp_path: Path) -> None:
     session_dir = root / "sess"
     AOLedger(session_dir, "sess")
     facade = _facade(root, store, registry, session_dir, "sess")
-    result = facade.retrieve({}, _PRINCIPAL, RetrievalProfile(fork_branch=4, projection=0, segment_atom=0))
+    result = facade.audit_legacy({}, _PRINCIPAL, RetrievalProfile(fork_branch=4, projection=0, segment_atom=0))
     assert [(card.kind, card.channel, card.status_label) for card in result.cards] == [
         ("fork", "verified", "validated"),
         ("branch", "verified", "validated"),
@@ -468,7 +472,7 @@ def test_channel_backfill_keeps_in_channel_rank(tmp_path: Path) -> None:
     session_dir = verified_root / "sess"
     AOLedger(session_dir, "sess")
     facade = _facade(verified_root, verified_store, registry, session_dir, "sess")
-    result = facade.retrieve(
+    result = facade.audit_legacy(
         {},
         _PRINCIPAL,
         RetrievalProfile(fork_branch=12, projection=0, segment_atom=0),
@@ -497,7 +501,7 @@ def test_channel_backfill_keeps_in_channel_rank(tmp_path: Path) -> None:
     short_session = short_root / "sess"
     AOLedger(short_session, "sess")
     short_facade = _facade(short_root, short_store, short_registry, short_session, "sess")
-    backfilled = short_facade.retrieve(
+    backfilled = short_facade.audit_legacy(
         {},
         _PRINCIPAL,
         RetrievalProfile(fork_branch=8, projection=0, segment_atom=0),
@@ -532,7 +536,7 @@ def test_acl_filters_non_intersecting_labels(tmp_path: Path) -> None:
     hidden_ao = _append_ao(ledger, labels=["secret"])
 
     facade = _facade(root, store, registry, session_dir, "sess-acl", views=[visible_rev, hidden_rev])
-    result = facade.retrieve({}, _PRINCIPAL)
+    result = facade.audit_legacy({}, _PRINCIPAL)
     pointers = [card.source_pointer for card in result.cards]
     assert any(item.get("fork_node_id") == visible_fork for item in pointers)
     assert all(item.get("fork_node_id") != hidden_fork for item in pointers)
@@ -552,7 +556,7 @@ def test_acl_filters_non_intersecting_labels(tmp_path: Path) -> None:
         views=[visible_rev, hidden_rev],
         fact_lane_paused=False,
     )
-    resumed_pointers = [card.source_pointer for card in resumed.retrieve({}, _PRINCIPAL).cards]
+    resumed_pointers = [card.source_pointer for card in resumed.audit_legacy({}, _PRINCIPAL).cards]
     assert any(item.get("ao_id") == visible_ao for item in resumed_pointers)
     assert all(item.get("ao_id") != hidden_ao for item in resumed_pointers)
 
@@ -588,7 +592,7 @@ def test_dependency_pattern_and_bounded_neighborhood(tmp_path: Path) -> None:
     session_dir = root / "sess"
     AOLedger(session_dir, "sess")
     facade = _facade(root, store, registry, session_dir, "sess", views=[revision])
-    result = facade.retrieve(
+    result = facade.audit_legacy(
         {"dependency_pattern": {"wanted_artifact": "patch", "wanted_effect": "tests passed"}},
         _PRINCIPAL,
         RetrievalProfile(fork_branch=0, projection=4, segment_atom=0),
@@ -703,7 +707,7 @@ def test_fact_channel_does_not_consume_state_slots(tmp_path: Path) -> None:
     segment_id = _append_ao(ledger, labels=["team-a"], record_kind="segment")
     atom_id = _append_ao(ledger, labels=["team-a"], record_kind="atom")
     facade = _facade(root, store, registry, session_dir, "sess-facts", fact_lane_paused=False)
-    result = facade.retrieve(
+    result = facade.audit_legacy(
         {},
         _PRINCIPAL,
         RetrievalProfile(fork_branch=10, projection=0, segment_atom=2),
@@ -731,7 +735,7 @@ def test_acl_does_not_consume_quota(tmp_path: Path) -> None:
     session_dir = root / "sess"
     AOLedger(session_dir, "sess")
     facade = _facade(root, store, registry, session_dir, "sess")
-    result = facade.retrieve(
+    result = facade.audit_legacy(
         {},
         _PRINCIPAL,
         RetrievalProfile(fork_branch=12, projection=0, segment_atom=0),
@@ -763,7 +767,7 @@ def test_rerank_clamp_restores_cap(tmp_path: Path) -> None:
         SegmentAtomAdapter(session_dir, "sess"),
         rerank=_OverflowRerank(),
     )
-    result = facade.retrieve(
+    result = facade.audit_legacy(
         {},
         _PRINCIPAL,
         RetrievalProfile(fork_branch=6, projection=0, segment_atom=0),
@@ -801,7 +805,7 @@ def test_branch_channel_follows_own_evidence(tmp_path: Path) -> None:
     session_dir = root / "sess"
     AOLedger(session_dir, "sess")
     facade = _facade(root, store, registry, session_dir, "sess")
-    result = facade.retrieve(
+    result = facade.audit_legacy(
         {},
         _PRINCIPAL,
         RetrievalProfile(fork_branch=6, projection=0, segment_atom=0),
@@ -847,8 +851,8 @@ def test_provisional_quota_is_three_exploitation_plus_one_exploration(tmp_path: 
     )
     facade = _open_lane(root, store, session_dir, seed="slot-seed")
     profile = RetrievalProfile(fork_branch=12, projection=0, segment_atom=0)
-    result = facade.retrieve({}, _PRINCIPAL, profile)
-    again = facade.retrieve({}, _PRINCIPAL, profile)
+    result = facade.audit_legacy({}, _PRINCIPAL, profile)
+    again = facade.audit_legacy({}, _PRINCIPAL, profile)
 
     assert len(result.cards) == 12
     verified = [card for card in result.cards if card.channel == "verified"]
@@ -894,7 +898,7 @@ def test_exploration_selection_is_seeded_and_audited(tmp_path: Path) -> None:
     profile = RetrievalProfile(fork_branch=8, projection=0, segment_atom=0)
 
     def explore(seed: str) -> RetrievalCard:
-        result = _open_lane(root, store, session_dir, seed=seed).retrieve({}, _PRINCIPAL, profile)
+        result = _open_lane(root, store, session_dir, seed=seed).audit_legacy({}, _PRINCIPAL, profile)
         assert len(result.cards) <= 12
         explored = [card for card in result.cards if card.selection_mode == "exploration"]
         assert len(explored) == 1
@@ -931,7 +935,7 @@ def test_exploration_backfill_when_no_eligible_candidate(tmp_path: Path) -> None
         validated=9,
         provisional=3,
     )
-    result = _open_lane(root, store, session_dir, seed="backfill-seed").retrieve(
+    result = _open_lane(root, store, session_dir, seed="backfill-seed").audit_legacy(
         {},
         _PRINCIPAL,
         RetrievalProfile(fork_branch=12, projection=0, segment_atom=0),
@@ -962,7 +966,7 @@ def test_raised_provisional_quota_keeps_single_exploration_seat(tmp_path: Path) 
         "raised-quota",
         provisional=8,
     )
-    result = _open_lane(root, store, session_dir, seed="raised").retrieve(
+    result = _open_lane(root, store, session_dir, seed="raised").audit_legacy(
         {},
         _PRINCIPAL,
         {
@@ -1001,10 +1005,10 @@ def test_query_derived_seed_and_default_selection_mode(tmp_path: Path) -> None:
     _append_ao(ledger, labels=["team-a"])
     facade = _facade(root, store, registry, session_dir, "sess-facts", fact_lane_paused=False)
     profile = RetrievalProfile(fork_branch=0, projection=0, segment_atom=1)
-    empty = facade.retrieve({}, _PRINCIPAL, profile)
-    alpha = facade.retrieve({"text": "alpha"}, _PRINCIPAL, profile)
-    beta = facade.retrieve({"text": "beta"}, _PRINCIPAL, profile)
-    patterned = facade.retrieve(
+    empty = facade.audit_legacy({}, _PRINCIPAL, profile)
+    alpha = facade.audit_legacy({"text": "alpha"}, _PRINCIPAL, profile)
+    beta = facade.audit_legacy({"text": "beta"}, _PRINCIPAL, profile)
+    patterned = facade.audit_legacy(
         {"text": "alpha", "dependency_pattern": {"wanted_artifact": "patch"}},
         _PRINCIPAL,
         profile,
@@ -1022,7 +1026,7 @@ def test_query_derived_seed_and_default_selection_mode(tmp_path: Path) -> None:
         "alpha", {"wanted_artifact": "patch"}
     )
     assert patterned.selection_audit.seed != alpha.selection_audit.seed
-    repeated = facade.retrieve({"text": "alpha"}, _PRINCIPAL, profile)
+    repeated = facade.audit_legacy({"text": "alpha"}, _PRINCIPAL, profile)
     assert repeated.selection_audit == alpha.selection_audit
     facts = [card for card in empty.cards if card.channel == "fact"]
     assert len(facts) == 1
@@ -1036,8 +1040,8 @@ def test_query_derived_seed_and_default_selection_mode(tmp_path: Path) -> None:
         seed="explicit-seed",
         fact_lane_paused=False,
     )
-    seeded_alpha = seeded.retrieve({"text": "alpha"}, _PRINCIPAL, profile)
-    seeded_beta = seeded.retrieve({"text": "beta"}, _PRINCIPAL, profile)
+    seeded_alpha = seeded.audit_legacy({"text": "alpha"}, _PRINCIPAL, profile)
+    seeded_beta = seeded.audit_legacy({"text": "beta"}, _PRINCIPAL, profile)
     assert seeded_alpha.selection_audit is not None
     assert seeded_beta.selection_audit is not None
     assert seeded_alpha.selection_audit.seed == "explicit-seed"
@@ -1051,7 +1055,7 @@ def test_exploration_eligible_set_excludes_acl_hidden(tmp_path: Path) -> None:
         provisional=6,
         hidden_provisional=4,
     )
-    result = _open_lane(root, store, session_dir, seed="acl-seed").retrieve(
+    result = _open_lane(root, store, session_dir, seed="acl-seed").audit_legacy(
         {},
         _PRINCIPAL,
         RetrievalProfile(fork_branch=6, projection=0, segment_atom=0),
@@ -1091,13 +1095,13 @@ def test_text_match_is_case_insensitive(tmp_path: Path) -> None:
     profile = RetrievalProfile(fork_branch=0, projection=0, segment_atom=2)
     expected = {upper.ao_id, lower.ao_id}
 
-    lower_query = facade.retrieve("caroline", _PRINCIPAL, profile)
+    lower_query = facade.audit_legacy("caroline", _PRINCIPAL, profile)
     assert {card.source_pointer["ao_id"] for card in lower_query.cards} == expected
-    upper_query = facade.retrieve("CAROLINE", _PRINCIPAL, profile)
+    upper_query = facade.audit_legacy("CAROLINE", _PRINCIPAL, profile)
     assert {card.source_pointer["ao_id"] for card in upper_query.cards} == expected
-    empty = facade.retrieve("", _PRINCIPAL, profile)
+    empty = facade.audit_legacy("", _PRINCIPAL, profile)
     assert {card.source_pointer["ao_id"] for card in empty.cards} == expected
-    assert facade.retrieve("melanie", _PRINCIPAL, profile).cards == ()
+    assert facade.audit_legacy("melanie", _PRINCIPAL, profile).cards == ()
 
 
 def test_content_resolver_matches_block_body_without_changing_facts(tmp_path: Path) -> None:
@@ -1131,8 +1135,8 @@ def test_content_resolver_matches_block_body_without_changing_facts(tmp_path: Pa
         views=[revision],
         fact_lane_paused=False,
     )
-    assert plain.retrieve("caroline", _PRINCIPAL, profile).cards == ()
-    plain_facts = plain.retrieve("notebook", _PRINCIPAL, profile)
+    assert plain.audit_legacy("caroline", _PRINCIPAL, profile).cards == ()
+    plain_facts = plain.audit_legacy("notebook", _PRINCIPAL, profile)
     assert [card.kind for card in plain_facts.cards] == ["atom"]
     assert plain_facts.cards[0].source_pointer["ao_id"] == fact.ao_id
 
@@ -1154,10 +1158,10 @@ def test_content_resolver_matches_block_body_without_changing_facts(tmp_path: Pa
         SegmentAtomAdapter(session_dir, "sess-res"),
         fact_lane_paused=False,
     )
-    found = facade.retrieve("caroline", _PRINCIPAL, profile)
+    found = facade.audit_legacy("caroline", _PRINCIPAL, profile)
     assert [card.kind for card in found.cards] == ["block_projection"]
     assert all(card.channel != "fact" for card in found.cards)
-    resolved_facts = facade.retrieve("notebook", _PRINCIPAL, profile)
+    resolved_facts = facade.audit_legacy("notebook", _PRINCIPAL, profile)
     assert [card.to_dict() for card in resolved_facts.cards] == [
         card.to_dict() for card in plain_facts.cards
     ]
@@ -1232,7 +1236,7 @@ def test_fact_lane_pause_skips_search_and_does_not_backfill(tmp_path: Path) -> N
         _ExplodingFacts(),  # type: ignore[arg-type]
     )
     assert facade.fact_lane_paused is True
-    result = facade.retrieve(
+    result = facade.audit_legacy(
         {},
         _PRINCIPAL,
         RetrievalProfile(fork_branch=6, projection=4, segment_atom=2),
@@ -1305,7 +1309,7 @@ def test_bm25_cjk_unigrams_rank_q127_release_example(tmp_path: Path) -> None:
         session_dir,
         "sess-q127",
         fact_lane_paused=False,
-    ).retrieve(
+    ).audit_legacy(
         query,
         _PRINCIPAL,
         RetrievalProfile(fork_branch=0, projection=0, segment_atom=4),
@@ -1378,7 +1382,7 @@ def test_bm25_retrieval_orders_hits_and_keeps_per_corpus_quotas(tmp_path: Path) 
         fact_lane_paused=False,
     )
 
-    empty = facade.retrieve(
+    empty = facade.audit_legacy(
         "",
         _PRINCIPAL,
         RetrievalProfile(fork_branch=0, projection=0, segment_atom=3),
@@ -1387,7 +1391,7 @@ def test_bm25_retrieval_orders_hits_and_keeps_per_corpus_quotas(tmp_path: Path) 
     assert {card.score_breakdown["bm25"] for card in empty.cards} == {0.0}
     assert empty.rank_tier == "bm25"
 
-    shared = facade.retrieve(
+    shared = facade.audit_legacy(
         "alpha",
         _PRINCIPAL,
         RetrievalProfile(fork_branch=0, projection=0, segment_atom=3),
@@ -1398,7 +1402,7 @@ def test_bm25_retrieval_orders_hits_and_keeps_per_corpus_quotas(tmp_path: Path) 
     assert shared.cards[0].score_breakdown["rank_tier"] == "bm25"
 
     assert (
-        facade.retrieve(
+        facade.audit_legacy(
             "carol",
             _PRINCIPAL,
             RetrievalProfile(fork_branch=0, projection=0, segment_atom=4),
@@ -1406,14 +1410,14 @@ def test_bm25_retrieval_orders_hits_and_keeps_per_corpus_quotas(tmp_path: Path) 
         == ()
     )
     caroline = _append_text(ledger, "caroline met melanie")
-    folded = facade.retrieve(
+    folded = facade.audit_legacy(
         "CAROLINE",
         _PRINCIPAL,
         RetrievalProfile(fork_branch=0, projection=0, segment_atom=4),
     )
     assert [card.source_pointer["ao_id"] for card in folded.cards] == [caroline]
     assert (
-        facade.retrieve(
+        facade.audit_legacy(
             "quinquereme",
             _PRINCIPAL,
             RetrievalProfile(fork_branch=0, projection=0, segment_atom=4),
@@ -1421,7 +1425,7 @@ def test_bm25_retrieval_orders_hits_and_keeps_per_corpus_quotas(tmp_path: Path) 
         == ()
     )
 
-    by_frequency = facade.retrieve(
+    by_frequency = facade.audit_legacy(
         "zephyr",
         _PRINCIPAL,
         RetrievalProfile(fork_branch=1, projection=1, segment_atom=1),
@@ -1434,7 +1438,7 @@ def test_bm25_retrieval_orders_hits_and_keeps_per_corpus_quotas(tmp_path: Path) 
     assert by_frequency.cards[2].source_pointer["ao_id"] == strong_fact
     assert by_frequency.cards[2].source_pointer["ao_id"] != weak_fact
 
-    rare_first = facade.retrieve(
+    rare_first = facade.audit_legacy(
         "rareword commonword",
         _PRINCIPAL,
         RetrievalProfile(fork_branch=0, projection=0, segment_atom=4),
@@ -1443,7 +1447,7 @@ def test_bm25_retrieval_orders_hits_and_keeps_per_corpus_quotas(tmp_path: Path) 
     assert rare_ids[0] == rare_fact
     assert len(rare_ids) == 4
 
-    forks_only = facade.retrieve(
+    forks_only = facade.audit_legacy(
         "zephyr",
         _PRINCIPAL,
         RetrievalProfile(fork_branch=1, projection=0, segment_atom=0),
@@ -1484,7 +1488,7 @@ def test_hybrid_tier_mixes_real_vectors_or_stays_on_bm25(tmp_path: Path) -> None
         "sess-hybrid",
         fact_lane_paused=False,
         embedder=embed,
-    ).retrieve("zephyr", _PRINCIPAL, profile)
+    ).audit_legacy("zephyr", _PRINCIPAL, profile)
     fused_ids = [card.source_pointer["ao_id"] for card in fused.cards]
     assert fused_ids[0] == aligned
     assert heavy in fused_ids
@@ -1504,7 +1508,7 @@ def test_hybrid_tier_mixes_real_vectors_or_stays_on_bm25(tmp_path: Path) -> None
         "sess-hybrid",
         fact_lane_paused=False,
         embedder=lambda _text: [],
-    ).retrieve("zephyr", _PRINCIPAL, profile)
+    ).audit_legacy("zephyr", _PRINCIPAL, profile)
     dim0_ids = [card.source_pointer["ao_id"] for card in dim0.cards]
     assert dim0_ids
     assert dim0_ids[0] == heavy
@@ -1521,7 +1525,7 @@ def test_hybrid_tier_mixes_real_vectors_or_stays_on_bm25(tmp_path: Path) -> None
         session_dir,
         "sess-hybrid",
         fact_lane_paused=False,
-    ).retrieve("zephyr", _PRINCIPAL, profile)
+    ).audit_legacy("zephyr", _PRINCIPAL, profile)
     assert unavailable.rank_tier == "bm25"
     assert [card.source_pointer["ao_id"] for card in unavailable.cards][0] == heavy
     assert unavailable.cards
@@ -1534,7 +1538,7 @@ def test_hybrid_tier_mixes_real_vectors_or_stays_on_bm25(tmp_path: Path) -> None
         ForkBranchAdapter(root, store),
         InfluenceProjectionAdapter(stub_registry, views=[stub_revision]),
         SegmentAtomAdapter(session_dir, "sess-hybrid"),
-    ).retrieve(
+    ).audit_legacy(
         "zephyr",
         _PRINCIPAL,
         {"fork_branch": 0, "projection": 2, "segment_atom": 2, "rank_mode": "hybrid"},
@@ -1555,7 +1559,7 @@ def test_rank_mode_has_no_vector_only_tier(tmp_path: Path) -> None:
     AOLedger(session_dir, "sess")
     facade = _facade(root, store, ProjectionRegistry(root / "projections.json"), session_dir, "sess")
     with pytest.raises(ValueError, match="rank_mode"):
-        facade.retrieve({}, _PRINCIPAL, {"rank_mode": "vector"})
+        facade.audit_legacy({}, _PRINCIPAL, {"rank_mode": "vector"})
 
 
 def test_neighborhood_walks_influence_edges_only(tmp_path: Path) -> None:
@@ -1718,7 +1722,7 @@ def test_fork_and_branch_cards_carry_text(tmp_path: Path) -> None:
     registry = ProjectionRegistry(root / "projections.json")
     facade = _facade(root, store, registry, session_dir, "sess-text")
     profile = RetrievalProfile(fork_branch=6, projection=0, segment_atom=0)
-    result = facade.retrieve({}, _PRINCIPAL, profile)
+    result = facade.audit_legacy({}, _PRINCIPAL, profile)
     forks = [card for card in result.cards if card.kind == "fork"]
     assert len(forks) == 1
     fork = forks[0]
@@ -1812,7 +1816,7 @@ def test_expand_claim_neighborhood_by_card_id(tmp_path: Path) -> None:
     facade = _facade(root, store, registry, session_dir, "sess", views=[revision])
     profile = RetrievalProfile(fork_branch=0, projection=4, segment_atom=0)
 
-    recalled = facade.retrieve("omitted", _PRINCIPAL, profile)
+    recalled = facade.audit_legacy("omitted", _PRINCIPAL, profile)
     claim_cards = [card for card in recalled.cards if card.kind == "claim_projection"]
     assert len(claim_cards) == 1
     claim_card = claim_cards[0]
@@ -1857,7 +1861,7 @@ def test_expand_claim_neighborhood_by_card_id(tmp_path: Path) -> None:
     assert "e-skip" not in {edge[0] for edge in expanded.edges}
     assert "e-skip2" not in {edge[0] for edge in expanded.edges}
 
-    block_hits = facade.retrieve("n1", _PRINCIPAL, profile)
+    block_hits = facade.audit_legacy("n1", _PRINCIPAL, profile)
     block_cards = [card for card in block_hits.cards if card.kind == "block_projection"]
     assert len(block_cards) == 1
     assert block_cards[0].text == ""

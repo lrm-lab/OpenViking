@@ -1,0 +1,22 @@
+{
+  "schema_version": "aig-native-v2",
+  "object_kind": "replay_request",
+  "content_hash": "e8df9e30197e6e161710ba234d5cb7fc9775ae7fa3246a5bd27ffc9ca60b5eb7",
+  "body": {
+    "anchor_block_id": "blk-action",
+    "assessment_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "base_revision_id": "rev-aig-frozen-1",
+    "eligibility": "replayable",
+    "fork_node_id": "fork-overlay-1",
+    "intervention_type": "narrow_retry",
+    "replay_run_id": "run-1",
+    "required_capabilities": [
+      "replay-sandbox"
+    ],
+    "safety_control_params": {
+      "isolation": "sandbox"
+    },
+    "target_boundary": "blk-action",
+    "request_id": "deb06837cc33934ef998aeb04ad8777434016ee6901d160801d8f00ed24ed87d"
+  }
+}

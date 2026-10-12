@@ -10,6 +10,10 @@ accepted, or degraded.
 
 A hit on any frozen limit raises ``ExtractionLimitError``. Values are not
 silently clipped to fit.
+
+``parse_native_edge_response`` is the expand-path schema. It emits blocks and
+native edges and refuses Claim, status, evidence, and grounding fields. The
+v1 parser is unchanged and still requires claims.
 """
 
 from __future__ import annotations
@@ -22,7 +26,11 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from openviking.session.extraction_write import ExtractionPayload, ExtractionProvider
+from openviking.session.extraction_write import (
+    ExtractionPayload,
+    ExtractionProvider,
+    NativeExtractionPayload,
+)
 from openviking.session.influence_view import (
     BLOCK_KIND_ROLES,
     BLOCK_KINDS,
@@ -34,6 +42,7 @@ from openviking.session.influence_view import (
     RELATION_SKIP,
     SYNTHETIC_ROOT_SINK_REASON,
     AORange,
+    AigNativeEdge,
     CoverageManifest,
     InfluenceBlock,
     InfluenceClaim,
@@ -46,6 +55,7 @@ from openviking.session.influence_view import (
 
 # Frozen before any model call or score. Do not edit these to absorb a miss.
 EXTRACTION_CONTRACT_VERSION = "extraction-contract-v1"
+EXTRACTION_CONTRACT_NATIVE_VERSION = "extraction-contract-aig-native-v2"
 EVIDENCE_ROLE = "contemporaneous_basis"
 VALUE_CLIP = 4000
 MAX_ITEMS = 64
@@ -101,9 +111,21 @@ _COVERAGE_KEYS = frozenset(
         "snapshot_watermark",
     }
 )
+_NATIVE_TOP_KEYS = frozenset({"schema_version", "blocks", "edges", "coverage"})
+_EDGE_KEYS = frozenset(
+    {
+        "edge_id",
+        "source_block_id",
+        "target_block_id",
+        "relation_type",
+        "mechanism",
+    }
+)
 _FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
 
 ExtractionProviderFactory = Callable[[Mapping[str, Any]], ExtractionProvider]
+NativeExtractionProvider = Callable[[str, str, str], NativeExtractionPayload]
+NativeExtractionProviderFactory = Callable[[Mapping[str, Any]], NativeExtractionProvider]
 
 _ANNOUNCED = False
 
@@ -397,6 +419,202 @@ def parse_contract_response(text: str, model_input: Mapping[str, Any]) -> Extrac
     )
 
 
+def render_native_edge_prompt(model_input: Mapping[str, Any]) -> str:
+    """Instruction text for the native-edge schema. Claim lifecycle is absent."""
+    roles = ", ".join(sorted(BLOCK_ROLES))
+    kinds = ", ".join(sorted(BLOCK_KINDS))
+    relations = ", ".join(sorted(RELATION_TYPES))
+    refinements = ", ".join(
+        f"{kind} refines {BLOCK_KIND_ROLES[kind]}" for kind in sorted(BLOCK_KIND_ROLES)
+    )
+    identities = model_input.get("identities")
+    if not isinstance(identities, Mapping):
+        identities = {}
+    identity_lines = "\n".join(
+        f"- {field}={identities[field]}" for field in _IDENTITY_FIELDS if field in identities
+    )
+    payload = json.dumps(model_input, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "\n".join(
+        [
+            "You extract one factual AIG from the AO ledger snapshot below.",
+            "Select and name blocks and native edges. Do not invent ao_id values or content hashes.",
+            "",
+            "Rules:",
+            "- A block is a contiguous AO interval for one participant_id and one segment_id.",
+            "- Blocks do not overlap.",
+            "- Cite only ao_id values present in rows.",
+            "- A native edge points from an earlier block to a later block.",
+            "- relation_type influence records an inheritance or influence mechanism.",
+            "- relation_type skip is the mechanism used when the edge crosses an omitted AO range.",
+            "- mechanism is a short note on that edge.",
+            "- Do not output a claim, a verdict, evidence refs, grounding, or a retrieval subgraph.",
+            f"- Do not use {DETERMINISTIC_FALLBACK_REASON} or {SYNTHETIC_ROOT_SINK_REASON} "
+            "as granularity_reason.",
+            "- block_id and edge_id must not embed any identity string below.",
+            "- Do not write source_refs, source_content_hashes, included_ranges, or omitted_ranges.",
+            "- Output one JSON object and no other text.",
+            "",
+            f"schema_version must be {EXTRACTION_CONTRACT_NATIVE_VERSION}.",
+            f"role is one of: {roles}.",
+            f"block_kind is one of: {kinds}.",
+            f"block_kind compatibility: {refinements}. unknown is allowed with any role.",
+            f"relation_type is one of: {relations}.",
+            "",
+            "JSON object fields:",
+            "- schema_version: string",
+            "- blocks: [{block_id, role, block_kind, participant_id, segment_id, "
+            "ao_start_seq, ao_end_seq, summary, input, output, authorship, granularity_reason}]",
+            "- edges: [{edge_id, source_block_id, target_block_id, relation_type, mechanism}]",
+            "- coverage: {total_ao_start_seq, total_ao_end_seq, inspected_ao_ids, "
+            "snapshot_watermark}",
+            "",
+            "Identity strings you must not embed:",
+            identity_lines or "- (none)",
+            "",
+            "Ledger snapshot:",
+            payload,
+        ]
+    )
+
+
+def parse_native_edge_response(text: str, model_input: Mapping[str, Any]) -> NativeExtractionPayload:
+    """Parse a native-edge extraction. Claim fields are rejected, not dropped."""
+    if not isinstance(model_input, Mapping):
+        raise ExtractionContractError("model_input must be a mapping")
+    if model_input.get("schema_version") != EXTRACTION_CONTRACT_NATIVE_VERSION:
+        raise ExtractionContractError(
+            "model_input.schema_version must be "
+            f"{EXTRACTION_CONTRACT_NATIVE_VERSION!r}, got {model_input.get('schema_version')!r}"
+        )
+    document = _load_object(_unwrap_json_text(text))
+    _exact_keys(document, _NATIVE_TOP_KEYS, "response")
+    version = document.get("schema_version")
+    if version != EXTRACTION_CONTRACT_NATIVE_VERSION:
+        raise ExtractionContractError(
+            f"schema_version must be {EXTRACTION_CONTRACT_NATIVE_VERSION!r}, got {version!r}"
+        )
+    rows = _input_rows(model_input)
+    by_sequence = {row["sequence"]: row for row in rows}
+    identities = _identities(model_input)
+    watermark = model_input.get("snapshot_watermark")
+    if not isinstance(watermark, str) or not watermark.strip():
+        raise ExtractionContractError("model_input.snapshot_watermark must be a non-empty str")
+
+    raw_blocks = _require_list(document.get("blocks"), "blocks")
+    raw_edges = _require_list(document.get("edges"), "edges")
+    if not raw_blocks:
+        raise ExtractionContractError("blocks must be a non-empty list")
+    coverage_doc = document.get("coverage")
+    _exact_keys(coverage_doc, _COVERAGE_KEYS, "coverage")
+    assert isinstance(coverage_doc, dict)
+    if coverage_doc.get("snapshot_watermark") != watermark:
+        raise ExtractionContractError("coverage.snapshot_watermark does not match the snapshot")
+    inspected_ids = _str_list(coverage_doc.get("inspected_ao_ids"), "coverage.inspected_ao_ids")
+    by_id = {row["ao_id"]: row for row in rows}
+    if len(inspected_ids) != len(set(inspected_ids)):
+        raise ExtractionContractError("coverage.inspected_ao_ids contains a duplicate")
+    for ao_id in inspected_ids:
+        if ao_id not in by_id:
+            raise ExtractionContractError(f"inspected ao_id {ao_id} is not in the snapshot")
+    total_start = _require_int(
+        coverage_doc.get("total_ao_start_seq"), "coverage.total_ao_start_seq"
+    )
+    total_end = _require_int(coverage_doc.get("total_ao_end_seq"), "coverage.total_ao_end_seq")
+    sequences = [row["sequence"] for row in rows]
+    if total_start != min(sequences) or total_end != max(sequences):
+        raise ExtractionContractError(
+            "coverage total AO range does not match the snapshot min and max sequence"
+        )
+
+    blocks: list[InfluenceBlock] = []
+    seen_block_ids: set[str] = set()
+    for index, item in enumerate(raw_blocks):
+        block = _parse_block(item, index, by_sequence, identities)
+        if block.block_id in seen_block_ids:
+            raise ExtractionContractError(f"duplicate block_id {block.block_id}")
+        seen_block_ids.add(block.block_id)
+        blocks.append(block)
+    _reject_overlapping_blocks(blocks)
+
+    edges: list[AigNativeEdge] = []
+    seen_edge_ids: set[str] = set()
+    seen_pairs: set[tuple[str, str]] = set()
+    for index, item in enumerate(raw_edges):
+        edge = _parse_native_edge(item, index, identities, seen_block_ids)
+        if edge.edge_id in seen_edge_ids:
+            raise ExtractionContractError(f"duplicate edge_id {edge.edge_id}")
+        pair = (edge.source_block_id, edge.target_block_id)
+        if pair in seen_pairs:
+            raise ExtractionContractError(
+                f"duplicate native edge {pair[0]}->{pair[1]}"
+            )
+        seen_edge_ids.add(edge.edge_id)
+        seen_pairs.add(pair)
+        edges.append(edge)
+
+    coverage = _derive_coverage(
+        blocks, rows, inspected_ids, by_id, total_start, total_end, watermark
+    )
+    return NativeExtractionPayload(blocks=blocks, edges=edges, coverage=coverage)
+
+
+def _require_model_extraction_bounds(
+    vlm_handle: Any,
+    *,
+    max_repairs: int,
+    max_tokens_per_call: int,
+    max_total_tokens: int,
+) -> None:
+    """Shared limit checks for the claim and native-edge model providers."""
+    if vlm_handle is None or not hasattr(vlm_handle, "get_completion_async"):
+        raise ExtractionLimitError(
+            "model extraction needs a provider handle with get_completion_async; none was given"
+        )
+    if isinstance(max_repairs, bool) or not isinstance(max_repairs, int):
+        raise ExtractionLimitError("max_repairs must be an int")
+    if max_repairs < 0 or max_repairs > MAX_REPAIRS:
+        raise ExtractionLimitError(f"max_repairs must be in 0..{MAX_REPAIRS}, got {max_repairs}")
+    _check_cap("max_tokens_per_call", max_tokens_per_call, MAX_TOKENS_PER_CALL)
+    _check_cap("max_total_tokens", max_total_tokens, MAX_TOTAL_TOKENS)
+    announce_frozen_limits()
+
+
+def model_native_extraction_provider(
+    vlm_handle: Any,
+    *,
+    max_repairs: int = MAX_REPAIRS,
+    max_tokens_per_call: int = MAX_TOKENS_PER_CALL,
+    max_total_tokens: int = MAX_TOTAL_TOKENS,
+) -> NativeExtractionProviderFactory:
+    """Bind a snapshot to a provider that parses the native-edge schema.
+
+    The returned callable yields ``NativeExtractionPayload``, not
+    ``ExtractionPayload``. Claim repair text is not used.
+    """
+    _require_model_extraction_bounds(
+        vlm_handle,
+        max_repairs=max_repairs,
+        max_tokens_per_call=max_tokens_per_call,
+        max_total_tokens=max_total_tokens,
+    )
+
+    def factory(snapshot: Mapping[str, Any]) -> NativeExtractionProvider:
+        model_input = build_model_input(snapshot)
+        model_input["schema_version"] = EXTRACTION_CONTRACT_NATIVE_VERSION
+        prompt = render_native_edge_prompt(model_input)
+        return _SnapshotExtractionProvider(
+            vlm_handle,
+            model_input=model_input,
+            prompt=prompt,
+            max_repairs=max_repairs,
+            max_tokens_per_call=max_tokens_per_call,
+            max_total_tokens=max_total_tokens,
+            response_parser=parse_native_edge_response,
+        )
+
+    return factory
+
+
 def model_extraction_provider(
     vlm_handle: Any,
     *,
@@ -410,17 +628,12 @@ def model_extraction_provider(
     lower than the frozen constants. They may not be higher. Parsing failure
     is the only retried error. A limit error propagates on the first hit.
     """
-    if vlm_handle is None or not hasattr(vlm_handle, "get_completion_async"):
-        raise ExtractionLimitError(
-            "model extraction needs a provider handle with get_completion_async; none was given"
-        )
-    if isinstance(max_repairs, bool) or not isinstance(max_repairs, int):
-        raise ExtractionLimitError("max_repairs must be an int")
-    if max_repairs < 0 or max_repairs > MAX_REPAIRS:
-        raise ExtractionLimitError(f"max_repairs must be in 0..{MAX_REPAIRS}, got {max_repairs}")
-    _check_cap("max_tokens_per_call", max_tokens_per_call, MAX_TOKENS_PER_CALL)
-    _check_cap("max_total_tokens", max_total_tokens, MAX_TOTAL_TOKENS)
-    announce_frozen_limits()
+    _require_model_extraction_bounds(
+        vlm_handle,
+        max_repairs=max_repairs,
+        max_tokens_per_call=max_tokens_per_call,
+        max_total_tokens=max_total_tokens,
+    )
 
     def factory(snapshot: Mapping[str, Any]) -> ExtractionProvider:
         model_input = build_model_input(snapshot)
@@ -449,6 +662,7 @@ class _SnapshotExtractionProvider:
         max_repairs: int,
         max_tokens_per_call: int,
         max_total_tokens: int,
+        response_parser: Callable[[str, Mapping[str, Any]], Any] | None = None,
     ) -> None:
         self.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         # ``unavailable`` until a call is actually measured. A zero counter is
@@ -465,6 +679,9 @@ class _SnapshotExtractionProvider:
         self._max_repairs = max_repairs
         self._max_tokens_per_call = max_tokens_per_call
         self._max_total_tokens = max_total_tokens
+        self._response_parser = (
+            parse_contract_response if response_parser is None else response_parser
+        )
 
     def __call__(self, session_id: str, task_run_id: str, outcome_status: str) -> ExtractionPayload:
         del session_id, task_run_id, outcome_status
@@ -477,7 +694,7 @@ class _SnapshotExtractionProvider:
             text = ""
             try:
                 text = _response_text(response)
-                return parse_contract_response(text, self._model_input)
+                return self._response_parser(text, self._model_input)
             except ExtractionContractError as exc:
                 if self.calls > self._max_repairs:
                     raise
@@ -835,6 +1052,35 @@ def _reject_overlapping_blocks(blocks: Sequence[InfluenceBlock]) -> None:
         if previous is not None and block.ao_start_seq <= previous.ao_end_seq:
             raise ExtractionContractError(f"block {block.block_id} overlaps {previous.block_id}")
         previous = block
+
+
+def _parse_native_edge(
+    item: Any,
+    index: int,
+    identities: Mapping[str, str],
+    block_ids: set[str],
+) -> AigNativeEdge:
+    where = f"edges[{index}]"
+    _exact_keys(item, _EDGE_KEYS, where)
+    assert isinstance(item, dict)
+    edge_id = _require_text(item.get("edge_id"), f"{where}.edge_id")
+    _reject_embedded(edge_id, "edge_id", identities)
+    source_block_id = _require_text(item.get("source_block_id"), f"{where}.source_block_id")
+    target_block_id = _require_text(item.get("target_block_id"), f"{where}.target_block_id")
+    if source_block_id not in block_ids or target_block_id not in block_ids:
+        raise ExtractionContractError(f"{where} endpoint block is not declared")
+    relation = _require_choice(item.get("relation_type"), f"{where}.relation_type", RELATION_TYPES)
+    mechanism = _allow_text(item.get("mechanism"), f"{where}.mechanism")
+    try:
+        return AigNativeEdge(
+            edge_id=edge_id,
+            source_block_id=source_block_id,
+            target_block_id=target_block_id,
+            relation_type=relation,
+            mechanism=mechanism,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ExtractionContractError(f"{where} {exc}") from exc
 
 
 def _parse_claim(

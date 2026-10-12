@@ -70,6 +70,7 @@ from openviking.session.influence_view import (
     InfluenceViewRevision,
     RetrievalSubgraph,
 )
+from openviking.session.legacy_write_gate import require_legacy_audit_opt_in
 from openviking.session.retrieval_facade import _position_inside_subgraph
 
 _NODE_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "openviking.failure-subgraph-fork-node")
@@ -162,6 +163,7 @@ def write_failure_subgraph_fork(
     contemporaneous_basis: Sequence[Mapping[str, Any] | EvidenceRef],
     hindsight_attribution: Sequence[Mapping[str, Any] | EvidenceRef] | None = None,
     used_skills: Sequence[Mapping[str, Any]] | None = None,
+    legacy_audit_opt_in: bool = False,
 ) -> ForkRevision:
     """Write one provisional fork for one failure subgraph on ``revision``.
 
@@ -171,7 +173,11 @@ def write_failure_subgraph_fork(
 
     ``workspace_id`` must belong to ``workspace_labels``. Otherwise this
     raises and does not write.
+
+    The default refuses before any draft is submitted.
+    ``legacy_audit_opt_in=True`` is the explicit legacy-audit tool.
     """
+    require_legacy_audit_opt_in(legacy_audit_opt_in)
     if not isinstance(store, CausalExperiencesStore):
         raise ValueError("store must be a CausalExperiencesStore")
     subgraph = _require_failure_subgraph(revision, subgraph_id)

@@ -21,7 +21,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from openviking.session.influence_view import CONSTRUCTION_MODE_FALLBACK, InfluenceViewRevision
+from openviking.session.influence_view import (
+    CONSTRUCTION_MODE_FALLBACK,
+    AigNativeViewRevision,
+    InfluenceViewRevision,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -407,6 +411,8 @@ class ProjectionRegistry:
         A later revision for the same session and purpose supersedes older
         cards: they leave the search index and stay in the audit log.
         """
+        if isinstance(revision, AigNativeViewRevision):
+            raise ValueError("native-edge revision cannot enter the claim projection")
         if not isinstance(revision, InfluenceViewRevision):
             raise ValueError("revision must be a frozen InfluenceViewRevision")
         with self._lock:

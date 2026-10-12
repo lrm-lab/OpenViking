@@ -1,0 +1,124 @@
+{
+  "body": {
+    "blocks": [
+      {
+        "ao_end_seq": 1,
+        "ao_start_seq": 1,
+        "authorship": "agent-a",
+        "block_id": "blk-rate",
+        "block_kind": "tool_call",
+        "granularity_reason": "one tool call",
+        "input": "in",
+        "output": "out",
+        "participant_id": "agent-a",
+        "role": "agent_action",
+        "segment_ref": {
+          "segment_id": "seg-a",
+          "session_id": "sess-native"
+        },
+        "source_content_hashes": [
+          "hash-1"
+        ],
+        "source_refs": [
+          {
+            "ao_id": "ao-1",
+            "content_hash": "hash-1",
+            "participant_id": "agent-a",
+            "segment_id": "seg-a",
+            "sequence": 1,
+            "session_id": "sess-native"
+          }
+        ],
+        "summary": "raise the rate"
+      },
+      {
+        "ao_end_seq": 2,
+        "ao_start_seq": 2,
+        "authorship": "agent-a",
+        "block_id": "blk-rollback",
+        "block_kind": "tool_call",
+        "granularity_reason": "one tool call",
+        "input": "in",
+        "output": "out",
+        "participant_id": "agent-a",
+        "role": "agent_action",
+        "segment_ref": {
+          "segment_id": "seg-a",
+          "session_id": "sess-native"
+        },
+        "source_content_hashes": [
+          "hash-2"
+        ],
+        "source_refs": [
+          {
+            "ao_id": "ao-2",
+            "content_hash": "hash-2",
+            "participant_id": "agent-a",
+            "segment_id": "seg-a",
+            "sequence": 2,
+            "session_id": "sess-native"
+          }
+        ],
+        "summary": "decide the rollback"
+      }
+    ],
+    "construction_mode": "adaptive",
+    "coverage": {
+      "included_ranges": [
+        {
+          "end_seq": 1,
+          "segment_id": "seg-a",
+          "start_seq": 1
+        },
+        {
+          "end_seq": 2,
+          "segment_id": "seg-a",
+          "start_seq": 2
+        }
+      ],
+      "inspected_refs": [
+        {
+          "ao_id": "ao-1",
+          "content_hash": "hash-1",
+          "participant_id": "agent-a",
+          "segment_id": "seg-a",
+          "sequence": 1,
+          "session_id": "sess-native"
+        },
+        {
+          "ao_id": "ao-2",
+          "content_hash": "hash-2",
+          "participant_id": "agent-a",
+          "segment_id": "seg-a",
+          "sequence": 2,
+          "session_id": "sess-native"
+        }
+      ],
+      "omitted_ranges": [],
+      "snapshot_watermark": "wm-native",
+      "total_ao_range": {
+        "end_seq": 2,
+        "segment_id": null,
+        "start_seq": 1
+      }
+    },
+    "edges": [
+      {
+        "edge_id": "edge-rate-to-rollback",
+        "mechanism": "rate change inherited by the rollback decision",
+        "relation_type": "influence",
+        "source_block_id": "blk-rate",
+        "target_block_id": "blk-rollback"
+      }
+    ],
+    "frozen_at": "2026-10-10T00:00:00.000Z",
+    "purpose": "post_run_index",
+    "revision_id": "rev-native-1",
+    "session_id": "sess-native",
+    "task_run_id": "task-native-1",
+    "view_id": "view-native-1"
+  },
+  "content_hash": "fab0b5eaa7867e9a38f56a75c30e9e3d9ac2f123799a9d3cd6a6e6cffc0e8c45",
+  "object_kind": "native_edge_revision",
+  "schema_version": "aig-native-v2"
+}

@@ -13,7 +13,7 @@ swallowed so commit itself still succeeds.
 ``extraction_provider`` defaults to ``None``. The build is then the
 deterministic ledger fallback (``construction_mode=fallback``), unchanged
 from the commit hook that only knew that path. When a provider is injected,
-the build freezes that payload as ``construction_mode=adaptive``. The
+the build freezes that payload as ``construction_mode=native_single_pass_aig``. The
 provider is not read from config and this hook does not call a model.
 
 ``extraction_provider_factory`` is the other injection. It receives the
@@ -59,7 +59,16 @@ from typing import Any
 
 from openviking.session.ao_ledger_reader import MAX_PAGE_LIMIT, list_ao_ledger
 from openviking.session.extraction_contract import ExtractionProviderFactory
-from openviking.session.extraction_write import ExtractionProvider, extraction_index_builder
+from openviking.session.extraction_write import (
+    NATIVE_EDGE_INDEX_FILENAME,
+    ExtractionPayload,
+    ExtractionProvider,
+    NativeEdgeViewStore,
+    NativeEdgeWriteError,
+    NativeExtractionPayload,
+    freeze_native_edge_view,
+)
+from openviking.session.legacy_write_gate import LegacyWriteRefused
 from openviking.session.influence_projection import ProjectionRegistry
 from openviking.session.influence_view import PURPOSE_POST_RUN_INDEX, ViewSupersedeIndex
 from openviking.session.session_acl import session_acl_callback
@@ -366,9 +375,16 @@ def _index_commit(
     provider = extraction_provider
     if extraction_provider_factory is not None:
         provider = extraction_provider_factory(fallback_session(job))
-    service_kwargs: dict[str, Any] = {}
     if provider is not None:
-        service_kwargs["builder"] = extraction_index_builder(provider, frozen_at=job.enqueued_at)
+        _commit_native_extraction(
+            provider,
+            session_dir=session_dir,
+            session_id=session_id,
+            task_run_id=task_run_id,
+            outcome_status=outcome_status,
+            frozen_at=job.enqueued_at,
+        )
+        return
 
     def revalidation_callback(revision_id: str) -> None:
         _record_needs_revalidation(session, session_dir, revision_id)
@@ -379,12 +395,51 @@ def _index_commit(
         fallback_session=fallback_session,
         projection_registry=_projection_registry(session, session_dir, revalidation_callback),
         revalidation_callback=revalidation_callback,
-        **service_kwargs,
     )
     service.enqueue(job)
-    result = service.process_next(_policy(config))
-    if provider is not None:
-        _log_phase2_index_result(result)
+    service.process_next(_policy(config))
+
+
+def _commit_native_extraction(
+    provider: ExtractionProvider,
+    *,
+    session_dir: Path,
+    session_id: str,
+    task_run_id: str,
+    outcome_status: str,
+    frozen_at: str,
+) -> None:
+    """Freeze a native-edge revision. Claim payloads are refused, not mapped.
+
+    A second commit of the same session and task keeps the first revision.
+    Claim payloads are refused here. The legacy claim index builder is not used.
+    """
+    payload = provider(session_id, task_run_id, outcome_status)
+    if isinstance(payload, ExtractionPayload):
+        raise LegacyWriteRefused()
+    if not isinstance(payload, NativeExtractionPayload):
+        raise TypeError("extraction provider must return a NativeExtractionPayload")
+    revision = freeze_native_edge_view(
+        session_id=session_id,
+        task_run_id=task_run_id,
+        view_id=f"{session_id}:{PURPOSE_POST_RUN_INDEX}",
+        revision_id=f"post-run:{session_id}:{task_run_id}:native",
+        frozen_at=frozen_at,
+        blocks=payload.blocks,
+        edges=payload.edges,
+        coverage=payload.coverage,
+    )
+    store = NativeEdgeViewStore(session_dir / NATIVE_EDGE_INDEX_FILENAME)
+    try:
+        store.write(revision)
+    except NativeEdgeWriteError as exc:
+        if exc.code != "duplicate_revision":
+            raise
+    logger.info(
+        "phase2 native-edge index revision_id=%s session_id=%s",
+        revision.revision_id,
+        session_id,
+    )
 
 
 def _projection_registry(

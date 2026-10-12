@@ -11,6 +11,12 @@ revisions as history and points ``latest`` at the newest freeze for a
 A retrieval subgraph is a span the extraction model draws onto that frozen
 view, with the influence edges inside it and an explicit failure marker.
 The marker is stored as written. It is not inferred from block roles.
+
+AIG-native edges are a separate expand path (ADR-0043 P01). They live on
+``AigNativeViewDraft`` / ``AigNativeViewRevision``, not on a claim view.
+An edge records an inheritance or influence mechanism. It has no claim
+status, projection, or grounding lifecycle. Claim documents are not mapped
+onto this path, and a native-edge document is refused by the claim reader.
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ from typing import Any, Literal, Mapping, Sequence
 BLOCK_ROLES = frozenset(("task", "orchestrator", "agent_action", "conclusion"))
 # ``block_kind`` refines ``role``. ``unknown`` is the missing-key default only.
 BLOCK_KINDS = frozenset(
-    ("task", "tool_call", "tool_result", "orchestrator", "conclusion", "unknown")
+    ("task", "tool_call", "tool_result", "orchestrator", "conclusion", "agent", "unknown")
 )
 BLOCK_KIND_ROLES: dict[str, str] = {
     "task": "task",
@@ -36,15 +42,29 @@ BLOCK_KIND_ROLES: dict[str, str] = {
     "tool_result": "agent_action",
     "orchestrator": "orchestrator",
     "conclusion": "conclusion",
+    # Paper tool-loop nodes use ``agent``. The native role stays ``agent_action``.
+    "agent": "agent_action",
 }
 PURPOSES = frozenset(("post_run_index", "failure_diagnosis"))
 CLAIM_STATUSES = frozenset(("hypothesis", "supported", "contradicted", "insufficient"))
-CONSTRUCTION_MODES = frozenset(("adaptive", "fallback"))
+# Single-pass freezes write ``native_single_pass_aig``.
+# ``adaptive`` stays readable so revisions frozen before that rename still load.
+# ``adaptive_agentic_aig`` is the paper tool-loop freeze (ADR-0044).
+CONSTRUCTION_MODE_NATIVE_SINGLE_PASS = "native_single_pass_aig"
+CONSTRUCTION_MODE_ADAPTIVE = "adaptive"
+CONSTRUCTION_MODE_FALLBACK = "fallback"
+CONSTRUCTION_MODE_ADAPTIVE_AGENTIC = "adaptive_agentic_aig"
+CONSTRUCTION_MODES = frozenset(
+    (
+        CONSTRUCTION_MODE_NATIVE_SINGLE_PASS,
+        CONSTRUCTION_MODE_ADAPTIVE,
+        CONSTRUCTION_MODE_FALLBACK,
+        CONSTRUCTION_MODE_ADAPTIVE_AGENTIC,
+    )
+)
 SEVERITIES = frozenset(("high", "low"))
 
 CLAIM_STATUS_HYPOTHESIS = "hypothesis"
-CONSTRUCTION_MODE_ADAPTIVE = "adaptive"
-CONSTRUCTION_MODE_FALLBACK = "fallback"
 PURPOSE_POST_RUN_INDEX = "post_run_index"
 PURPOSE_FAILURE_DIAGNOSIS = "failure_diagnosis"
 ROLE_TASK = "task"
@@ -57,11 +77,20 @@ OMITTED_GAP_REASON = "not_in_selected_ao_range"
 MAX_CRITIC_ROUNDS = 3
 MAX_RETRIEVAL_SUBGRAPH_BLOCKS = 12
 INDEX_VERSION = 1
+# Transport identity for the native-edge path. Digests go through
+# ``aig_native_protocol.protocol_content_hash``.
+NATIVE_EDGE_SCHEMA_VERSION = "aig-native-v2"
+NATIVE_EDGE_DRAFT_KIND = "native_edge_draft"
+NATIVE_EDGE_REVISION_KIND = "native_edge_revision"
+NATIVE_EDGE_INDEX_KIND = "native_edge_index"
+_NATIVE_EDGE_RELATIONS = frozenset((RELATION_INFLUENCE, RELATION_SKIP))
 
 BlockRole = Literal["task", "orchestrator", "agent_action", "conclusion"]
 Purpose = Literal["post_run_index", "failure_diagnosis"]
 ClaimStatus = Literal["hypothesis", "supported", "contradicted", "insufficient"]
-ConstructionMode = Literal["adaptive", "fallback"]
+ConstructionMode = Literal[
+    "native_single_pass_aig", "adaptive", "fallback", "adaptive_agentic_aig"
+]
 Severity = Literal["high", "low"]
 
 
@@ -80,7 +109,10 @@ def _format_dt(value: datetime) -> str:
 
 
 def _canonical_dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    """Same bytes as ``aig_native_protocol.canonical_dumps``."""
+    from openviking.session.aig_native_protocol import canonical_dumps
+
+    return canonical_dumps(value)
 
 
 def _sha256_text(text: str) -> str:
@@ -91,6 +123,44 @@ def _require_mapping(value: Any, field: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{field} must be a dict")
     return value
+
+
+def _is_native_edge_document(payload: Mapping[str, Any]) -> bool:
+    """True when ``schema_version`` marks a native-edge document.
+
+    Legacy claim views omit ``schema_version`` and stay on the claim path.
+    A present version must be ``aig-native-v2`` or
+    ``extraction-contract-aig-native-v2``. Any other version fails closed.
+    The ``edges`` key is not a shape guess.
+    """
+    if "schema_version" not in payload:
+        return False
+    version = payload.get("schema_version")
+    if not isinstance(version, str) or not version or version.strip() != version:
+        raise ValueError(
+            "schema_version is missing or unknown; refusing to read this as a claim view"
+        )
+    from openviking.session.extraction_contract import EXTRACTION_CONTRACT_NATIVE_VERSION
+
+    if version == EXTRACTION_CONTRACT_NATIVE_VERSION:
+        return True
+    if version == NATIVE_EDGE_SCHEMA_VERSION:
+        return True
+    raise ValueError(
+        f"unsupported schema_version {version!r}; refusing to read this as a claim view"
+    )
+
+
+def _reject_native_edge_as_claim(payload: Mapping[str, Any], field: str) -> None:
+    if _is_native_edge_document(payload):
+        raise ValueError(f"{field} is not a claim view; refusing to read it as a claim")
+
+
+def _native_content_hash(schema_version: str, object_kind: str, body: Mapping[str, Any]) -> str:
+    """SHA-256 of the version-tagged canonical body. Delegates to the protocol."""
+    from openviking.session.aig_native_protocol import protocol_content_hash
+
+    return protocol_content_hash(schema_version, object_kind, body)
 
 
 def _require_str(value: Any, field: str, *, allow_empty: bool = False) -> str:
@@ -105,6 +175,15 @@ def _require_int(value: Any, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{field} must be an int")
     return value
+
+
+def _defect_note(value: Any) -> str | None:
+    """Paper ``defect_recorded`` is absent, or an object ``{"note": ...}``."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"note"}:
+        raise ValueError("defect_recorded must be an object with note")
+    return _require_str(value.get("note"), "defect_recorded.note")
 
 
 def _require_choice(value: Any, field: str, choices: frozenset[str]) -> str:
@@ -377,6 +456,7 @@ class InfluenceBlock:
     granularity_reason: str
     source_content_hashes: tuple[str, ...]
     source_refs: tuple[SourceRef, ...]
+    defect_recorded: str | None = None
     block_kind: str = "unknown"
 
     def __post_init__(self) -> None:
@@ -396,6 +476,10 @@ class InfluenceBlock:
                 raise ValueError(
                     f"block_kind {self.block_kind!r} refines role {refined!r}, got {self.role!r}"
                 )
+        if self.defect_recorded is not None:
+            _require_str(self.defect_recorded, "defect_recorded")
+            if self.block_kind != "agent":
+                raise ValueError("defect_recorded requires block_kind agent")
         _require_str(self.participant_id, "participant_id")
         if not isinstance(self.segment_ref, SegmentRef):
             raise ValueError("segment_ref must be a single SegmentRef")
@@ -432,7 +516,7 @@ class InfluenceBlock:
             raise ValueError("source_content_hashes must align with source refs in sequence order")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "block_id": self.block_id,
             "role": self.role,
             "participant_id": self.participant_id,
@@ -446,8 +530,11 @@ class InfluenceBlock:
             "granularity_reason": self.granularity_reason,
             "source_content_hashes": list(self.source_content_hashes),
             "source_refs": [ref.to_dict() for ref in self.source_refs],
-            "block_kind": self.block_kind,
         }
+        if self.defect_recorded is not None:
+            payload["defect_recorded"] = {"note": self.defect_recorded}
+        payload["block_kind"] = self.block_kind
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> InfluenceBlock:
@@ -477,6 +564,7 @@ class InfluenceBlock:
             ),
             source_content_hashes=tuple(str(item) for item in hashes),
             source_refs=refs,
+            defect_recorded=_defect_note(payload.get("defect_recorded", None)),
             block_kind=_require_choice(
                 payload.get("block_kind", "unknown"), "block_kind", BLOCK_KINDS
             ),
@@ -953,7 +1041,7 @@ class InfluenceViewDraft:
     def freeze(
         self,
         *,
-        construction_mode: ConstructionMode = CONSTRUCTION_MODE_ADAPTIVE,
+        construction_mode: ConstructionMode = CONSTRUCTION_MODE_NATIVE_SINGLE_PASS,
         revision_id: str | None = None,
         frozen_at: str | None = None,
         enforce_checks: bool = True,
@@ -1014,6 +1102,7 @@ class InfluenceViewDraft:
         cls, data: dict[str, Any], *, clock: Callable[[], datetime] | None = None
     ) -> InfluenceViewDraft:
         payload = _require_mapping(data, "draft")
+        _reject_native_edge_as_claim(payload, "draft")
         return cls(
             view_id=_require_str(payload.get("view_id"), "view_id"),
             purpose=_require_choice(payload.get("purpose"), "purpose", PURPOSES),  # type: ignore[arg-type]
@@ -1109,6 +1198,7 @@ class InfluenceViewRevision:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> InfluenceViewRevision:
         payload = _require_mapping(data, "revision")
+        _reject_native_edge_as_claim(payload, "revision")
         return cls(
             revision_id=_require_str(payload.get("revision_id"), "revision_id"),
             view_id=_require_str(payload.get("view_id"), "view_id"),
@@ -1140,6 +1230,432 @@ class InfluenceViewRevision:
                 RetrievalSubgraph.from_dict(_require_mapping(item, "retrieval_subgraph"))
                 for item in payload.get("retrieval_subgraphs") or []
             ),
+        )
+
+
+@dataclass(frozen=True)
+class AigNativeEdge:
+    """Directed edge from an earlier block to a later block.
+
+    ``relation_type`` is the mechanism class: ``influence`` or ``skip``.
+    ``mechanism`` is a short note. The edge is not an ``InfluenceClaim``:
+    it has no status, critic verdict, evidence refs, or grounding.
+    """
+
+    edge_id: str
+    source_block_id: str
+    target_block_id: str
+    relation_type: str
+    mechanism: str = ""
+
+    def __post_init__(self) -> None:
+        _require_str(self.edge_id, "edge_id")
+        _require_str(self.source_block_id, "source_block_id")
+        _require_str(self.target_block_id, "target_block_id")
+        if self.source_block_id == self.target_block_id:
+            raise ValueError("native edge endpoints must differ")
+        _require_choice(self.relation_type, "relation_type", _NATIVE_EDGE_RELATIONS)
+        _require_str(self.mechanism, "mechanism", allow_empty=True)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "edge_id": self.edge_id,
+            "source_block_id": self.source_block_id,
+            "target_block_id": self.target_block_id,
+            "relation_type": self.relation_type,
+            "mechanism": self.mechanism,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AigNativeEdge:
+        payload = _require_mapping(data, "edge")
+        mechanism = payload.get("mechanism", "")
+        return cls(
+            edge_id=_require_str(payload.get("edge_id"), "edge_id"),
+            source_block_id=_require_str(payload.get("source_block_id"), "source_block_id"),
+            target_block_id=_require_str(payload.get("target_block_id"), "target_block_id"),
+            relation_type=_require_str(payload.get("relation_type"), "relation_type"),
+            mechanism=_require_str(mechanism, "mechanism", allow_empty=True),
+        )
+
+
+_AUDIT_REQUIRED = ("evidence", "kind", "object_id", "severity", "violation_id")
+_AUDIT_OPTIONAL = ("evidence_ao_refs", "note")
+_AUDIT_KINDS = frozenset({"structural", "semantic", "granularity"})
+
+
+def _normalize_sidecar_hash(value: Any) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("paper_sidecar_hash must be a str")
+    if value == "":
+        return ""
+    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise ValueError("paper_sidecar_hash must be a sha256 hex digest")
+    return value
+
+
+def _normalize_known_violations(value: Any) -> tuple[dict[str, Any], ...]:
+    """Audit summaries. Empty input stays empty and is omitted from the hash."""
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)):
+        raise ValueError("known_violations must be a list")
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"known_violations[{index}] must be a dict")
+        unexpected = [key for key in item if key not in _AUDIT_REQUIRED and key not in _AUDIT_OPTIONAL]
+        if unexpected:
+            raise ValueError(f"known_violations[{index}] unexpected field {unexpected[0]!r}")
+        missing = [key for key in _AUDIT_REQUIRED if key not in item]
+        if missing:
+            raise ValueError(f"known_violations[{index}] missing field {missing[0]!r}")
+        violation_id = _require_str(item.get("violation_id"), f"known_violations[{index}].violation_id")
+        if violation_id in seen:
+            raise ValueError(f"duplicate known violation {violation_id}")
+        seen.add(violation_id)
+        kind = _require_choice(item.get("kind"), f"known_violations[{index}].kind", _AUDIT_KINDS)
+        severity = _require_choice(
+            item.get("severity"), f"known_violations[{index}].severity", SEVERITIES
+        )
+        record = {
+            "evidence": _require_str(item.get("evidence"), f"known_violations[{index}].evidence"),
+            "kind": kind,
+            "object_id": _require_str(item.get("object_id"), f"known_violations[{index}].object_id"),
+            "severity": severity,
+            "violation_id": violation_id,
+        }
+        if "evidence_ao_refs" in item:
+            refs = item.get("evidence_ao_refs")
+            if isinstance(refs, (str, bytes)) or not isinstance(refs, (list, tuple)):
+                raise ValueError(f"known_violations[{index}].evidence_ao_refs must be a list")
+            numbers: list[int] = []
+            for ref_index, ref in enumerate(refs):
+                if isinstance(ref, bool) or not isinstance(ref, int) or ref < 0:
+                    raise ValueError(
+                        f"known_violations[{index}].evidence_ao_refs[{ref_index}] must be an int"
+                    )
+                numbers.append(ref)
+            if numbers:
+                record["evidence_ao_refs"] = numbers
+        if "note" in item:
+            note = _require_str(item.get("note"), f"known_violations[{index}].note", allow_empty=True)
+            if note:
+                record["note"] = note
+        items.append(record)
+    items.sort(key=lambda record: record["violation_id"])
+    return tuple(items)
+
+
+def _revision_audit_fields(
+    known_violations: tuple[dict[str, Any], ...], paper_sidecar_hash: str
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    if known_violations:
+        fields["known_violations"] = [dict(item) for item in known_violations]
+    if paper_sidecar_hash:
+        fields["paper_sidecar_hash"] = paper_sidecar_hash
+    return fields
+
+
+def _reject_claim_fields_on_native(payload: Mapping[str, Any]) -> None:
+    """Refuse a claim/cut document instead of mapping it onto a native edge."""
+    forbidden = (
+        "claims",
+        "claim_id",
+        "cut_grounding",
+        "retrieval_subgraphs",
+        "influence_claim",
+        "influence_grounding",
+    )
+    for key in forbidden:
+        if key in payload:
+            raise ValueError(f"refusing to map a claim view onto a native-edge revision: {key}")
+
+
+def _native_blocks(value: Any) -> tuple[InfluenceBlock, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, list):
+        raise ValueError("blocks must be a list")
+    return tuple(
+        InfluenceBlock.from_dict(_require_mapping(item, "block")) for item in value
+    )
+
+
+def _native_edges(value: Any) -> tuple[AigNativeEdge, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, list):
+        raise ValueError("edges must be a list")
+    return tuple(AigNativeEdge.from_dict(_require_mapping(item, "edge")) for item in value)
+
+
+class AigNativeViewDraft:
+    """Mutable block-and-edge view. Adding an edge does not create a claim."""
+
+    def __init__(
+        self,
+        *,
+        view_id: str,
+        purpose: Purpose,
+        session_id: str,
+        task_run_id: str,
+        coverage: CoverageManifest,
+        blocks: Sequence[InfluenceBlock] | None = None,
+        edges: Sequence[AigNativeEdge] | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.view_id = _require_str(view_id, "view_id")
+        self.purpose = _require_choice(purpose, "purpose", PURPOSES)
+        self.session_id = _require_str(session_id, "session_id")
+        self.task_run_id = _require_str(task_run_id, "task_run_id")
+        if not isinstance(coverage, CoverageManifest):
+            raise ValueError("coverage must be a CoverageManifest")
+        self.coverage = coverage
+        self.blocks: list[InfluenceBlock] = []
+        self.edges: list[AigNativeEdge] = []
+        self._clock = clock or _utc_now
+        for block in blocks or ():
+            self._append_block(block)
+        for edge in edges or ():
+            self._append_edge(edge)
+
+    def _append_block(self, block: InfluenceBlock) -> None:
+        if not isinstance(block, InfluenceBlock):
+            raise ValueError("block must be an InfluenceBlock")
+        if any(existing.block_id == block.block_id for existing in self.blocks):
+            raise ValueError(f"duplicate block_id {block.block_id}")
+        self.blocks.append(block)
+
+    def _append_edge(self, edge: AigNativeEdge) -> None:
+        if not isinstance(edge, AigNativeEdge):
+            raise ValueError("edge must be an AigNativeEdge")
+        if any(existing.edge_id == edge.edge_id for existing in self.edges):
+            raise ValueError(f"duplicate edge_id {edge.edge_id}")
+        pair = (edge.source_block_id, edge.target_block_id)
+        if any(
+            (existing.source_block_id, existing.target_block_id) == pair for existing in self.edges
+        ):
+            raise ValueError(f"duplicate native edge {pair[0]}->{pair[1]}")
+        self.edges.append(edge)
+
+    def add_block(self, block: InfluenceBlock) -> None:
+        self._append_block(block)
+
+    def add_edge(self, edge: AigNativeEdge) -> None:
+        self._append_edge(edge)
+
+    def protocol_body(self) -> dict[str, Any]:
+        return {
+            "view_id": self.view_id,
+            "purpose": self.purpose,
+            "session_id": self.session_id,
+            "task_run_id": self.task_run_id,
+            "blocks": [block.to_dict() for block in self.blocks],
+            "edges": [edge.to_dict() for edge in self.edges],
+            "coverage": self.coverage.to_dict(),
+        }
+
+    def protocol_document(self) -> dict[str, Any]:
+        body = self.protocol_body()
+        return {
+            "schema_version": NATIVE_EDGE_SCHEMA_VERSION,
+            "object_kind": NATIVE_EDGE_DRAFT_KIND,
+            "content_hash": _native_content_hash(
+                NATIVE_EDGE_SCHEMA_VERSION, NATIVE_EDGE_DRAFT_KIND, body
+            ),
+            "body": body,
+        }
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, AigNativeViewDraft):
+            return NotImplemented
+        return self.protocol_body() == other.protocol_body()
+
+    def freeze(
+        self,
+        *,
+        construction_mode: ConstructionMode = CONSTRUCTION_MODE_NATIVE_SINGLE_PASS,
+        revision_id: str | None = None,
+        frozen_at: str | None = None,
+        enforce_checks: bool = True,
+        known_violations: Sequence[Mapping[str, Any]] | None = None,
+        paper_sidecar_hash: str = "",
+    ) -> AigNativeViewRevision:
+        """Freeze blocks and edges. High-severity structural violations refuse it."""
+        mode = _require_choice(construction_mode, "construction_mode", CONSTRUCTION_MODES)
+        stamp = (
+            _format_dt(self._clock()) if frozen_at is None else _require_str(frozen_at, "frozen_at")
+        )
+        identity = revision_id or uuid.uuid4().hex
+        if not isinstance(enforce_checks, bool):
+            raise ValueError("enforce_checks must be a bool")
+        if enforce_checks:
+            high = [item for item in validate_native_view(self) if item.severity == "high"]
+            if high:
+                raise HighSeverityViolation(high)
+        blocks = tuple(self.blocks)
+        edges = tuple(self.edges)
+        revision_key = _require_str(identity, "revision_id")
+        violations = _normalize_known_violations(known_violations or ())
+        sidecar = _normalize_sidecar_hash(paper_sidecar_hash)
+        body = {
+            "revision_id": revision_key,
+            "view_id": self.view_id,
+            "purpose": self.purpose,
+            "session_id": self.session_id,
+            "task_run_id": self.task_run_id,
+            "blocks": [block.to_dict() for block in blocks],
+            "edges": [edge.to_dict() for edge in edges],
+            "coverage": self.coverage.to_dict(),
+            "construction_mode": mode,
+            "frozen_at": stamp,
+        }
+        body.update(_revision_audit_fields(violations, sidecar))
+        return AigNativeViewRevision(
+            revision_id=revision_key,
+            view_id=self.view_id,
+            purpose=self.purpose,  # type: ignore[arg-type]
+            session_id=self.session_id,
+            task_run_id=self.task_run_id,
+            blocks=blocks,
+            edges=edges,
+            coverage=self.coverage,
+            construction_mode=mode,  # type: ignore[arg-type]
+            content_hash=_native_content_hash(
+                NATIVE_EDGE_SCHEMA_VERSION, NATIVE_EDGE_REVISION_KIND, body
+            ),
+            frozen_at=stamp,
+            known_violations=violations,
+            paper_sidecar_hash=sidecar,
+        )
+
+    @classmethod
+    def from_body(cls, body: Mapping[str, Any]) -> AigNativeViewDraft:
+        payload = _require_mapping(dict(body), "native_edge_draft")
+        _reject_claim_fields_on_native(payload)
+        return cls(
+            view_id=_require_str(payload.get("view_id"), "view_id"),
+            purpose=_require_choice(payload.get("purpose"), "purpose", PURPOSES),  # type: ignore[arg-type]
+            session_id=_require_str(payload.get("session_id"), "session_id"),
+            task_run_id=_require_str(payload.get("task_run_id"), "task_run_id"),
+            coverage=CoverageManifest.from_dict(_require_mapping(payload.get("coverage"), "coverage")),
+            blocks=_native_blocks(payload.get("blocks")),
+            edges=_native_edges(payload.get("edges")),
+        )
+
+
+@dataclass(frozen=True)
+class AigNativeViewRevision:
+    """Frozen blocks and native edges. Content hash is the protocol digest.
+
+    The hash covers ``schema_version``, ``object_kind``, and ``protocol_body``.
+    Claims, retrieval subgraphs, and cut grounding are not fields of this object.
+    """
+
+    revision_id: str
+    view_id: str
+    purpose: Purpose
+    session_id: str
+    task_run_id: str
+    blocks: tuple[InfluenceBlock, ...]
+    edges: tuple[AigNativeEdge, ...]
+    coverage: CoverageManifest
+    construction_mode: ConstructionMode
+    content_hash: str
+    frozen_at: str
+    known_violations: tuple[dict[str, Any], ...] = ()
+    paper_sidecar_hash: str = ""
+    schema_version: str = NATIVE_EDGE_SCHEMA_VERSION
+    object_kind: str = NATIVE_EDGE_REVISION_KIND
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "known_violations", _normalize_known_violations(self.known_violations)
+        )
+        object.__setattr__(
+            self, "paper_sidecar_hash", _normalize_sidecar_hash(self.paper_sidecar_hash)
+        )
+        _require_str(self.revision_id, "revision_id")
+        _require_str(self.view_id, "view_id")
+        _require_choice(self.purpose, "purpose", PURPOSES)
+        _require_str(self.session_id, "session_id")
+        _require_str(self.task_run_id, "task_run_id")
+        _require_choice(self.construction_mode, "construction_mode", CONSTRUCTION_MODES)
+        _require_str(self.content_hash, "content_hash")
+        _require_str(self.frozen_at, "frozen_at")
+        if self.schema_version != NATIVE_EDGE_SCHEMA_VERSION:
+            raise ValueError(
+                f"schema_version must be {NATIVE_EDGE_SCHEMA_VERSION!r}, got {self.schema_version!r}"
+            )
+        if self.object_kind != NATIVE_EDGE_REVISION_KIND:
+            raise ValueError(
+                f"object_kind must be {NATIVE_EDGE_REVISION_KIND!r}, got {self.object_kind!r}"
+            )
+        if not isinstance(self.coverage, CoverageManifest):
+            raise ValueError("coverage must be a CoverageManifest")
+        object.__setattr__(self, "blocks", tuple(self.blocks))
+        object.__setattr__(self, "edges", tuple(self.edges))
+        for block in self.blocks:
+            if not isinstance(block, InfluenceBlock):
+                raise ValueError("blocks must contain InfluenceBlock")
+        for edge in self.edges:
+            if not isinstance(edge, AigNativeEdge):
+                raise ValueError("edges must contain AigNativeEdge")
+        digest = _native_content_hash(
+            NATIVE_EDGE_SCHEMA_VERSION, NATIVE_EDGE_REVISION_KIND, self.protocol_body()
+        )
+        if self.content_hash != digest:
+            raise ValueError(
+                f"content_hash mismatch: stored {self.content_hash!r} != computed {digest!r}"
+            )
+
+    def protocol_body(self) -> dict[str, Any]:
+        body = {
+            "revision_id": self.revision_id,
+            "view_id": self.view_id,
+            "purpose": self.purpose,
+            "session_id": self.session_id,
+            "task_run_id": self.task_run_id,
+            "blocks": [block.to_dict() for block in self.blocks],
+            "edges": [edge.to_dict() for edge in self.edges],
+            "coverage": self.coverage.to_dict(),
+            "construction_mode": self.construction_mode,
+            "frozen_at": self.frozen_at,
+        }
+        body.update(_revision_audit_fields(self.known_violations, self.paper_sidecar_hash))
+        return body
+
+    def protocol_document(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "object_kind": self.object_kind,
+            "content_hash": self.content_hash,
+            "body": self.protocol_body(),
+        }
+
+    @classmethod
+    def from_body(cls, body: Mapping[str, Any], *, content_hash: str) -> AigNativeViewRevision:
+        payload = _require_mapping(dict(body), "native_edge_revision")
+        _reject_claim_fields_on_native(payload)
+        return cls(
+            revision_id=_require_str(payload.get("revision_id"), "revision_id"),
+            view_id=_require_str(payload.get("view_id"), "view_id"),
+            purpose=_require_choice(payload.get("purpose"), "purpose", PURPOSES),  # type: ignore[arg-type]
+            session_id=_require_str(payload.get("session_id"), "session_id"),
+            task_run_id=_require_str(payload.get("task_run_id"), "task_run_id"),
+            blocks=_native_blocks(payload.get("blocks")),
+            edges=_native_edges(payload.get("edges")),
+            coverage=CoverageManifest.from_dict(
+                _require_mapping(payload.get("coverage"), "coverage")
+            ),
+            construction_mode=_require_choice(  # type: ignore[arg-type]
+                payload.get("construction_mode"), "construction_mode", CONSTRUCTION_MODES
+            ),
+            content_hash=_require_str(content_hash, "content_hash"),
+            frozen_at=_require_str(payload.get("frozen_at"), "frozen_at"),
+            known_violations=_normalize_known_violations(payload.get("known_violations", ())),
+            paper_sidecar_hash=_normalize_sidecar_hash(payload.get("paper_sidecar_hash", "")),
         )
 
 
@@ -1474,6 +1990,8 @@ def _retrieval_subgraph_violations(
 
 def validate_view(draft: InfluenceViewDraft | InfluenceViewRevision) -> list[Violation]:
     """Server-side structural checks. Semantic critic verdicts are out of scope."""
+    if isinstance(draft, (AigNativeViewDraft, AigNativeViewRevision)):
+        raise TypeError("native-edge view is not a claim view; use validate_native_view")
     purpose, session_id, blocks, claims, coverage = _view_parts(draft)
     findings: list[Violation] = []
     for block in blocks:
@@ -1491,6 +2009,218 @@ def validate_view(draft: InfluenceViewDraft | InfluenceViewRevision) -> list[Vio
     findings.extend(_diagnosis_connectivity_violations(purpose, blocks, claims))
     findings.extend(_coverage_violations(blocks, claims, coverage))
     findings.extend(_retrieval_subgraph_violations(blocks, claims, draft.retrieval_subgraphs))
+    return findings
+
+
+def _native_temporal_and_cycle_violations(
+    blocks: Sequence[InfluenceBlock],
+    edges: Sequence[AigNativeEdge],
+) -> list[Violation]:
+    by_id = {block.block_id: block for block in blocks}
+    findings: list[Violation] = []
+    graph: dict[str, list[tuple[str, AigNativeEdge]]] = {}
+    nodes: set[str] = set()
+    for edge in edges:
+        source = by_id.get(edge.source_block_id)
+        target = by_id.get(edge.target_block_id)
+        if source is None or target is None:
+            findings.append(
+                Violation(
+                    code="dangling_edge",
+                    severity="high",
+                    message="edge endpoints must name blocks in this view",
+                    location=f"edge:{edge.edge_id}",
+                )
+            )
+            continue
+        if source.ao_end_seq >= target.ao_start_seq:
+            findings.append(
+                Violation(
+                    code="temporal_order",
+                    severity="high",
+                    message="source AO interval must be strictly before the target interval",
+                    location=f"edge:{edge.edge_id}",
+                )
+            )
+        graph.setdefault(edge.source_block_id, []).append((edge.target_block_id, edge))
+        nodes.add(edge.source_block_id)
+        nodes.add(edge.target_block_id)
+
+    white, gray, black = 0, 1, 2
+    color = {node: white for node in nodes}
+
+    def walk(node: str) -> None:
+        color[node] = gray
+        for nxt, edge in graph.get(node, ()):
+            if color.get(nxt, white) == gray:
+                findings.append(
+                    Violation(
+                        code="cycle",
+                        severity="high",
+                        message="native-edge view must be acyclic",
+                        location=f"edge:{edge.edge_id}",
+                    )
+                )
+            elif color.get(nxt, white) == white:
+                walk(nxt)
+        color[node] = black
+
+    for node in sorted(nodes):
+        if color[node] == white:
+            walk(node)
+    return findings
+
+
+def _native_weak_component(root_id: str, edges: Sequence[AigNativeEdge]) -> set[str]:
+    undirected: dict[str, set[str]] = {}
+    for edge in edges:
+        undirected.setdefault(edge.source_block_id, set()).add(edge.target_block_id)
+        undirected.setdefault(edge.target_block_id, set()).add(edge.source_block_id)
+    seen: set[str] = set()
+    stack = [root_id]
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        stack.extend(undirected.get(node, set()) - seen)
+    return seen
+
+
+def _native_diagnosis_violations(
+    purpose: str,
+    blocks: Sequence[InfluenceBlock],
+    edges: Sequence[AigNativeEdge],
+) -> list[Violation]:
+    if purpose != PURPOSE_FAILURE_DIAGNOSIS:
+        return []
+    findings: list[Violation] = []
+    roots = [block for block in blocks if block.role == ROLE_TASK]
+    sinks = [block for block in blocks if block.role == ROLE_CONCLUSION]
+    if len(roots) != 1:
+        findings.append(
+            Violation(
+                code="missing_task_root",
+                severity="high",
+                message="failure_diagnosis view requires exactly one virtual task root",
+                location="view",
+            )
+        )
+    if len(sinks) != 1:
+        findings.append(
+            Violation(
+                code="missing_outcome_sink",
+                severity="high",
+                message="failure_diagnosis view requires exactly one observed-outcome sink",
+                location="view",
+            )
+        )
+    if len(roots) != 1 or len(sinks) != 1:
+        return findings
+    root = roots[0]
+    sink = sinks[0]
+    component = _native_weak_component(root.block_id, edges)
+    if sink.block_id not in component:
+        findings.append(
+            Violation(
+                code="root_sink_not_weakly_connected",
+                severity="high",
+                message="virtual task root and observed-outcome sink are not weakly connected",
+                location="view",
+            )
+        )
+        return findings
+    for block in blocks:
+        if block.block_id not in component:
+            findings.append(
+                Violation(
+                    code="block_outside_root_sink_subgraph",
+                    severity="high",
+                    message="included block is outside the root-to-sink weak subgraph",
+                    location=f"block:{block.block_id}",
+                )
+            )
+    return findings
+
+
+def _native_coverage_violations(
+    blocks: Sequence[InfluenceBlock],
+    edges: Sequence[AigNativeEdge],
+    coverage: CoverageManifest,
+) -> list[Violation]:
+    findings: list[Violation] = []
+    if not coverage.snapshot_watermark.strip():
+        findings.append(
+            Violation(
+                code="coverage_incomplete",
+                severity="high",
+                message="coverage manifest requires a snapshot watermark",
+                location="coverage.snapshot_watermark",
+            )
+        )
+    for index, omitted in enumerate(coverage.omitted_ranges):
+        if not omitted.reason.strip():
+            findings.append(
+                Violation(
+                    code="omitted_range_missing_reason",
+                    severity="high",
+                    message="every omitted range requires a reason",
+                    location=f"coverage.omitted_ranges[{index}]",
+                )
+            )
+    by_id = {block.block_id: block for block in blocks}
+    for edge in edges:
+        source = by_id.get(edge.source_block_id)
+        target = by_id.get(edge.target_block_id)
+        if source is None or target is None:
+            continue
+        gap_start = source.ao_end_seq + 1
+        gap_end = target.ao_start_seq - 1
+        crosses = any(
+            _ranges_overlap_gap(omitted, gap_start, gap_end) for omitted in coverage.omitted_ranges
+        )
+        if crosses and edge.relation_type != RELATION_SKIP:
+            findings.append(
+                Violation(
+                    code="omitted_range_skip_required",
+                    severity="high",
+                    message="an edge that crosses an omitted range must use relation_type skip",
+                    location=f"edge:{edge.edge_id}",
+                )
+            )
+    return findings
+
+
+def validate_native_view(
+    view: AigNativeViewDraft | AigNativeViewRevision,
+) -> list[Violation]:
+    """Structural checks for a native-edge view. Claim status is not involved."""
+    if not isinstance(view, (AigNativeViewDraft, AigNativeViewRevision)):
+        raise TypeError("validate_native_view requires a native-edge draft or revision")
+    findings: list[Violation] = []
+    if not view.blocks:
+        findings.append(
+            Violation(
+                code="missing_block",
+                severity="high",
+                message="native-edge view requires at least one block",
+                location="blocks",
+            )
+        )
+    for block in view.blocks:
+        if block.segment_ref.session_id != view.session_id:
+            findings.append(
+                Violation(
+                    code="session_mismatch",
+                    severity="high",
+                    message="block segment session must match the view session",
+                    location=f"block:{block.block_id}",
+                )
+            )
+    findings.extend(_readable_source_violations(view.blocks))
+    findings.extend(_native_temporal_and_cycle_violations(view.blocks, view.edges))
+    findings.extend(_native_diagnosis_violations(view.purpose, view.blocks, view.edges))
+    findings.extend(_native_coverage_violations(view.blocks, view.edges, view.coverage))
     return findings
 
 
@@ -1818,6 +2548,8 @@ class ViewSupersedeIndex:
             return
         payload = json.loads(self.path.read_text(encoding="utf-8"))
         parsed = _require_mapping(payload, "index")
+        if _is_native_edge_document(parsed):
+            raise ValueError("native-edge document cannot be opened as a claim view index")
         history: dict[tuple[str, str], list[InfluenceViewRevision]] = {}
         for entry in parsed.get("keys") or []:
             item = _require_mapping(entry, "index.keys")

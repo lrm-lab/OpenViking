@@ -77,6 +77,11 @@ _KIND_USE = {
     "claim_projection": "analogical_prior",
     "segment": "analogical_prior",
     "atom": "analogical_prior",
+    "native_block": "analogical_prior",
+    "native_edge": "analogical_prior",
+    "fork_overlay": "memory_candidate",
+    "strategy_pattern": "memory_candidate",
+    "guidance": "memory_candidate",
 }
 
 

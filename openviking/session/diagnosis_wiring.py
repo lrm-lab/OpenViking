@@ -27,6 +27,7 @@ from openviking.session.influence_view import (
     InfluenceViewRevision,
     ViewSupersedeIndex,
 )
+from openviking.session.legacy_write_gate import require_legacy_audit_opt_in
 from openviking.session.retrieval_facade import DiagnosticSubgraphHit
 from openviking.session.retrieval_wiring import build_retrieval_facade
 from openviking.session.session_acl import session_owner_label
@@ -133,6 +134,7 @@ def write_diagnosis_fork(
     used_skills: Sequence[Mapping[str, Any]] | None = None,
     view_revision_id: str | None = None,
     workspace_labels: Sequence[str] | None = None,
+    legacy_audit_opt_in: bool = False,
 ) -> ForkRevision:
     """Write one ordinary fork for one failure subgraph.
 
@@ -140,7 +142,11 @@ def write_diagnosis_fork(
     defaults to that single label. The grounding position defaults to the
     block that covers the failure evidence. Caller-supplied diagnosis
     fields are passed through; this function does not invent them.
+
+    The default refuses. ``legacy_audit_opt_in=True`` keeps the legacy
+    writer. This function does not build a ForkNode overlay.
     """
+    require_legacy_audit_opt_in(legacy_audit_opt_in)
     revision = _require_revision(session, view_revision_id)
     if viking_fs is None:
         raise ValueError("viking_fs is required to resolve the fork store root")
@@ -167,6 +173,7 @@ def write_diagnosis_fork(
         contemporaneous_basis=contemporaneous_basis,
         hindsight_attribution=hindsight_attribution,
         used_skills=used_skills,
+        legacy_audit_opt_in=True,
     )
 
 

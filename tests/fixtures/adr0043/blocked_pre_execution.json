@@ -1,0 +1,73 @@
+{
+  "schema_version": "aig-native-v2",
+  "object_kind": "blocked_pre_execution",
+  "content_hash": "843a4fcff35d356c320f8c7aa0f44aa50a9e43f6facd3d089a6508fb41907b01",
+  "body": {
+    "agent_capabilities": [
+      "replay-sandbox"
+    ],
+    "bound_principal_labels": [
+      "user:carol"
+    ],
+    "bound_session_id": "sess-parent",
+    "budget": "exceeded",
+    "capability_limits": [
+      "replay-sandbox"
+    ],
+    "executor_agent_id": "agent-a",
+    "executor_role": "task_agent",
+    "guidance_content_hash": "abababababababababababababababababababababababababababababababab",
+    "guidance_id": "guidance-1",
+    "idempotency_key": "remediation-1",
+    "idempotency_state": "clear",
+    "isolation": "isolated",
+    "parent_session_id": "sess-parent",
+    "permission": "granted",
+    "principal_labels": [
+      "user:carol"
+    ],
+    "requested_side_effects": [],
+    "selected_agent_id": "agent-a",
+    "side_effect_allowlist": [],
+    "source_fork_id": "fork-1",
+    "source_guidance_id": "guidance-1",
+    "decision_id": "eb1c045a84ca1ffe66d30f0f439933161b2bc580c72cdb991c595bbcc8acc1c2",
+    "failed_gate": "budget",
+    "gates": [
+      {
+        "gate": "acl",
+        "passed": true,
+        "reason": "acl_matched"
+      },
+      {
+        "gate": "permission",
+        "passed": true,
+        "reason": "permission_granted"
+      },
+      {
+        "gate": "budget",
+        "passed": false,
+        "reason": "budget_not_compliant"
+      },
+      {
+        "gate": "security",
+        "passed": true,
+        "reason": "side_effects_isolated"
+      },
+      {
+        "gate": "capability",
+        "passed": true,
+        "reason": "capability_covered"
+      },
+      {
+        "gate": "idempotency",
+        "passed": true,
+        "reason": "idempotency_clear"
+      }
+    ],
+    "outcome": "blocked_pre_execution",
+    "reasons": [
+      "budget:budget_not_compliant"
+    ]
+  }
+}

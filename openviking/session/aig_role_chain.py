@@ -7,6 +7,8 @@ phase gate. A failed run stays on the deterministic fallback and does not
 switch to the fixed-partition IG builder. Evidence exposure starts closed
 and climbs projection, summary, synopsis, then selected_raw. selected_raw
 only records that the upgrade was authorized; it does not carry raw AO text.
+Reader alone may authorize an outcome write, and only against a frozen
+report. Critic violations are graph-validity notes, not a task outcome.
 """
 
 from __future__ import annotations
@@ -14,11 +16,14 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
 MAX_REVISION_ROUNDS = 3
-CONSTRUCTION_ADAPTIVE = "adaptive_agentic_aig"
+# Successful runs of this chain record the single-pass construction mode.
+CONSTRUCTION_NATIVE_SINGLE_PASS = "native_single_pass_aig"
 CONSTRUCTION_FALLBACK = "fallback"
 CONSTRUCTION_IG = "fixed_partition_single_pass_ig"
 
@@ -31,6 +36,16 @@ class AigContractError(ValueError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+@dataclass(frozen=True)
+class FrozenRunSnapshot:
+    """Persisted frozen Reader run. Session ids stay the ones that froze it."""
+
+    run_id: str
+    sessions: Mapping[str, str]
+    report_hash: str
+    draft_hash: str
 
 
 def _canonical(value: Any) -> str:
@@ -46,7 +61,7 @@ class AigConstructionRun:
         if not isinstance(run_id, str) or not run_id.strip():
             raise AigContractError("invalid_run")
         self.run_id = run_id.strip()
-        self._construction_mode = CONSTRUCTION_ADAPTIVE
+        self._construction_mode = CONSTRUCTION_NATIVE_SINGLE_PASS
         self.trust = "draft"
         self._sessions = {role: f"{self.run_id}:{role}:{uuid4().hex}" for role in _BUILD_ROLES}
         self._rounds = {"critic": 0, "refiner": 0}
@@ -63,6 +78,16 @@ class AigConstructionRun:
     @property
     def construction_mode(self) -> str:
         return self._construction_mode
+
+    @property
+    def critic_rounds(self) -> int:
+        """Critique rounds already recorded. The cap is ``MAX_REVISION_ROUNDS``."""
+        return self._rounds["critic"]
+
+    @property
+    def refiner_rounds(self) -> int:
+        """Refine rounds already recorded. The cap is ``MAX_REVISION_ROUNDS``."""
+        return self._rounds["refiner"]
 
     @property
     def phase(self) -> str:
@@ -163,6 +188,81 @@ class AigConstructionRun:
         self._phase = "SYNTHESIZE_PROPOSE"
         self.trust = "frozen"
         return self._report_hash
+
+    def authorize_outcome_write(self, session_id: str) -> str:
+        """Return the frozen reader report hash.
+
+        Builder, Critic, and Refiner cannot write an outcome. Critic
+        violations stay graph-validity notes. A provisional fallback is
+        not a trusted report, so it cannot authorize a write either.
+        """
+        if not isinstance(session_id, str):
+            raise AigContractError("session_role_mismatch")
+        for role in ("builder", "critic", "refiner"):
+            if session_id == self._sessions[role]:
+                raise AigContractError("outcome_write_forbidden")
+        self._require_session(session_id, "reader")
+        if self._fallback:
+            raise AigContractError("fallback_is_provisional")
+        if not self._report_frozen or self._report_hash is None:
+            raise AigContractError("report_not_frozen")
+        return self._report_hash
+
+    def frozen_snapshot(self) -> FrozenRunSnapshot:
+        """Capture a frozen run so a later process can authorize the same report."""
+        if (
+            not self._report_frozen
+            or self._report_hash is None
+            or self._draft_hash is None
+            or self._fallback
+        ):
+            raise AigContractError("report_not_frozen")
+        return FrozenRunSnapshot(
+            run_id=self.run_id,
+            sessions={role: self._sessions[role] for role in sorted(_BUILD_ROLES)},
+            report_hash=self._report_hash,
+            draft_hash=self._draft_hash,
+        )
+
+    @classmethod
+    def restore_frozen(cls, snapshot: FrozenRunSnapshot) -> AigConstructionRun:
+        """Rebuild a frozen run. This does not create a new report hash."""
+        if not isinstance(snapshot, FrozenRunSnapshot):
+            raise AigContractError("invalid_run")
+        if not isinstance(snapshot.run_id, str) or not snapshot.run_id.strip():
+            raise AigContractError("invalid_run")
+        if not isinstance(snapshot.report_hash, str) or not snapshot.report_hash:
+            raise AigContractError("report_not_frozen")
+        if not isinstance(snapshot.draft_hash, str) or not snapshot.draft_hash:
+            raise AigContractError("no_draft")
+        if not isinstance(snapshot.sessions, Mapping):
+            raise AigContractError("unknown_role")
+        if set(snapshot.sessions) != set(_BUILD_ROLES):
+            raise AigContractError("unknown_role")
+        sessions: dict[str, str] = {}
+        for role in _BUILD_ROLES:
+            session_id = snapshot.sessions[role]
+            if not isinstance(session_id, str) or not session_id.strip():
+                raise AigContractError("invalid_run")
+            sessions[role] = session_id
+        if len(set(sessions.values())) != len(sessions):
+            raise AigContractError("session_role_mismatch")
+        run = cls.__new__(cls)
+        run.run_id = snapshot.run_id.strip()
+        run._construction_mode = CONSTRUCTION_NATIVE_SINGLE_PASS
+        run.trust = "frozen"
+        run._sessions = sessions
+        run._rounds = {"critic": 0, "refiner": 0}
+        run._draft_hash = snapshot.draft_hash
+        run._violations = []
+        run._report_hash = snapshot.report_hash
+        run._report_frozen = True
+        run._view_frozen = True
+        run._phase = "SYNTHESIZE_PROPOSE"
+        run._fork = None
+        run._fallback = False
+        run._evidence_tier = None
+        return run
 
     def propose_fork(self, session_id: str, fork_draft: dict[str, Any]) -> dict[str, Any]:
         self._require_session(session_id, "reader")

@@ -12,9 +12,11 @@ has never been causally indexed still builds a facade and retrieves nothing.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from openviking.core.namespace import canonical_user_root
+from openviking.session.active_retrieval import corpus_for_facade
 from openviking.session.causal_experiences import CausalExperiencesStore
 from openviking.session.influence_projection import ProjectionRegistry
 from openviking.session.influence_view import PURPOSES, ViewSupersedeIndex
@@ -82,6 +84,11 @@ def build_retrieval_facade(*, session: Any, ctx: Any, viking_fs: Any) -> HybridR
             forks,
             session_acl=session_acl,
             session_dirs={session_id: directory},
+        ),
+        active_corpus=corpus_for_facade(
+            session=session,
+            user_root=Path(user_root),
+            session_dir=directory,
         ),
     )
 

@@ -1,0 +1,196 @@
+{
+  "body": {
+    "base_revision": {
+      "base_revision_id": "rev-aig-frozen-1",
+      "block_content_hash": "61b024e1db7c82bc1a3e521938ab76d1da6707c1318bd0ef8dcb09b51645c436",
+      "block_ids": [
+        "blk-task",
+        "blk-action"
+      ]
+    },
+    "documents": {
+      "branch_evaluation": {
+        "body": {
+          "evaluation_id": "eval-analog-1",
+          "evidence_ref": "evidence:ao-eval-1",
+          "evidence_tier": "analogical",
+          "status": "active",
+          "subject_id": "img-narrow-retry",
+          "subject_kind": "imagined_node"
+        },
+        "content_hash": "f3612f800fd506e7ddbb69545f1c6579cf7d43f50631017f1833dda342203fbf",
+        "object_kind": "branch_evaluation",
+        "schema_version": "aig-native-v2"
+      },
+      "first_action_alignment": {
+        "body": {
+          "actual_block_id": "blk-replay-action",
+          "alignment": "equivalent",
+          "depth": "prefix",
+          "equivalence_explanation": null,
+          "imagined_node_id": "img-narrow-retry",
+          "intervention_type": "narrow_retry",
+          "required_capabilities": [
+            "replay-sandbox"
+          ],
+          "safety_control_params": {
+            "isolation": "sandbox"
+          },
+          "target_boundary": "blk-action"
+        },
+        "content_hash": "bf24f2561e6c47a5d61e00966ac276f9954c9db27b6179d0a7f66af20d12dfbf",
+        "object_kind": "first_action_alignment",
+        "schema_version": "aig-native-v2"
+      },
+      "fork_node_overlay": {
+        "body": {
+          "anchor_block_id": "blk-action",
+          "base_revision_block_content_hash": "61b024e1db7c82bc1a3e521938ab76d1da6707c1318bd0ef8dcb09b51645c436",
+          "base_revision_id": "rev-aig-frozen-1",
+          "branch_steps": [
+            {
+              "block_id": "blk-task",
+              "step_kind": "factual_block_ref"
+            },
+            {
+              "imagined_node_id": "img-narrow-retry",
+              "step_kind": "imagined_node"
+            },
+            {
+              "imagined_node_id": "img-skipped",
+              "step_kind": "imagined_node"
+            }
+          ],
+          "fork_node_id": "fork-overlay-1"
+        },
+        "content_hash": "55c8f9169a78304b5ea7505e79af31b23e94dfb16d18638e4d0aeb6ef51d19de",
+        "object_kind": "fork_node_overlay",
+        "schema_version": "aig-native-v2"
+      },
+      "fork_proposal": {
+        "body": {
+          "anchor_block_id": "blk-action",
+          "author_role": "reader",
+          "base_revision_block_content_hash": "61b024e1db7c82bc1a3e521938ab76d1da6707c1318bd0ef8dcb09b51645c436",
+          "base_revision_id": "rev-aig-frozen-1",
+          "branch_steps": [
+            {
+              "block_id": "blk-task",
+              "step_kind": "factual_block_ref"
+            },
+            {
+              "imagined_node_id": "img-narrow-retry",
+              "step_kind": "imagined_node"
+            },
+            {
+              "imagined_node_id": "img-skipped",
+              "step_kind": "imagined_node"
+            }
+          ],
+          "report_hash": "cf899129e58b27f8d77082b97e54eb9ee59f99d5fe25843472d5e30a1cc8ec70"
+        },
+        "content_hash": "8e8d4474024a93770571f6df675f5e0e067be65178891f20deaa9ee9043f8731",
+        "object_kind": "fork_proposal",
+        "schema_version": "aig-native-v2"
+      },
+      "guidance_document": {
+        "body": {
+          "applicability": {
+            "action_skill_role": "applicable",
+            "anchor_state": "partially_applicable",
+            "failure_mode": "applicable",
+            "task_decision_type": "applicable"
+          },
+          "base_revision_id": "rev-aig-frozen-1",
+          "capability_limits": [
+            "replay-sandbox"
+          ],
+          "evidence_refs": [
+            {
+              "ao_id": "ao-eval-1",
+              "archive_commit_watermark": null,
+              "captured_state": "committed",
+              "evidence_content_hash": "hash-eval-1",
+              "evidence_role": "hindsight_attribution",
+              "source_archive_id": null,
+              "source_read_snapshot_watermark": "wm-1",
+              "source_sequence": 4,
+              "source_session_id": "sess-1"
+            }
+          ],
+          "guidance_id": "guidance-1",
+          "report_hash": "cf899129e58b27f8d77082b97e54eb9ee59f99d5fe25843472d5e30a1cc8ec70",
+          "risk": "retry may repeat the failed rollout",
+          "source_fork_id": "fork-overlay-1",
+          "target_role": "task_agent"
+        },
+        "content_hash": "fc19987cc9475e702db39557e696693e45dbe406f62cedeea0f11ed6295d8f88",
+        "object_kind": "guidance_document",
+        "schema_version": "aig-native-v2"
+      },
+      "guidance_execution_report": {
+        "body": {
+          "guidance_id": "guidance-1",
+          "parent_session_id": "sess-1",
+          "source_fork_id": "fork-overlay-1",
+          "steps": [
+            {
+              "actual_block_id": "blk-child-action",
+              "alignment": "functionally_equivalent",
+              "imagined_node_id": "img-narrow-retry"
+            },
+            {
+              "actual_block_id": null,
+              "alignment": "not_executed",
+              "imagined_node_id": "img-skipped"
+            }
+          ]
+        },
+        "content_hash": "1bd54437a2b1434bc01f77df9a692ce84409483c4200fb703e4abe032c5ac2cf",
+        "object_kind": "guidance_execution_report",
+        "schema_version": "aig-native-v2"
+      },
+      "replay_eligibility": {
+        "body": {
+          "anchor_block_id": "blk-action",
+          "base_revision_id": "rev-aig-frozen-1",
+          "checked_at": "2026-10-10T00:00:00.000Z",
+          "eligibility": "conditionally_replayable",
+          "fork_node_id": "fork-overlay-1"
+        },
+        "content_hash": "120f3755a4cb494ef2da50a80fb75664c93985bf0ffd343c7468e63d49d7bb19",
+        "object_kind": "replay_eligibility",
+        "schema_version": "aig-native-v2"
+      },
+      "task_outcome_assessment": {
+        "body": {
+          "author_role": "reader",
+          "criteria_dispositions": {
+            "crit-error-budget": "explicit"
+          },
+          "evidence_refs": [
+            {
+              "ao_id": "ao-eval-1",
+              "archive_commit_watermark": null,
+              "captured_state": "committed",
+              "evidence_content_hash": "hash-eval-1",
+              "evidence_role": "hindsight_attribution",
+              "source_archive_id": null,
+              "source_read_snapshot_watermark": "wm-1",
+              "source_sequence": 4,
+              "source_session_id": "sess-1"
+            }
+          ],
+          "report_hash": "cf899129e58b27f8d77082b97e54eb9ee59f99d5fe25843472d5e30a1cc8ec70",
+          "verdict": "failure"
+        },
+        "content_hash": "cadd1eed6695d49982c58b983dcc7fbb681b04b31b242e0106f1d776226287ca",
+        "object_kind": "task_outcome_assessment",
+        "schema_version": "aig-native-v2"
+      }
+    }
+  },
+  "content_hash": "acd7c028ec344e09c8b8c769eb821d00c0cb1571236ed44387738454b107cfa8",
+  "object_kind": "v2_fixture_set",
+  "schema_version": "aig-native-v2"
+}

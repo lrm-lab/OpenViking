@@ -1,0 +1,24 @@
+{
+  "body": {
+    "applicability_conditions": [
+      {
+        "condition_id": "anchor-state",
+        "statement": "anchor block is the failed action"
+      },
+      {
+        "condition_id": "failure-mode",
+        "statement": "timeout on the first call"
+      }
+    ],
+    "capability": "replay-sandbox",
+    "expected_metric": "error_rate<0.01",
+    "identity_version": "strategy-pattern-identity-v1",
+    "intervention_type": "narrow_retry",
+    "mechanism": "retry the call with a narrower timeout",
+    "pattern_id": "eddcf51b921a4cf01fef9ddc99673e9111460516a0b032d5b96e29ab7357b9b7",
+    "target_boundary": "blk-action"
+  },
+  "content_hash": "17e2a73ec7b19380ed47f31a147c0d399d63cc519e3770a56505ffaf4e098822",
+  "object_kind": "strategy_pattern",
+  "schema_version": "aig-native-v2"
+}

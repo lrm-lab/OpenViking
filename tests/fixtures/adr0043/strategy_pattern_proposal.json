@@ -1,0 +1,26 @@
+{
+  "body": {
+    "applicability_conditions": [
+      {
+        "condition_id": "anchor-state",
+        "statement": "anchor block is the failed action"
+      },
+      {
+        "condition_id": "failure-mode",
+        "statement": "timeout on the first call"
+      }
+    ],
+    "author_role": "reader",
+    "capability": "replay-sandbox",
+    "expected_metric": "error_rate<0.01",
+    "fork_node_id": "fork-overlay-1",
+    "imagined_node_id": "img-narrow-retry",
+    "intervention_type": "narrow_retry",
+    "mechanism": "retry the call with a narrower timeout",
+    "semantic_summary": "a narrower retry after timeout",
+    "target_boundary": "blk-action"
+  },
+  "content_hash": "44b08f0b14d4623bb09ff4395613cb3a13f85cf1eb3911e33ae8283561f2b700",
+  "object_kind": "strategy_pattern_proposal",
+  "schema_version": "aig-native-v2"
+}
