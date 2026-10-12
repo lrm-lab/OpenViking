@@ -30,6 +30,21 @@ def session_owner_label(session: Any) -> str:
     return f"user:{user_id}"
 
 
+def session_stored_owner_label(session: Any) -> str:
+    """Owner from ``_meta`` or ``_session_uri``. Caller ctx is ignored.
+
+    ``session_owner_label`` prefers ``ctx.user.user_id``. The diagnose HTTP
+    face loads a Session with the caller's ctx, so that helper would always
+    return the caller. Target visibility must use the stored owner.
+    """
+    user_id = _user_id_from_meta(session) or _user_id_from_session_uri(
+        getattr(session, "_session_uri", None)
+    )
+    if user_id is None:
+        raise ValueError("session owner could not be resolved")
+    return f"user:{user_id}"
+
+
 def session_acl_callback(session: Any) -> SessionAcl:
     """Return a callback that labels only this session.
 

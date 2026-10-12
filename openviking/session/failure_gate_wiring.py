@@ -24,6 +24,10 @@ Failure semantics
 (P10 commit boundary: no automatic dispatch). Diagnose still owns the
 scripted remediation path. Any exception from ``deliver`` is audited by the
 orchestrator and swallowed here so commit / Phase 2 still finish.
+
+``build_diagnose_delivery`` / ``diagnose_coordinator_request`` are the
+HTTP diagnose adapters. They reuse the same product readers as commit.
+Exceptions propagate: the diagnose face must surface them.
 """
 
 from __future__ import annotations
@@ -38,11 +42,17 @@ from openviking.session.aig_native_protocol import (
     is_safe_id,
     protocol_envelope,
 )
-from openviking.session.coordinator_boundary import TRIGGER_COMMIT
+from openviking.session.coordinator_boundary import (
+    TRIGGER_COMMIT,
+    TRIGGER_DIAGNOSE,
+    CoordinatorDiagnoseRequest,
+    read_coordinator_diagnose_request,
+)
 from openviking.session.extraction_write import NATIVE_EDGE_INDEX_FILENAME, NativeEdgeViewStore
 from openviking.session.failure_gate import (
     ConstructionRequest,
     FailureGateDelivery,
+    FailureGateError,
     FailureGateOrchestrator,
     FailureGateResult,
     FrozenViewBuilder,
@@ -193,25 +203,118 @@ def build_commit_delivery(
     session_dir: Path,
 ) -> FailureGateDelivery:
     """Build one commit delivery from the frozen view and session products."""
+    return build_failure_gate_delivery(
+        session,
+        revision,
+        task_id=task_id,
+        commit_id=commit_id,
+        session_dir=session_dir,
+        trigger=TRIGGER_COMMIT,
+        session_id=revision.session_id,
+        source_digest=revision.content_hash,
+        principal_labels=_principal_labels(session),
+        auto_remediate=False,
+    )
+
+
+def build_diagnose_delivery(
+    session: Any,
+    revision: AigNativeViewRevision,
+    request: CoordinatorDiagnoseRequest,
+    *,
+    session_dir: Path,
+) -> FailureGateDelivery:
+    """Build one diagnose delivery from the request and session products.
+
+    A remediation script is attached only when the session carries one.
+    The orchestrator fail-closed gates stay the only dispatch doors.
+    """
+    remediation = _remediation_from_session(session)
+    return build_failure_gate_delivery(
+        session,
+        revision,
+        task_id=request.task_id,
+        commit_id=request.commit_id,
+        session_dir=session_dir,
+        trigger=TRIGGER_DIAGNOSE,
+        session_id=request.session_id,
+        source_digest=request.source_digest,
+        principal_labels=request.principal_labels,
+        auto_remediate=remediation is not None,
+        remediation=remediation,
+    )
+
+
+def diagnose_coordinator_request(
+    session: Any,
+    request_document: Mapping[str, Any],
+    *,
+    build_revision: FrozenViewBuilder | None = None,
+) -> FailureGateResult:
+    """Run ``FailureGateOrchestrator.diagnose`` for one request document.
+
+    Exceptions propagate. The HTTP face maps them; this adapter does not
+    swallow a refused diagnose.
+    """
+    parsed = read_coordinator_diagnose_request(request_document)
+    session_dir = session_directory(session)
+    if session_dir is None:
+        raise FailureGateError("view_required")
+    revision = latest_native_aig_revision(session_dir, parsed.session_id, parsed.task_id)
+    if revision is None:
+        raise FailureGateError("view_required")
+    builder = build_revision or session_frozen_view_builder(session_dir)
+    delivery = build_diagnose_delivery(
+        session, revision, parsed, session_dir=session_dir
+    )
+    return FailureGateOrchestrator(session_dir, builder).diagnose(
+        request_document, delivery
+    )
+
+
+def build_failure_gate_delivery(
+    session: Any,
+    revision: AigNativeViewRevision,
+    *,
+    task_id: str,
+    commit_id: str,
+    session_dir: Path,
+    trigger: str,
+    session_id: str,
+    source_digest: str,
+    principal_labels: Sequence[str],
+    auto_remediate: bool,
+    remediation: Mapping[str, Any] | None = None,
+) -> FailureGateDelivery:
+    """Shared constructor for commit and diagnose deliveries."""
     stamp = _stamp(revision.frozen_at)
     contract = _contract_document(session, session_dir, task_id, stamp)
     evaluator_results = _evaluator_results(session)
     assessment = getattr(session, "outcome_assessment_body", None)
     if not isinstance(assessment, Mapping):
         assessment = _derived_assessment(contract, evaluator_results, revision)
+    script = remediation if isinstance(remediation, Mapping) else {}
     return FailureGateDelivery(
-        trigger=TRIGGER_COMMIT,
+        trigger=trigger,
         commit_id=commit_id,
         task_id=task_id,
-        session_id=revision.session_id,
-        source_digest=revision.content_hash,
-        principal_labels=_principal_labels(session),
+        session_id=session_id,
+        source_digest=source_digest,
+        principal_labels=tuple(principal_labels),
         contract=contract,
         assessment_body=dict(assessment),
         evaluator_results=evaluator_results,
         temporal_cutoff=stamp,
         recorded_at=stamp,
-        auto_remediate=False,
+        auto_remediate=auto_remediate,
+        anchor_block_id=_optional_text(script.get("anchor_block_id")),
+        branch_steps=_mapping_tuple(script.get("branch_steps")),
+        guidance_plan=_optional_mapping(script.get("guidance_plan")),
+        catalog=_optional_mapping(script.get("catalog")),
+        dispatch_controls=_optional_mapping(script.get("dispatch_controls")),
+        dispatch_outputs=_mapping_tuple(script.get("dispatch_outputs")),
+        dispatch_steps=_mapping_tuple(script.get("dispatch_steps")),
+        dispositions=_mapping_tuple(script.get("dispositions")),
     )
 
 
@@ -352,3 +455,28 @@ def _evidence_from_revision(revision: AigNativeViewRevision) -> dict[str, Any]:
 
 def _stamp(value: str) -> str:
     return format_iso8601(parse_iso_datetime(value))
+
+
+def _remediation_from_session(session: Any) -> Mapping[str, Any] | None:
+    raw = getattr(session, "failure_gate_remediation", None)
+    if not isinstance(raw, Mapping):
+        return None
+    return raw
+
+
+def _optional_text(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    return value
+
+
+def _optional_mapping(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    return dict(value)
+
+
+def _mapping_tuple(value: Any) -> tuple[Mapping[str, Any], ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        return ()
+    return tuple(dict(item) for item in value if isinstance(item, Mapping))

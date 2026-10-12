@@ -24,6 +24,7 @@ from openviking.session.coordinator_boundary import (
     COORDINATOR_SCHEMA_VERSION,
     KIND_DIAGNOSE_REQUEST,
     KIND_FAILURE_GATE_EVENT,
+    coordinator_boundary_labels,
     coordinator_diagnose_request_document,
     coordinator_failure_gate_event_document,
     read_coordinator_document,
@@ -131,6 +132,16 @@ def test_reader_fail_closed_on_version_kind_hash_and_intent() -> None:
 
     with pytest.raises(ProtocolContractError):
         read_protocol_document(request)
+
+
+def test_boundary_labels_accept_user_and_refuse_other_kinds() -> None:
+    assert coordinator_boundary_labels(["user:carol"]) == frozenset({"user:carol"})
+    with pytest.raises(ProtocolContractError, match="acl_denied"):
+        coordinator_boundary_labels(["group:eng"])
+    with pytest.raises(ProtocolContractError, match="acl_denied"):
+        coordinator_boundary_labels(["user:*"])
+    with pytest.raises(ProtocolContractError, match="acl_denied"):
+        coordinator_boundary_labels(["role:coordinator"])
 
 
 def test_boundary_names_coforge_as_the_implementer() -> None:

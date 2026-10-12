@@ -20,6 +20,9 @@ from openviking.session.coordinator_boundary import (
     ACTION_ADVICE,
     ACTION_RETAINED,
     TRIGGER_COMMIT,
+    TRIGGER_DIAGNOSE,
+    coordinator_diagnose_request_document,
+    read_coordinator_diagnose_request,
 )
 from openviking.session.extraction_write import NATIVE_EDGE_INDEX_FILENAME, NativeEdgeViewStore
 from openviking.session.failure_gate import (
@@ -33,7 +36,9 @@ from openviking.session.failure_gate import (
 )
 from openviking.session.failure_gate_wiring import (
     build_commit_delivery,
+    build_diagnose_delivery,
     commit_id_for_archive,
+    diagnose_coordinator_request,
     latest_native_aig_revision,
     maybe_deliver_commit_failure_gate,
     session_frozen_view_builder,
@@ -399,3 +404,83 @@ def test_phase2_seam_invokes_the_commit_gate(
     session._run_post_extraction_causal_seam("task-seam-1", archive_uri)
     assert seen == [("task-seam-1", "archive_001")]
     assert not (root / "failure-gate").exists()
+
+
+def _diagnose_document(*, source_digest: str = "ab" * 32):
+    return coordinator_diagnose_request_document(
+        commit_id=COMMIT,
+        session_id=SESSION,
+        task_id=TASK,
+        source_digest=source_digest,
+        principal_labels=("user:default",),
+    )
+
+
+def test_diagnose_delivery_uses_request_ids_and_session_products(
+    tmp_path: Path,
+) -> None:
+    revision = _seed_native(tmp_path)
+    document = _diagnose_document(source_digest="cd" * 32)
+    parsed = read_coordinator_diagnose_request(document)
+    session = _session(
+        tmp_path,
+        outcome_contract=_contract(TASK),
+        outcome_evaluator_results=(_signal("pass"),),
+    )
+    delivery = build_diagnose_delivery(
+        session, revision, parsed, session_dir=tmp_path
+    )
+    assert delivery.trigger == TRIGGER_DIAGNOSE
+    assert delivery.commit_id == COMMIT
+    assert delivery.session_id == SESSION
+    assert delivery.task_id == TASK
+    assert delivery.source_digest == "cd" * 32
+    assert delivery.principal_labels == ("user:default",)
+    assert delivery.auto_remediate is False
+    assert delivery.guidance_plan is None
+
+
+def test_diagnose_delivery_attaches_script_only_when_session_carries_it(
+    tmp_path: Path,
+) -> None:
+    revision = _seed_native(tmp_path)
+    document = _diagnose_document()
+    parsed = read_coordinator_diagnose_request(document)
+    plan = {
+        "applicability": {},
+        "required_capabilities": [],
+        "risk": "r",
+        "steps": [],
+        "target_role": "task_agent",
+    }
+    session = _session(
+        tmp_path,
+        outcome_contract=_contract(TASK),
+        failure_gate_remediation={
+            "anchor_block_id": "b-2",
+            "guidance_plan": plan,
+            "catalog": {"candidates": []},
+        },
+    )
+    delivery = build_diagnose_delivery(
+        session, revision, parsed, session_dir=tmp_path
+    )
+    assert delivery.auto_remediate is True
+    assert delivery.anchor_block_id == "b-2"
+    assert delivery.guidance_plan == plan
+    assert delivery.catalog == {"candidates": []}
+
+
+def test_diagnose_coordinator_request_replays_the_same_event(tmp_path: Path) -> None:
+    _seed_native(tmp_path)
+    document = _diagnose_document()
+    session = _session(
+        tmp_path,
+        outcome_contract=_contract(TASK),
+        outcome_evaluator_results=(_signal("pass"),),
+    )
+    first = diagnose_coordinator_request(session, document)
+    second = diagnose_coordinator_request(session, document)
+    assert first.coordinator_event == second.coordinator_event
+    assert second.deduplicated is True
+    assert first.trigger == TRIGGER_DIAGNOSE

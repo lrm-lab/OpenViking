@@ -13,7 +13,11 @@ from openviking.server.identity import RequestContext, Role
 from openviking.session.ao_ledger import AOLedger
 from openviking.session.influence_projection import ProjectionRegistry
 from openviking.session.influence_view import PURPOSE_POST_RUN_INDEX, ViewSupersedeIndex
-from openviking.session.session_acl import session_acl_callback, session_owner_label
+from openviking.session.session_acl import (
+    session_acl_callback,
+    session_owner_label,
+    session_stored_owner_label,
+)
 from openviking.session.trajectory_index_hook import (
     PROJECTIONS_FILENAME,
     VIEWS_FILENAME,
@@ -90,6 +94,20 @@ def test_owner_label_missing_sources_raise() -> None:
     session = _session(uri="viking://agent/skills")
     with pytest.raises(ValueError, match="owner"):
         session_owner_label(session)
+
+
+def test_stored_owner_ignores_caller_ctx() -> None:
+    session = _session(
+        user_id="alice",
+        meta_user_id="from-meta",
+        uri="viking://user/from-uri/sessions/sess-acl",
+    )
+    assert session_owner_label(session) == "user:alice"
+    assert session_stored_owner_label(session) == "user:from-meta"
+    uri_only = _session(user_id="alice", uri="viking://user/from-uri/sessions/sess-acl")
+    assert session_stored_owner_label(uri_only) == "user:from-uri"
+    with pytest.raises(ValueError, match="owner"):
+        session_stored_owner_label(_session(user_id="alice"))
 
 
 def test_callback_rejects_a_different_session_id() -> None:

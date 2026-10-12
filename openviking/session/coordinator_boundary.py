@@ -46,6 +46,9 @@ ACTION_ADVICE = "diagnostic_advice"
 ACTION_DISPATCHED = "dispatched"
 ACTION_BLOCKED = "blocked_pre_execution"
 INTENT_DIAGNOSE = "diagnose"
+# Closed kind set for the diagnose HTTP face. session_acl issues ``user:{id}``
+# only. Group, role, and wildcard labels default-deny.
+COORDINATOR_ALLOWED_LABEL_KINDS = frozenset({"user"})
 
 _DOCUMENT_KINDS = frozenset({KIND_DIAGNOSE_REQUEST, KIND_FAILURE_GATE_EVENT})
 _TRIGGERS = frozenset({TRIGGER_COMMIT, TRIGGER_DIAGNOSE})
@@ -208,6 +211,22 @@ def read_coordinator_diagnose_request(payload: Mapping[str, Any]) -> Coordinator
     return parsed
 
 
+def coordinator_boundary_labels(value: Any) -> frozenset[str]:
+    """Return labels this boundary accepts. Unknown kinds default-deny.
+
+    ``session_acl`` issues ``user:{user_id}``. ``user:*`` is a storage
+    wildcard, not an owner label, and is refused.
+    """
+    try:
+        labels = require_label_set(value, code="acl_denied")
+    except ForkOverlayError as exc:
+        raise ProtocolContractError(exc.code) from exc
+    kept = frozenset(item for item in labels if _is_boundary_label(item))
+    if not kept:
+        raise ProtocolContractError("acl_denied")
+    return kept
+
+
 def _read_request(body: Mapping[str, Any], digest: str) -> CoordinatorDiagnoseRequest:
     intent = body.get("intent")
     if intent != INTENT_DIAGNOSE:
@@ -242,6 +261,13 @@ def _read_event(body: Mapping[str, Any], digest: str) -> CoordinatorFailureGateE
         task_id=_require_id(body.get("task_id"), "task_id"),
         trigger=_require_choice(body.get("trigger"), "trigger", _TRIGGERS),
     )
+
+
+def _is_boundary_label(label: str) -> bool:
+    kind, separator, rest = label.partition(":")
+    if not separator or kind not in COORDINATOR_ALLOWED_LABEL_KINDS:
+        return False
+    return bool(rest) and "*" not in rest
 
 
 def _collect_labels(value: Any) -> list[str]:

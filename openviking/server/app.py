@@ -37,6 +37,7 @@ from openviking.server.routers import (
     bot_studio_router,
     compile_router,
     console_router,
+    coordinator_router,
     content_router,
     debug_router,
     filesystem_router,
@@ -597,6 +598,7 @@ def create_app(
     app.include_router(admin_router)
     app.include_router(agent_evolution_router)
     app.include_router(compile_router)
+    app.include_router(coordinator_router)
     app.include_router(resources_router)
     app.include_router(filesystem_router)
     app.include_router(content_router)
