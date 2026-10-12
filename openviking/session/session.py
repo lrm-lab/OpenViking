@@ -1941,14 +1941,17 @@ class Session:
             return {"contexts": contexts, "session_skills": skills}
         return contexts
 
-    def _run_post_extraction_causal_seam(self, task_id: str) -> None:
-        """Phase 2 trajectory index and optional diagnosis callback.
+    def _run_post_extraction_causal_seam(
+        self, task_id: str, archive_uri: str = ""
+    ) -> None:
+        """Phase 2 trajectory index, failure gate, and optional diagnosis.
 
-        No provider and no provider factory means the hook is not called:
-        Phase 1 already froze the fallback revision, and another provider-less
-        build would spend the trajectory-index budget without changing that
-        view. No sink means briefs are not read. Failures are logged; Phase 2
-        still writes ``.done``.
+        No provider and no provider factory means the index hook is not
+        called: Phase 1 already froze the fallback revision, and another
+        provider-less build would spend the trajectory-index budget without
+        changing that view. The failure gate runs after that index so a
+        frozen native revision is on disk. No sink means briefs are not
+        read. Failures are logged; Phase 2 still writes ``.done``.
         """
         try:
             provider = self._extraction_provider
@@ -1960,6 +1963,16 @@ class Session:
                     extraction_provider=provider,
                     extraction_provider_factory=factory,
                 )
+            from openviking.session.failure_gate_wiring import (
+                commit_id_for_archive,
+                maybe_deliver_commit_failure_gate,
+            )
+
+            maybe_deliver_commit_failure_gate(
+                self,
+                task_id=task_id,
+                commit_id=commit_id_for_archive(archive_uri, task_id),
+            )
             sink = self._diagnosis_sink
             if sink is None:
                 return
@@ -2321,7 +2334,7 @@ class Session:
                                 len(extracted_skill_results),
                             )
                         get_current_telemetry().set("memory.extracted", total_extracted)
-                        self._run_post_extraction_causal_seam(task_id)
+                        self._run_post_extraction_causal_seam(task_id, archive_uri)
                     else:
                         if self._session_compressor:
                             logger.info(

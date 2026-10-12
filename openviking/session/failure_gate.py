@@ -10,6 +10,11 @@ decide. Only ``confirmed_failure`` continues through ``ForkPrecedentService``,
 
 The Coforge worker is not called. P12 connects that worker. This module
 does not route group chat and does not open a network connection.
+
+Commit-path wiring (``failure_gate_wiring``) sets ``auto_remediate=False``.
+Confirmed failure then records the outcome and stops: no Fork, Guidance, or
+child run. Diagnose and an explicit remediation script keep the fail-closed
+dispatch gates.
 """
 
 from __future__ import annotations
@@ -118,7 +123,11 @@ class ConstructionRequest:
 
 @dataclass(frozen=True)
 class FailureGateDelivery:
-    """One commit or diagnose delivery. The remediation script is optional."""
+    """One commit or diagnose delivery. The remediation script is optional.
+
+    ``auto_remediate`` defaults to True. Commit-path wiring sets it False so
+    a confirmed failure records the outcome and does not dispatch.
+    """
 
     trigger: str
     commit_id: str
@@ -140,6 +149,7 @@ class FailureGateDelivery:
     dispatch_steps: tuple[Mapping[str, Any], ...] = ()
     dispositions: tuple[Mapping[str, Any], ...] = ()
     diagnose_request_hash: str | None = None
+    auto_remediate: bool = True
 
 
 @dataclass(frozen=True)
@@ -393,8 +403,30 @@ class FailureGateOrchestrator:
             reason=adjudication.reason,
         )
         if adjudication.decision == DECISION_CONFIRMED_FAILURE:
-            return self._remediate(
-                delivery, run_id, binding, adjudication, evidence, kinds
+            if delivery.auto_remediate:
+                return self._remediate(
+                    delivery, run_id, binding, adjudication, evidence, kinds
+                )
+            action = ACTION_RETAINED
+            self._audit(
+                kinds,
+                action,
+                delivery,
+                run_id,
+                decision=adjudication.decision,
+                reason=adjudication.reason,
+            )
+            return self._finish(
+                delivery,
+                run_id,
+                binding,
+                adjudication,
+                action=action,
+                blocked=False,
+                fork_node_id=None,
+                guidance_content_hash=None,
+                child_run_id=None,
+                kinds=kinds,
             )
         if adjudication.decision == DECISION_SUCCESS:
             action = ACTION_RETAINED
@@ -924,6 +956,7 @@ def _fingerprint(delivery: FailureGateDelivery) -> str:
     body = {
         "anchor_block_id": delivery.anchor_block_id,
         "assessment_body": dict(delivery.assessment_body),
+        "auto_remediate": delivery.auto_remediate,
         "branch_steps": [dict(step) for step in delivery.branch_steps],
         "catalog": None if delivery.catalog is None else dict(delivery.catalog),
         "commit_id": delivery.commit_id,
