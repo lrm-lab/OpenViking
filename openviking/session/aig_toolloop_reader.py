@@ -48,6 +48,7 @@ from openviking.session.aig_tool_surface import (
 )
 from openviking.session.ao_ledger import AORecord
 from openviking.session.influence_view import AigNativeViewRevision
+from openviking.session.outcome_signal import closed_attribution_mode
 from openviking.session.paper_graph_compile import (
     SIDECAR_KIND,
     PaperCompileError,
@@ -62,6 +63,26 @@ READER_SYSTEM_PROMPT = (
     "\n输出（严格 JSON）：{responsible_agent, decisive_ao_refs, reason, critical_block_id, "
     "unresolved_areas: [..]}。图是冻结的，你没有任何编辑工具。"
 )
+
+READER_SUCCESS_PROMPT = (
+    "输入：冻结的影响图（get_story/get_graph）+ 只读日志工具。\n流程：从 conclusion 出发，沿入向继承边逐条回溯，寻找关键贡献节点。"
+    "对每条边：读 effect 注记 → 用 read_step/read_step_range 查原始 AO 行 → 仅当日志确认\"当前节点的输出确实呈现该边 "
+    "effect 所述的下游成功贡献\"时，才把责任转移到边的源节点；否则停在此节点。\n终止后：用所停节点的 step_refs 解析出归因对象与决定性 AO；关键块 = 归因所在节点。"
+    "\n输出（严格 JSON）：{responsible_agent, decisive_ao_refs, reason, critical_block_id, "
+    "unresolved_areas: [..]}。图是冻结的，你没有任何编辑工具。"
+)
+
+READER_OUTPUT_SCHEMA = (
+    "{responsible_agent, decisive_ao_refs, reason, critical_block_id, unresolved_areas: [..]}"
+)
+
+
+def reader_prompt_for_mode(mode: str | None) -> str:
+    """Fail-closed: None or an unknown mode keeps the fail narrative."""
+    if closed_attribution_mode(mode) == "success":
+        return READER_SUCCESS_PROMPT
+    return READER_SYSTEM_PROMPT
+
 
 READER_VERBS = frozenset(
     {
@@ -397,6 +418,7 @@ def run_reader(
     sidecar_path: Path | None = None,
     session_id: str | None = None,
     max_calls: int = DEFAULT_READER_CALLS,
+    mode: str = "fail",
 ) -> ReaderNavigationResult:
     """Navigate, then freeze the report on the existing reader chain.
 
@@ -417,7 +439,7 @@ def run_reader(
     exhausted = False
     while tool_calls < max_calls:
         turn = ReaderTurn(
-            system_prompt=READER_SYSTEM_PROMPT,
+            system_prompt=reader_prompt_for_mode(mode),
             tools=reader_catalog(),
             graph=graph,
             history=tuple(history),

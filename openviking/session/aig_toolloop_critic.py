@@ -16,6 +16,7 @@ from typing import Any, Protocol
 
 from openviking.session.aig_native_protocol import TOOLLOOP_BUILD_VERBS
 from openviking.session.aig_tool_surface import TOOL_CATALOG, AigToolSurface, ToolSurfaceError
+from openviking.session.outcome_signal import closed_attribution_mode
 from openviking.session.paper_graph_phi import PaperViolation
 
 CRITIC_SYSTEM_PROMPT = (
@@ -25,6 +26,21 @@ CRITIC_SYSTEM_PROMPT = (
     "[{object_id, kind: semantic|granularity, severity: high|low, evidence_ao_refs: [..], note}]；"
     "无违规输出空数组。\n你没有编辑工具。不要臆造日志里不存在的内容。"
 )
+
+CRITIC_SUCCESS_PROMPT = (
+    "输入：候选图（get_graph 可再取）+ 服务端 Φ(G) 结构违规清单（已程序化算出，你不必复查结构，只补充语义判断）。\n你的任务（对照日志，用你的只读工具核验）：\n1) "
+    "每个节点的 summary/input/output 是否忠实于其 step_refs 引用的 AO 行原文；\n2) 每条〈inherited, "
+    "effect〉注记是否成立（下游成功确实源于该复用、复用关系确实存在）；\n3) 粒度是否合理（节点边界是否割裂/混合了不同行动）。\n输出（严格 JSON）：violations: "
+    "[{object_id, kind: semantic|granularity, severity: high|low, evidence_ao_refs: [..], note}]；"
+    "无违规输出空数组。\n你没有编辑工具。不要臆造日志里不存在的内容。"
+)
+
+
+def critic_prompt_for_mode(mode: str | None) -> str:
+    """Fail-closed: None or an unknown mode keeps the fail narrative."""
+    if closed_attribution_mode(mode) == "success":
+        return CRITIC_SUCCESS_PROMPT
+    return CRITIC_SYSTEM_PROMPT
 
 CRITIC_VERBS = frozenset(
     {
@@ -117,6 +133,8 @@ def audit_semantics(
     surface: AigToolSurface,
     structural: Sequence[PaperViolation],
     provider: CriticProvider,
+    *,
+    mode: str = "fail",
 ) -> tuple[PaperViolation, ...]:
     """One provider call. The returned tuple is the semantic violation set."""
     if not isinstance(surface, AigToolSurface):
@@ -133,7 +151,7 @@ def audit_semantics(
         if isinstance(block, Mapping) and isinstance(block.get("block_id"), str):
             block_ids.add(block["block_id"])
     turn = CriticTurn(
-        system_prompt=CRITIC_SYSTEM_PROMPT,
+        system_prompt=critic_prompt_for_mode(mode),
         tools=critic_catalog(),
         draft=draft,
         structural_violations=tuple(item.to_dict() for item in structural),

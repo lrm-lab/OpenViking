@@ -17,6 +17,7 @@ from typing import Any, Protocol
 
 from openviking.session.aig_native_protocol import TOOLLOOP_BUILD_VERBS
 from openviking.session.aig_tool_surface import TOOL_CATALOG, AigToolSurface, ToolSurfaceError
+from openviking.session.outcome_signal import closed_attribution_mode
 from openviking.session.paper_graph_phi import PaperViolation
 
 REFINER_SYSTEM_PROMPT = """输入：当前图 + 违规清单。你持构建工具（除 submit 外全部动词）与只读工具。
@@ -26,6 +27,21 @@ REFINER_SYSTEM_PROMPT = """输入：当前图 + 违规清单。你持构建工�
 - 结构违规（缺根/缺汇/不连通）允许 add_block 补齐——这是"解决违规"，不是重构。
 - 确实无法解决的违规，输出 {violation_id, action: "unresolvable", reason}，不要盲改。
 停止条件：所有违规解决或声明 unresolvable 后交回；轮数由服务端计（≤3）。"""
+
+REFINER_SUCCESS_PROMPT = """输入：当前图 + 违规清单。你持构建工具（除 submit 外全部动词）与只读工具。本轮在成功轨迹上修订，判据仍由违规清单驱动。
+规则：
+- 每次编辑必须声明它解决的 violation_id；只动该违规涉及的对象（服务端校验）。
+- 最小化编辑：能改字段就不删块，能删注记就不删块。
+- 结构违规（缺根/缺汇/不连通）允许 add_block 补齐——这是"解决违规"，不是重构。
+- 确实无法解决的违规，输出 {violation_id, action: "unresolvable", reason}，不要盲改。
+停止条件：所有违规解决或声明 unresolvable 后交回；轮数由服务端计（≤3）。"""
+
+
+def refiner_prompt_for_mode(mode: str | None) -> str:
+    """Fail-closed: None or an unknown mode keeps the fail narrative."""
+    if closed_attribution_mode(mode) == "success":
+        return REFINER_SUCCESS_PROMPT
+    return REFINER_SYSTEM_PROMPT
 
 REFINER_READ_VERBS = frozenset({"get_graph", "read_step", "read_step_range"})
 REFINER_EDIT_VERBS = frozenset(TOOLLOOP_BUILD_VERBS - {"submit"})
@@ -189,6 +205,7 @@ def run_refiner_round(
     provider: RefinerProvider,
     *,
     max_calls: int = DEFAULT_REFINER_CALLS,
+    mode: str = "fail",
 ) -> RefinerRound:
     """Call the provider until it is done, or the inner call budget runs out."""
     if not isinstance(session, RefinerSession) or not callable(provider):
@@ -200,7 +217,7 @@ def run_refiner_round(
     declared: list[dict[str, str]] = []
     for _ in range(max_calls):
         turn = RefinerTurn(
-            system_prompt=REFINER_SYSTEM_PROMPT,
+            system_prompt=refiner_prompt_for_mode(mode),
             tools=session.catalog(),
             draft=session._surface.get_graph(),
             violations=tuple(item.turn_dict() for item in session._by_id.values()),

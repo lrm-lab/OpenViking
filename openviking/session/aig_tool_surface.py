@@ -39,6 +39,11 @@ from openviking.session.append_only import (
     read_jsonl_objects,
     write_exclusive,
 )
+from openviking.session.outcome_signal import (
+    OutcomeSignal,
+    outcome_fingerprint_body,
+    outcome_overview,
+)
 
 TOOLLOOP_RUNS_DIRNAME = "toolloop-runs"
 META_FILENAME = "meta.json"
@@ -138,6 +143,7 @@ class AoSnapshot:
     watermark: str
     question: str | None = None
     agents: tuple[SnapshotAgent, ...] = ()
+    outcome: OutcomeSignal | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.watermark, str) or not self.watermark.strip():
@@ -170,6 +176,8 @@ class AoSnapshot:
                 raise ToolSurfaceError("invalid_snapshot")
             if not isinstance(agent.system_prompt, str):
                 raise ToolSurfaceError("invalid_snapshot")
+        if self.outcome is not None and not isinstance(self.outcome, OutcomeSignal):
+            raise ToolSurfaceError("invalid_snapshot")
 
 
 @dataclass(frozen=True)
@@ -188,8 +196,15 @@ class _Edge:
     link_kind: str
 
 
-def snapshot_fingerprint(records: Sequence[AORecord]) -> str:
-    """SHA-256 of the row bodies this draft is bound to."""
+def snapshot_fingerprint(
+    records: Sequence[AORecord],
+    outcome: OutcomeSignal | None = None,
+) -> str:
+    """SHA-256 of the row bodies this draft is bound to, plus outcome when set.
+
+    ``outcome=None`` hashes the same row list as before so existing run
+    directories stay matched. A different outcome is a different snapshot.
+    """
     rows = [
         {
             "action": record.action,
@@ -205,7 +220,9 @@ def snapshot_fingerprint(records: Sequence[AORecord]) -> str:
         }
         for index, record in enumerate(records)
     ]
-    return hashlib.sha256(canonical_dumps(rows).encode("utf-8")).hexdigest()
+    body = outcome_fingerprint_body(outcome)
+    payload: Any = rows if body is None else {"outcome": body, "rows": rows}
+    return hashlib.sha256(canonical_dumps(payload).encode("utf-8")).hexdigest()
 
 
 def replay_toolloop_draft(root: Path, run_id: str, snapshot: AoSnapshot) -> dict[str, Any]:
@@ -399,7 +416,7 @@ class AigToolSurface:
         self._watermark = snapshot.watermark
         self._question = _question_text(snapshot.question)
         self._agents = snapshot.agents
-        self._fingerprint = snapshot_fingerprint(self._records)
+        self._fingerprint = snapshot_fingerprint(self._records, snapshot.outcome)
         self._run_dir = _run_directory(root, run_id)
         self._run_id = run_id
         self._meta_path = self._run_dir / META_FILENAME
@@ -464,7 +481,10 @@ class AigToolSurface:
                 arguments = {}
             if not isinstance(arguments, Mapping):
                 raise ToolSurfaceError("invalid_args")
-            return self._handlers[verb](dict(arguments))
+            copied = dict(arguments)
+            if verb in TOOLLOOP_BUILD_VERBS:
+                _reject_outcome_mutation(copied)
+            return self._handlers[verb](copied)
 
     def get_overview(self) -> dict[str, Any]:
         """Return row count plus each row's participant, segment, and size."""
@@ -588,9 +608,11 @@ class AigToolSurface:
                 arguments = {}
             if not isinstance(arguments, Mapping):
                 raise ToolSurfaceError("invalid_args")
+            copied = dict(arguments)
+            _reject_outcome_mutation(copied)
             self._refine_open = True
             try:
-                return self._handlers[verb](dict(arguments))
+                return self._handlers[verb](copied)
             finally:
                 self._refine_open = False
 
@@ -713,7 +735,14 @@ class AigToolSurface:
                     "size": len(_step_text(index, record)),
                 }
             )
-        return {"row_count": len(self._records), "watermark": self._watermark, "rows": rows}
+        payload: dict[str, Any] = {
+            "row_count": len(self._records),
+            "watermark": self._watermark,
+            "rows": rows,
+        }
+        if self._snapshot.outcome is not None:
+            payload["outcome"] = outcome_overview(self._snapshot.outcome)
+        return payload
 
     def _read_full_log(self, arguments: Mapping[str, Any]) -> str:
         _exact_args(arguments, frozenset(), frozenset())
@@ -1203,6 +1232,15 @@ class AigToolSurface:
             os.chmod(self._run_dir, _READONLY_DIR)
         except OSError:
             return
+
+
+def _reject_outcome_mutation(arguments: Mapping[str, Any]) -> None:
+    """Outcome is a frozen snapshot fact. No T_build verb may write it."""
+    if "outcome" in arguments:
+        raise ToolSurfaceError("outcome_readonly")
+    fields = arguments.get("fields")
+    if isinstance(fields, Mapping) and "outcome" in fields:
+        raise ToolSurfaceError("outcome_readonly")
 
 
 def _run_directory(root: Path, run_id: str) -> Path:

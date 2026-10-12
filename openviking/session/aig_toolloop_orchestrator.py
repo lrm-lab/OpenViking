@@ -74,6 +74,7 @@ def run_critic_refiner(
     run_id: str,
     frozen_at: str,
     construction_run: AigConstructionRun | None = None,
+    mode: str = "fail",
 ) -> ToolloopCycleResult:
     """Audit the submitted draft, refine up to three rounds, then compile or fall back."""
     if not isinstance(surface, AigToolSurface) or not surface.submitted:
@@ -93,7 +94,7 @@ def run_critic_refiner(
     if not isinstance(run, AigConstructionRun) or run.run_id != run_id:
         raise OrchestratorError("run_mismatch")
     trajectory = _Trajectory(_trajectory_path(root, run_id), run_id)
-    violations = _audit(surface, critic, trajectory, 0)
+    violations = _audit(surface, critic, trajectory, 0, mode=mode)
     if not violations:
         return _freeze(
             surface,
@@ -113,7 +114,7 @@ def run_critic_refiner(
         rounds = round_index
         run.critique(run.session_for("critic"), [item.to_dict() for item in violations])
         session = RefinerSession(surface, violations)
-        refined = run_refiner_round(session, refiner)
+        refined = run_refiner_round(session, refiner, mode=mode)
         run.refine(run.session_for("refiner"), surface.get_graph())
         trajectory.append(
             "refine_round",
@@ -127,7 +128,7 @@ def run_critic_refiner(
         current_ids = {item.violation_id for item in violations}
         if current_ids and current_ids <= declared and not refined.edits:
             break
-        violations = _audit(surface, critic, trajectory, round_index)
+        violations = _audit(surface, critic, trajectory, round_index, mode=mode)
         if not violations:
             break
     if not violations:
@@ -188,9 +189,11 @@ def _audit(
     critic: CriticProvider,
     trajectory: _Trajectory,
     round_index: int,
+    *,
+    mode: str = "fail",
 ) -> tuple[PaperViolation, ...]:
     report = evaluate_phi(surface.get_graph())
-    semantic = audit_semantics(surface, report.violations, critic)
+    semantic = audit_semantics(surface, report.violations, critic, mode=mode)
     trajectory.append(
         "phi",
         round_index,
