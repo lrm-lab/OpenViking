@@ -541,6 +541,14 @@ def _fields_json(fields: Mapping[str, Any]) -> dict[str, Any]:
     return payload
 
 
+_GAP_LINK_HINT = (
+    "rows between these blocks are not covered by any block; a link across "
+    "them must be a skip attribution — use add_skip_attribution "
+    "(inherited/effect cite evidence at both ends), or cover the rows with "
+    "a block first"
+)
+
+
 def _ordered_ids(blocks: Mapping[str, _Block]) -> list[str]:
     ordered = sorted(
         blocks.values(),
@@ -549,14 +557,123 @@ def _ordered_ids(blocks: Mapping[str, _Block]) -> list[str]:
     return [block.block_id for block in ordered]
 
 
+def _block_span(block: _Block) -> tuple[int, int]:
+    refs = block.fields["step_refs"]
+    return min(refs), max(refs)
+
+
 def _is_adjacent(blocks: Mapping[str, _Block], source_id: str, target_id: str) -> bool:
     ids = _ordered_ids(blocks)
-    return ids.index(target_id) == ids.index(source_id) + 1
+    if ids.index(target_id) != ids.index(source_id) + 1:
+        return False
+    _source_start, source_end = _block_span(blocks[source_id])
+    target_start, _target_end = _block_span(blocks[target_id])
+    return source_end + 1 == target_start
 
 
-def _validate(blocks: Mapping[str, _Block], edges: Sequence[_Edge], row_count: int) -> None:
+def _skipped_rows(
+    blocks: Mapping[str, _Block], source_id: str, target_id: str
+) -> list[int]:
+    covered: set[int] = set()
+    for block in blocks.values():
+        start, end = _block_span(block)
+        covered.update(range(start, end + 1))
+    _source_start, source_end = _block_span(blocks[source_id])
+    target_start, _target_end = _block_span(blocks[target_id])
+    return [row for row in range(source_end + 1, target_start) if row not in covered]
+
+
+def _gap_link_detail(
+    blocks: Mapping[str, _Block], source_id: str, target_id: str
+) -> dict[str, Any] | None:
+    skipped = _skipped_rows(blocks, source_id, target_id)
+    if not skipped:
+        return None
+    return {
+        "source_id": source_id,
+        "target_id": target_id,
+        "skipped_rows": skipped,
+        "hint": _GAP_LINK_HINT,
+    }
+
+
+def _grouped_row_values(
+    records: Sequence[AORecord],
+    refs: Sequence[int],
+    reader: Any,
+) -> dict[str, list[int]]:
+    groups: dict[str, list[int]] = {}
+    for index in refs:
+        groups.setdefault(reader(records[index]), []).append(index)
+    return groups
+
+
+def _require_uniform_rows(
+    block_id: str,
+    records: Sequence[AORecord],
+    refs: Sequence[int],
+    reader: Any,
+    code: str,
+    values_key: str,
+) -> str:
+    groups = _grouped_row_values(records, refs, reader)
+    values = list(groups)
+    if len(values) != 1 or not values[0]:
+        raise ToolSurfaceError(code, {"block_id": block_id, values_key: groups})
+    return values[0]
+
+
+def _validate_block_row_uniformity(block: _Block, records: Sequence[AORecord]) -> None:
+    refs = block.fields["step_refs"]
+    participant = _require_uniform_rows(
+        block.block_id,
+        records,
+        refs,
+        lambda record: _lookup(record, _PARTICIPANT_KEYS),
+        "participant_mixed_rows",
+        "participants",
+    )
+    _require_uniform_rows(
+        block.block_id,
+        records,
+        refs,
+        lambda record: _lookup(record, _SEGMENT_KEYS),
+        "segment_mixed_rows",
+        "segments",
+    )
+    _require_uniform_rows(
+        block.block_id,
+        records,
+        refs,
+        lambda record: record.session_id,
+        "session_mixed_rows",
+        "sessions",
+    )
+    if block.kind in {"agent", "orchestrator"} and block.fields["agent_name"] != participant:
+        raise ToolSurfaceError(
+            "participant_mismatch",
+            {
+                "block_id": block.block_id,
+                "expected": participant,
+                "got": block.fields["agent_name"],
+                "repairs": [
+                    {
+                        "apply_with": "modify_block",
+                        "block_id": block.block_id,
+                        "fields": {"agent_name": participant},
+                    }
+                ],
+                "hint": "agent_name must equal the rows' participant exactly",
+            },
+        )
+
+
+def _validate(
+    blocks: Mapping[str, _Block], edges: Sequence[_Edge], records: Sequence[AORecord]
+) -> None:
     tasks = 0
     conclusions = 0
+    row_count = len(records)
     spans: list[tuple[int, int, str, str]] = []
     for block in blocks.values():
         if block.kind not in _PAPER_KIND_SET:
@@ -622,6 +739,8 @@ def _validate(blocks: Mapping[str, _Block], edges: Sequence[_Edge], row_count: i
                 "shared_rows": list(range(shared_start, shared_end + 1)),
             },
         )
+    for block in blocks.values():
+        _validate_block_row_uniformity(block, records)
     seen: set[tuple[str, str]] = set()
     for edge in edges:
         if edge.source_id not in blocks or edge.target_id not in blocks:
@@ -640,7 +759,10 @@ def _validate(blocks: Mapping[str, _Block], edges: Sequence[_Edge], row_count: i
             else _LINK_KIND_SKIP
         )
         if edge.link_kind != expected:
-            raise ToolSurfaceError("link_kind_conflict")
+            raise ToolSurfaceError(
+                "link_kind_conflict",
+                _gap_link_detail(blocks, edge.source_id, edge.target_id),
+            )
 
 
 class AigToolSurface:
@@ -957,7 +1079,7 @@ class AigToolSurface:
         if verb == "submit":
             if dict(args) != {}:
                 raise ToolSurfaceError("stored_record_invalid")
-            _validate(blocks, edges, len(self._records))
+            _validate(blocks, edges, self._records)
             return blocks, edges, True
         raise ToolSurfaceError("stored_record_invalid")
 
@@ -1221,7 +1343,7 @@ class AigToolSurface:
                     expected,
                 )
             )
-        _validate(staged, new_edges, len(self._records))
+        _validate(staged, new_edges, self._records)
         return staged, new_edges
 
     def _add_inheritance_note(self, arguments: Mapping[str, Any]) -> dict[str, str]:
@@ -1266,7 +1388,7 @@ class AigToolSurface:
         )
         new_edges = [*edges, edge]
         copied = dict(blocks)
-        _validate(copied, new_edges, len(self._records))
+        _validate(copied, new_edges, self._records)
         return copied, new_edges
 
     def _modify_block(self, arguments: Mapping[str, Any]) -> dict[str, str]:
@@ -1305,7 +1427,7 @@ class AigToolSurface:
         staged = dict(blocks)
         staged[block_id] = _Block(block_id, block.kind, normalized)
         new_edges = list(edges)
-        _validate(staged, new_edges, len(self._records))
+        _validate(staged, new_edges, self._records)
         return staged, new_edges
 
     def _delete_block(self, arguments: Mapping[str, Any]) -> dict[str, str]:
@@ -1332,7 +1454,7 @@ class AigToolSurface:
             for edge in edges
             if edge.source_id != block_id and edge.target_id != block_id
         ]
-        _validate(staged, new_edges, len(self._records))
+        _validate(staged, new_edges, self._records)
         return staged, new_edges
 
     def _delete_inheritance_note(self, arguments: Mapping[str, Any]) -> dict[str, str]:
@@ -1375,7 +1497,7 @@ class AigToolSurface:
             if not (edge.source_id == source and edge.target_id == target)
         ]
         copied = dict(blocks)
-        _validate(copied, new_edges, len(self._records))
+        _validate(copied, new_edges, self._records)
         return copied, new_edges
 
     def _mark_defect_recorded(self, arguments: Mapping[str, Any]) -> dict[str, str]:
@@ -1406,13 +1528,13 @@ class AigToolSurface:
         staged = dict(blocks)
         staged[block_id] = _Block(block_id, block.kind, fields)
         new_edges = list(edges)
-        _validate(staged, new_edges, len(self._records))
+        _validate(staged, new_edges, self._records)
         return staged, new_edges
 
     def _submit(self, arguments: Mapping[str, Any]) -> dict[str, bool]:
         self._require_open()
         _require_verb_args("submit", arguments)
-        _validate(self._blocks, self._edges, len(self._records))
+        _validate(self._blocks, self._edges, self._records)
         self._commit(dict(self._blocks), list(self._edges), "submit", {}, True)
         return {"submitted": True}
 
@@ -1585,7 +1707,7 @@ def _checked_link(
         raise ToolSurfaceError("duplicate_edge")
     kind = _LINK_KIND_ADJACENT if _is_adjacent(blocks, source, target) else _LINK_KIND_SKIP
     if expected == _LINK_KIND_ADJACENT and kind != _LINK_KIND_ADJACENT:
-        raise ToolSurfaceError("not_adjacent")
+        raise ToolSurfaceError("not_adjacent", _gap_link_detail(blocks, source, target))
     if expected == _LINK_KIND_SKIP and kind != _LINK_KIND_SKIP:
         raise ToolSurfaceError("not_skip")
     if expected is not None and expected not in {_LINK_KIND_ADJACENT, _LINK_KIND_SKIP}:

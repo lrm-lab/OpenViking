@@ -177,6 +177,77 @@ def test_score_gates_schema_and_fail_lines() -> None:
     assert low_submit["budget_exhausted_rate"]["rate"] == 1.0
 
 
+def test_score_gates_dual_mode_excludes_success_without_notes() -> None:
+    """Submitted-but-unfrozen success rows (no effect_notes) are not the denominator."""
+    clean_notes = ["复用促成最终正确结果"]
+    excluded = score_gates(
+        [
+            {
+                "budget_exhausted": False,
+                "decisive_refs_in_snapshot": None,
+                "mode": "success",
+                "phi_violations_after_refine": 1,
+                "reader_schema_ok": None,
+                "submit": True,
+                "verdict": "pass",
+            },
+            {
+                "budget_exhausted": False,
+                "decisive_refs_in_snapshot": True,
+                "effect_notes": list(clean_notes),
+                "mode": "success",
+                "phi_violations_after_refine": 0,
+                "reader_schema_ok": True,
+                "submit": True,
+                "verdict": "pass",
+            },
+            {
+                "budget_exhausted": False,
+                "decisive_refs_in_snapshot": True,
+                "effect_notes": list(clean_notes),
+                "mode": "success",
+                "phi_violations_after_refine": 0,
+                "reader_schema_ok": True,
+                "submit": True,
+                "verdict": "pass",
+            },
+        ]
+    )
+    distinguish = excluded["dual_mode_distinguishable"]
+    assert distinguish["pass"] is True
+    assert distinguish["excluded_without_notes"] == 1
+    assert distinguish["sampled"] == 2
+    assert distinguish["dirty"] == 0
+
+    marked = score_gates(
+        [
+            {
+                "budget_exhausted": False,
+                "decisive_refs_in_snapshot": True,
+                "effect_notes": ["这次复用导致错误"],
+                "mode": "success",
+                "phi_violations_after_refine": 0,
+                "reader_schema_ok": True,
+                "submit": True,
+                "verdict": "pass",
+            },
+            {
+                "budget_exhausted": False,
+                "decisive_refs_in_snapshot": True,
+                "effect_notes": list(clean_notes),
+                "mode": "success",
+                "phi_violations_after_refine": 0,
+                "reader_schema_ok": True,
+                "submit": True,
+                "verdict": "pass",
+            },
+        ]
+    )
+    assert marked["dual_mode_distinguishable"]["pass"] is False
+    assert marked["dual_mode_distinguishable"]["excluded_without_notes"] == 0
+    assert marked["dual_mode_distinguishable"]["dirty"] == 1
+
+
 def test_real_materials_join_exported_jsonl(tmp_path: Path) -> None:
     record = AORecord(
         ao_id="ao-real-0",

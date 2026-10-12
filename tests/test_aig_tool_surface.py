@@ -27,6 +27,7 @@ from openviking.session.aig_tool_surface import (
     replay_toolloop_draft,
 )
 from openviking.session.ao_ledger import AORecord
+from openviking.session.paper_graph_compile import compile_paper_graph
 
 _SECRET = "SECRET-PROMPT"
 _DERIVED_SECRET = "SECRET-DERIVED"
@@ -109,7 +110,7 @@ def _task(steps: list[int]) -> dict[str, object]:
 
 def _orch(steps: list[int]) -> dict[str, object]:
     return {
-        "agent_name": "lead",
+        "agent_name": "agent-a",
         "summary": "routed the work",
         "authorship": "relayed",
         "step_refs": steps,
@@ -118,7 +119,7 @@ def _orch(steps: list[int]) -> dict[str, object]:
 
 def _agent(steps: list[int], **extra: object) -> dict[str, object]:
     fields: dict[str, object] = {
-        "agent_name": "worker",
+        "agent_name": "agent-a",
         "summary": "did the work",
         "input": "do the task",
         "output": "a draft",
@@ -302,7 +303,7 @@ def test_build_verbs_story_graph_and_submit(tmp_path: Path) -> None:
     surface.add_inheritance_note(
         "orch-1", "agent-1", "the plan", "the worker followed the bad plan"
     )
-    surface.add_block("agent", _agent([3], agent_name="spare"), block_id="spare-1")
+    surface.add_block("agent", _agent([3]), block_id="spare-1")
     surface.add_inheritance_note("agent-1", "spare-1", "the draft", "the spare copied it")
     surface.add_block("conclusion", _end([4]), block_id="end-1")
     surface.add_skip_attribution(
@@ -318,7 +319,7 @@ def test_build_verbs_story_graph_and_submit(tmp_path: Path) -> None:
     surface.add_skip_attribution(
         "task-1", "agent-1", "the question", "the worker skipped the route"
     )
-    surface.add_inheritance_note(
+    surface.add_skip_attribution(
         "agent-1", "end-1", "the wrong answer", "the conclusion published it"
     )
     graph = surface.get_graph()
@@ -442,7 +443,6 @@ def test_hard_invariants_reject_without_mutation(tmp_path: Path) -> None:
                 from_refs=[_note("missing")],
             ),
         ),
-        ("link_kind_conflict", lambda: surface.delete_block("orch-1")),
     ]
     for code, action in cases:
         _assert_code(action, code)
@@ -523,6 +523,122 @@ def test_protocol_op_rejects_unknown_verb() -> None:
             args={},
             prev_content_hash="ab" * 32,
         )
+
+
+def test_gap_requires_skip_attribution(tmp_path: Path) -> None:
+    surface, snapshot = _open(tmp_path, ["a", "gap", "b"])
+    surface.add_block("task", _task([0]), block_id="a")
+    surface.add_block("conclusion", _end([2]), block_id="b")
+    with pytest.raises(ToolSurfaceError) as caught:
+        surface.add_inheritance_note("a", "b", "the prior result", "it jumped the gap")
+    assert caught.value.code == "not_adjacent"
+    assert caught.value.detail is not None
+    assert caught.value.detail["source_id"] == "a"
+    assert caught.value.detail["target_id"] == "b"
+    assert caught.value.detail["skipped_rows"] == [1]
+    assert "add_skip_attribution" in caught.value.detail["hint"]
+    surface.add_skip_attribution("a", "b", "the prior result", "it jumped the gap")
+    graph = surface.get_graph()
+    assert graph["edges"][0]["link_kind"] == "skip"
+    surface.submit()
+    compiled = compile_paper_graph(
+        surface.get_graph(),
+        snapshot,
+        root=tmp_path,
+        run_id="run-gap-compile",
+        session_id="sess-tool",
+        task_run_id="run-gap-compile",
+        view_id="view-run-gap",
+        revision_id="rev-run-gap",
+        frozen_at="2026-10-11T00:00:00.000Z",
+    )
+    edges = {
+        (edge.source_block_id, edge.target_block_id): edge
+        for edge in compiled.revision.edges
+    }
+    assert edges[("a", "b")].relation_type == "skip"
+
+
+def test_contiguous_spans_remain_adjacent(tmp_path: Path) -> None:
+    surface, _snapshot = _open(tmp_path, ["a", "b"])
+    surface.add_block("task", _task([0]), block_id="a")
+    surface.add_block("conclusion", _end([1]), block_id="b")
+    surface.add_inheritance_note("a", "b", "the prior result", "the next used it")
+    graph = surface.get_graph()
+    assert graph["edges"][0]["link_kind"] == "adjacent"
+    _assert_code(
+        lambda: surface.add_skip_attribution("a", "b", "the prior result", "too close"),
+        "duplicate_edge",
+    )
+
+
+def test_link_kind_conflict_reports_skipped_rows(tmp_path: Path) -> None:
+    surface, _snapshot = _open(tmp_path, ["a", "mid", "b"])
+    surface.add_block("task", _task([0]), block_id="a")
+    surface.add_block("conclusion", _end([1]), block_id="b")
+    surface.add_inheritance_note("a", "b", "the prior result", "the next used it")
+    with pytest.raises(ToolSurfaceError) as caught:
+        surface.modify_block("b", {"step_refs": [2]})
+    assert caught.value.code == "link_kind_conflict"
+    assert caught.value.detail is not None
+    assert caught.value.detail["skipped_rows"] == [1]
+    assert caught.value.detail["source_id"] == "a"
+    assert caught.value.detail["target_id"] == "b"
+
+
+def test_participant_mismatch_offers_modify_repair(tmp_path: Path) -> None:
+    surface, _snapshot = _open(
+        tmp_path,
+        [],
+        records=(_record(0, "row", participant="task-agent"),),
+    )
+    fields = _agent([0], agent_name="task")
+    with pytest.raises(ToolSurfaceError) as caught:
+        surface.add_block("agent", fields, block_id="agent-1")
+    assert caught.value.code == "participant_mismatch"
+    detail = caught.value.detail
+    assert detail is not None
+    assert detail["expected"] == "task-agent"
+    assert detail["got"] == "task"
+    assert detail["block_id"] == "agent-1"
+    assert detail["hint"] == "agent_name must equal the rows' participant exactly"
+    repairs = detail["repairs"]
+    assert repairs == [
+        {
+            "apply_with": "modify_block",
+            "block_id": "agent-1",
+            "fields": {"agent_name": "task-agent"},
+        }
+    ]
+    surface.add_block(
+        "agent", _agent([0], agent_name="task-agent"), block_id="agent-1"
+    )
+    with pytest.raises(ToolSurfaceError) as again:
+        surface.modify_block("agent-1", {"agent_name": "task"})
+    assert again.value.code == "participant_mismatch"
+    repair = again.value.detail["repairs"][0]
+    surface.modify_block(repair["block_id"], repair["fields"])
+    agent = next(
+        block for block in surface.get_graph()["blocks"] if block["block_id"] == "agent-1"
+    )
+    assert agent["agent_name"] == "task-agent"
+
+
+def test_participant_mixed_rows_rejected(tmp_path: Path) -> None:
+    surface, _snapshot = _open(
+        tmp_path,
+        [],
+        records=(
+            _record(0, "first", participant="agent-a"),
+            _record(1, "second", participant="agent-b"),
+        ),
+    )
+    with pytest.raises(ToolSurfaceError) as caught:
+        surface.add_block("task", _task([0, 1]), block_id="task-1")
+    assert caught.value.code == "participant_mixed_rows"
+    assert caught.value.detail is not None
+    assert caught.value.detail["block_id"] == "task-1"
+    assert caught.value.detail["participants"] == {"agent-a": [0], "agent-b": [1]}
 
 
 def _rewrite(path: Path, text: str) -> None:

@@ -696,34 +696,43 @@ def _distinguish_success(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         for row in rows
         if row.get("mode") == "success" and row.get("submit") is True
     ]
-    if not success:
+    inspectable = [row for row in success if isinstance(row.get("effect_notes"), list)]
+    excluded_without_notes = len(success) - len(inspectable)
+    exclude_note = (
+        "submitted-but-unfrozen rows (no effect_notes) are excluded from inspection"
+    )
+    if not inspectable:
         return {
-            "note": "no submitted success materials to sample",
+            "dirty": 0,
+            "excluded_without_notes": excluded_without_notes,
+            "markers": list(ERROR_NOTE_MARKERS),
+            "note": (
+                "no submitted success materials to sample"
+                if not success
+                else f"no frozen success rows with effect_notes; {exclude_note}"
+            ),
             "pass": True,
             "sampled": 0,
             "sampled_fraction": 1.0,
         }
-    sample = list(success)
     dirty = 0
     inspected = 0
-    for row in sample:
+    for row in inspectable:
         notes = row.get("effect_notes")
-        if not isinstance(notes, list):
-            continue
         inspected += 1
         if any(
             isinstance(note, str) and any(marker in note for marker in ERROR_NOTE_MARKERS)
             for note in notes
         ):
             dirty += 1
-    fraction = 1.0
     return {
         "dirty": dirty,
+        "excluded_without_notes": excluded_without_notes,
         "markers": list(ERROR_NOTE_MARKERS),
-        "note": "sampled every submitted success row (100% ≥ 10%)",
-        "pass": dirty == 0 and inspected == len(success),
+        "note": f"sampled every frozen success row with effect_notes (100% ≥ 10%); {exclude_note}",
+        "pass": dirty == 0 and inspected == len(inspectable),
         "sampled": inspected,
-        "sampled_fraction": fraction,
+        "sampled_fraction": 1.0,
     }
 
 

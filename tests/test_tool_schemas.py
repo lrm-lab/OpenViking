@@ -395,7 +395,7 @@ def test_step_refs_overlap_offers_ready_repair(tmp_path: Path) -> None:
             "kind": "agent",
             "block_id": "a",
             "fields": {
-                "agent_name": "w",
+                "agent_name": "worker",
                 "authorship": "authored",
                 "input": "i",
                 "output": "o",
