@@ -293,3 +293,40 @@ def test_cli_jobs_flag_records_setting(tmp_path: Path) -> None:
     assert code == 0
     report = json.loads(out.read_text(encoding="utf-8"))
     assert report["settings"]["jobs"] == 3
+
+
+def test_attempts_folds_any_submit_and_reports_detail(tmp_path: Path) -> None:
+    import json
+
+    from benchmark.causal_memory.aig0045_verdict_smoke import legal_builder_script
+    from openviking.session.aig_toolloop_builder import FakeToolloopProvider
+
+    seen = {"success": 0}
+
+    def factory(mode: str):
+        if mode == "success":
+            seen["success"] += 1
+            if seen["success"] == 1:
+                raise RuntimeError("first-attempt daze")
+        return FakeToolloopProvider(legal_builder_script(mode))
+
+    report = run_smoke(
+        synthetic_materials(), root=tmp_path, builder_factory=factory, attempts=2, jobs=2
+    )
+    assert report["settings"]["attempts"] == 2
+    rows = {row["run_id"]: row for row in report["materials"]}
+    success_rows = [row for row in rows.values() if row.get("mode") == "success"]
+    assert success_rows
+    crashed_attempts = 0
+    for row in success_rows:
+        assert row["submit"] is True, "one flaky attempt must not fail the material"
+        assert len(row["attempts"]) == 2
+        crashed_attempts += sum(
+            1 for item in row["attempts"] if item["submit"] is False
+        )
+    assert crashed_attempts >= 1
+    for row in rows.values():
+        assert len(row["attempts"]) == 2
+        for key in ("run_id", "submit", "verdict"):
+            assert key in row
+    assert json.dumps(report["materials"], ensure_ascii=False)

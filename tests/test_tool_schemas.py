@@ -168,7 +168,10 @@ def test_repeat_call_rejects_third_identical_without_mutating(
     assert third.repeat_count == 3
     history = provider.turns[3].history[2]
     assert history["error_code"] == "repeat_call"
-    assert history["result"]["message"] == "identical call repeated; change arguments or proceed"
+    assert history["result"]["message"] == (
+        "identical call repeated (3/5); take a different action — the run "
+        "terminates at 5 identical calls"
+    )
     assert [block["block_id"] for block in result.draft["blocks"]] == ["task-1", "end-1"]
 
 

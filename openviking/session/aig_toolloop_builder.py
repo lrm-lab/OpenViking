@@ -242,7 +242,14 @@ def run_toolloop(
                 arguments,
                 ok=False,
                 error_code=REPEAT_CALL_CODE,
-                result={"code": REPEAT_CALL_CODE, "message": _REPEAT_MESSAGE},
+                result={
+                    "code": REPEAT_CALL_CODE,
+                    "message": (
+                        f"identical call repeated ({repeat_count}/{_REPEAT_STOP}); "
+                        "take a different action — the run terminates at "
+                        f"{_REPEAT_STOP} identical calls"
+                    ),
+                },
                 elapsed_ms=0,
                 repeat_count=repeat_count,
             )

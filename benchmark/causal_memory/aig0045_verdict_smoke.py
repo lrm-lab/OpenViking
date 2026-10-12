@@ -16,7 +16,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -275,6 +275,7 @@ def run_smoke(
     builder: ToolloopProvider | None = None,
     builder_factory: Callable[[str], ToolloopProvider] | None = None,
     jobs: int = 1,
+    attempts: int = 1,
 ) -> dict[str, Any]:
     """Run every material. ``builder_factory(mode)`` is used when set.
 
@@ -282,9 +283,20 @@ def run_smoke(
     one material's exception becomes a ``driver_exception`` row instead of
     aborting the batch. A shared ``builder`` would then be called from
     several threads, so the CLI passes a per-material factory instead.
+
+    ``attempts > 1`` runs each material N times (paper-style test protocol)
+    and folds attempts into one material row: ``submit`` is any-attempt
+    submit, quality fields come from the first submitting attempt, and the
+    per-attempt outcomes ride along under ``attempts``.
     """
+    attempts = max(1, int(attempts))
+    specs: list[MaterialSpec] = []
+    for spec in materials:
+        for index in range(1, attempts + 1):
+            run_id = spec.run_id if attempts == 1 else f"{spec.run_id}-a{index}"
+            specs.append(replace(spec, run_id=run_id))
     outcomes = _run_all(
-        materials,
+        specs,
         root=root,
         max_calls=max_calls,
         max_seconds=max_seconds,
@@ -295,9 +307,36 @@ def run_smoke(
     )
     rows: list[dict[str, Any]] = []
     provider_audit: list[dict[str, Any]] = []
-    for row, extra in outcomes:
-        rows.append(row)
-        provider_audit.extend(extra)
+    if attempts == 1:
+        for row, extra in outcomes:
+            rows.append(row)
+            provider_audit.extend(extra)
+    else:
+        groups: dict[str, list[tuple[dict[str, Any], list[dict[str, Any]]]]] = {}
+        for index, outcome in enumerate(outcomes):
+            base = materials[index // attempts].run_id
+            groups.setdefault(base, []).append(outcome)
+        for spec in materials:
+            attempt_rows = groups[spec.run_id]
+            submitting = [row for row, _extra in attempt_rows if row.get("submit") is True]
+            best = dict(submitting[0] if submitting else attempt_rows[-1][0])
+            best["run_id"] = spec.run_id
+            best["submit"] = bool(submitting)
+            best["attempts"] = [
+                {
+                    "fallback_reason": row.get("fallback_reason"),
+                    "run_id": row["run_id"],
+                    "submit": row.get("submit") is True,
+                }
+                for row, _extra in attempt_rows
+            ]
+            if not submitting:
+                best["fallback_reason"] = (
+                    f"all {len(attempt_rows)} attempts failed to submit"
+                )
+            rows.append(best)
+            for _row, extra in attempt_rows:
+                provider_audit.extend(extra)
     gates = score_gates(rows)
     return {
         "gates": gates,
@@ -305,6 +344,7 @@ def run_smoke(
         "provider_audit": provider_audit,
         "schema": SCHEMA,
         "settings": {
+            "attempts": attempts,
             "dry_run": dry_run,
             "jobs": jobs,
             "max_calls": max_calls,
@@ -449,6 +489,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Material-level parallelism. With gemma and jobs>1 each material "
         "gets its own provider instance; call stats land in the report only.",
     )
+    parser.add_argument(
+        "--attempts",
+        type=int,
+        default=1,
+        help="Runs per material (paper-style test protocol). >1 folds attempts "
+        "into one row: submit = any attempt submitted; quality fields from "
+        "the first submitting attempt; per-attempt outcomes under 'attempts'.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--out", type=Path, default=ROOT / DEFAULT_REPORT)
     parser.add_argument("--work-root", type=Path, default=None)
@@ -499,6 +547,7 @@ def main(argv: list[str] | None = None) -> int:
         builder=shared,
         builder_factory=factory,
         jobs=max(1, args.jobs),
+        attempts=max(1, args.attempts),
     )
     write_report(report, args.out)
     if shared is not None:
