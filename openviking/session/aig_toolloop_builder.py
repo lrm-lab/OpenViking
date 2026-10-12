@@ -263,7 +263,7 @@ def run_toolloop(
                 arguments,
                 ok=False,
                 error_code=exc.code,
-                result=None,
+                result=getattr(exc, "detail", None),
                 elapsed_ms=elapsed,
                 repeat_count=repeat_count,
             )

@@ -15,6 +15,8 @@ from openviking.session.aig_tool_surface import (
     _OPTIONAL_FIELDS,
     _REQUIRED_FIELDS,
     AoSnapshot,
+    AigToolSurface,
+    ToolSurfaceError,
 )
 from openviking.session.aig_toolloop_builder import (
     CONSTRUCTION_FALLBACK,
@@ -256,3 +258,92 @@ def _task(steps: list[int]) -> dict[str, object]:
 
 def _end(steps: list[int]) -> dict[str, object]:
     return {"content": "the answer", "step_refs": steps}
+
+
+def _surface(tmp_path: Path) -> AigToolSurface:
+    return AigToolSurface(_snapshot(), root=tmp_path, run_id="schema-detail")
+
+
+def test_step_refs_overlap_error_names_conflicting_blocks(tmp_path: Path) -> None:
+    surface = _surface(tmp_path)
+    surface.call(
+        "add_block",
+        {
+            "kind": "task",
+            "block_id": "t",
+            "fields": {"content": "q", "operative_brief": "b", "step_refs": [0, 1]},
+        },
+    )
+    try:
+        surface.call(
+            "add_block",
+            {
+                "kind": "conclusion",
+                "block_id": "c",
+                "fields": {"content": "done", "step_refs": [1]},
+            },
+        )
+        raise AssertionError("expected step_refs_overlap")
+    except ToolSurfaceError as info:
+        assert info.code == "step_refs_overlap"
+        assert info.detail is not None
+        detail = info.detail
+    assert detail["shared_rows"] == [1]
+    assert {item["block_id"] for item in detail["blocks"]} == {"t", "c"}
+    assert "disjoint" in detail["hint"]
+    overview = surface.get_overview()
+    assert overview["draft_blocks"] == [{"block_id": "t", "kind": "task", "span": [0, 1]}]
+
+
+def test_overview_hides_draft_blocks_until_first_add(tmp_path: Path) -> None:
+    surface = _surface(tmp_path)
+    assert "draft_blocks" not in surface.get_overview()
+
+
+def test_builder_history_carries_overlap_detail_to_provider(tmp_path: Path) -> None:
+    class CapturingProvider:
+        def __init__(self) -> None:
+            self.turns: list[ToolloopTurn] = []
+            self.script = [
+                ToolInvocation(
+                    "add_block",
+                    {
+                        "kind": "task",
+                        "block_id": "t",
+                        "fields": {
+                            "content": "q",
+                            "operative_brief": "b",
+                            "step_refs": [0, 1],
+                        },
+                    },
+                ),
+                ToolInvocation(
+                    "add_block",
+                    {
+                        "kind": "conclusion",
+                        "block_id": "c",
+                        "fields": {"content": "done", "step_refs": [1]},
+                    },
+                ),
+                ToolInvocation("submit", {}),
+            ]
+
+        def __call__(self, turn: ToolloopTurn) -> ToolInvocation:
+            self.turns.append(turn)
+            return self.script[len(self.turns) - 1]
+
+    provider = CapturingProvider()
+    result = run_toolloop(
+        _snapshot(),
+        "what happened",
+        provider,
+        root=tmp_path,
+        run_id="schema-history",
+    )
+    assert result.status == "submitted"
+    rejected = provider.turns[-1].history[-1]
+    assert rejected["verb"] == "add_block"
+    assert rejected["ok"] is False
+    assert rejected["error_code"] == "step_refs_overlap"
+    assert isinstance(rejected["result"], dict)
+    assert rejected["result"]["shared_rows"] == [1]

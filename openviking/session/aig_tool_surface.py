@@ -94,8 +94,10 @@ _LINK_KIND_SKIP = "skip"
 TOOL_CATALOG: tuple[tuple[str, str], ...] = (
     (
         "get_overview",
-        "Compact log metadata: row count, participant, segment, and size. "
-        "call once; row_count and participants are shown here",
+        "Compact log metadata: row count, participant, segment, and size; "
+        "also the draft's claimed block spans (draft_blocks). "
+        "Call once at the start; re-read it after a step_refs_overlap rejection "
+        "to see which spans are already claimed.",
     ),
     ("read_full_log", "Return every snapshot row joined as text."),
     ("read_step", "Return one snapshot row. Argument index (alias i) is the row handle."),
@@ -283,10 +285,20 @@ TOOL_SCHEMAS: Mapping[str, dict[str, Any]] = {
 
 
 class ToolSurfaceError(ValueError):
-    """A tool call was rejected. ``code`` is the stable machine-readable reason."""
+    """A tool call was rejected. ``code`` is the stable machine-readable reason.
 
-    def __init__(self, code: str) -> None:
+    ``detail`` is an optional payload that rides the tool result back to the
+    model (e.g. which rows a rejected span conflicts with), so a rejection is
+    actionable instead of a bare code.
+    """
+
+    def __init__(self, code: str, detail: Mapping[str, Any] | None = None) -> None:
         self.code = code
+        self.detail: Mapping[str, Any] | None = (
+            dict(detail)
+            if isinstance(detail, Mapping) and not isinstance(detail, (str, bytes))
+            else None
+        )
         super().__init__(code)
 
 
@@ -532,7 +544,7 @@ def _is_adjacent(blocks: Mapping[str, _Block], source_id: str, target_id: str) -
 def _validate(blocks: Mapping[str, _Block], edges: Sequence[_Edge], row_count: int) -> None:
     tasks = 0
     conclusions = 0
-    spans: list[tuple[int, int]] = []
+    spans: list[tuple[int, int, str, str]] = []
     for block in blocks.values():
         if block.kind not in _PAPER_KIND_SET:
             raise ToolSurfaceError("invalid_kind")
@@ -545,15 +557,36 @@ def _validate(blocks: Mapping[str, _Block], edges: Sequence[_Edge], row_count: i
             tasks += 1
         elif block.kind == "conclusion":
             conclusions += 1
-        spans.append((refs[0], refs[-1]))
+        spans.append((refs[0], refs[-1], block.block_id, block.kind))
     if tasks > 1:
         raise ToolSurfaceError("duplicate_task")
     if conclusions > 1:
         raise ToolSurfaceError("duplicate_conclusion")
-    spans.sort()
-    for index, (start, end) in enumerate(spans):
-        if index and start <= spans[index - 1][1]:
-            raise ToolSurfaceError("step_refs_overlap")
+    spans.sort(key=lambda item: (item[0], item[1]))
+    for index, (start, end, block_id, kind) in enumerate(spans):
+        if not index:
+            continue
+        prev_start, prev_end, prev_id, prev_kind = spans[index - 1]
+        if start > prev_end:
+            continue
+        raise ToolSurfaceError(
+            "step_refs_overlap",
+            {
+                "blocks": [
+                    {
+                        "block_id": prev_id,
+                        "kind": prev_kind,
+                        "span": [prev_start, prev_end],
+                    },
+                    {"block_id": block_id, "kind": kind, "span": [start, end]},
+                ],
+                "hint": (
+                    "each row index may belong to at most one block; "
+                    "choose a span disjoint from the listed blocks"
+                ),
+                "shared_rows": list(range(max(start, prev_start), min(end, prev_end) + 1)),
+            },
+        )
     seen: set[tuple[str, str]] = set()
     for edge in edges:
         if edge.source_id not in blocks or edge.target_id not in blocks:
@@ -912,6 +945,17 @@ class AigToolSurface:
         }
         if self._snapshot.outcome is not None:
             payload["outcome"] = outcome_overview(self._snapshot.outcome)
+        if self._blocks:
+            payload["draft_blocks"] = [
+                {
+                    "block_id": block.block_id,
+                    "kind": block.kind,
+                    "span": [block.fields["step_refs"][0], block.fields["step_refs"][-1]],
+                }
+                for block in sorted(
+                    self._blocks.values(), key=lambda item: item.fields["step_refs"][0]
+                )
+            ]
         return payload
 
     def _read_full_log(self, arguments: Mapping[str, Any]) -> str:
