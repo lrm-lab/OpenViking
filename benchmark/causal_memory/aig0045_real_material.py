@@ -19,7 +19,8 @@ Three subcommands over the evolbench-collab runner output:
 
 Judge routing is per-domain: information_retrieval -> --ir-sidecar
 (gemma-4-31B-it on the lenovo gateway; OpenRouter qwen was credit-blocked),
-knowledge_work -> --kw-sidecar (GLM-5.3-Flash).
+knowledge_work -> --kw-sidecar (GLM-5.3-Flash),
+software_engineering -> --swe-sidecar (pytest in container, up to 30 min).
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from openviking.session.ao_ledger import AORecord  # noqa: E402
 DOMAIN_KIND = {
     "information_retrieval": "browsecomp",
     "knowledge_work": "gdpval",
+    "software_engineering": "swe",
 }
 
 
@@ -72,16 +74,31 @@ def cmd_reverify(args: argparse.Namespace) -> int:
         if kind is None:
             print(f"skip {row.get('episode_id')}: domain {domain!r} not routed", file=sys.stderr)
             continue
-        url = f"http://127.0.0.1:{args.ir_port if kind == 'browsecomp' else args.kw_port}/verify"
+        if kind == "browsecomp":
+            port = args.ir_port
+        elif kind == "swe":
+            port = getattr(args, "swe_port", 8737)
+        else:
+            port = args.kw_port
+        url = f"http://127.0.0.1:{port}/verify"
         payload: dict = {"episode_id": str(row["episode_id"])}
         if kind == "browsecomp":
             payload["agent_response"] = row.get("final_output") or ""
         else:
             payload["workspace_dir"] = row.get("work_dir") or ""
-        verdict = _post_json(url, payload, timeout=args.timeout)
+        timeout = max(args.timeout, 1900.0) if kind == "swe" else args.timeout
+        verdict = _post_json(url, payload, timeout=timeout)
         detail = {
             key: verdict[key]
-            for key in ("method", "predicted", "files_found", "evaluation_score", "judge")
+            for key in (
+                "method",
+                "predicted",
+                "files_found",
+                "evaluation_score",
+                "judge",
+                "resolved",
+                "returncode",
+            )
             if key in verdict
         }
         verdicts.append(
@@ -94,6 +111,7 @@ def cmd_reverify(args: argparse.Namespace) -> int:
                 "graded": verdict.get("graded"),
                 "error": verdict.get("error"),
                 "detail": detail,
+                "attempt_status": row.get("status"),
             }
         )
         print(
@@ -377,6 +395,7 @@ def main() -> int:
     reverify.add_argument("--out", type=Path, required=True)
     reverify.add_argument("--ir-port", type=int, default=8735)
     reverify.add_argument("--kw-port", type=int, default=8736)
+    reverify.add_argument("--swe-port", type=int, default=8737)
     reverify.add_argument("--timeout", type=float, default=240.0)
     reverify.set_defaults(func=cmd_reverify)
 
