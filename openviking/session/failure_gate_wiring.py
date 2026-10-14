@@ -164,7 +164,9 @@ def maybe_deliver_commit_failure_gate(
         return None
     session_id = session_id.strip()
     try:
-        causal = is_causal_mode_enabled(config, session_id=session_id)
+        from openviking.session.causal_mode import is_session_causal
+
+        causal = is_session_causal(session, config, mode_resolver=is_causal_mode_enabled)
     except FileNotFoundError:
         return None
     if not causal:

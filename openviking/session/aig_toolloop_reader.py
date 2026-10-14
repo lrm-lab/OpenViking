@@ -72,6 +72,14 @@ READER_SUCCESS_PROMPT = (
     "unresolved_areas: [..]}。图是冻结的，你没有任何编辑工具。"
 )
 
+READER_NEUTRAL_PROMPT = READER_SUCCESS_PROMPT.replace(
+    "寻找关键贡献节点", "寻找可由日志核验的关键节点"
+).replace(
+    "下游成功贡献", "下游影响"
+).replace(
+    "归因对象", "相关对象"
+) + "\n任务结果尚未判定；报告不能声称成功或失败。"
+
 READER_OUTPUT_SCHEMA = (
     "{responsible_agent, decisive_ao_refs, reason, critical_block_id, unresolved_areas: [..]}"
 )
@@ -81,6 +89,8 @@ def reader_prompt_for_mode(mode: str | None) -> str:
     """Fail-closed: None or an unknown mode keeps the fail narrative."""
     if closed_attribution_mode(mode) == "success":
         return READER_SUCCESS_PROMPT
+    if mode == "neutral":
+        return READER_NEUTRAL_PROMPT
     return READER_SYSTEM_PROMPT
 
 

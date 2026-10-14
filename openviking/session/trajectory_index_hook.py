@@ -503,7 +503,9 @@ def maybe_index_session_trajectory(
     snapshot and returns that provider. Both default to ``None``.
     """
     try:
-        if not is_causal_mode_enabled(config, session_id=getattr(session, "session_id", None)):
+        from openviking.session.causal_mode import is_session_causal
+
+        if not is_session_causal(session, config, mode_resolver=is_causal_mode_enabled):
             return
         _index_commit(
             session,

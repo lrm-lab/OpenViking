@@ -171,6 +171,7 @@ class CreateSessionRequest(BaseModel):
 
     session_id: Optional[str] = None
     memory_policy: Optional[Dict[str, Any]] = None
+    skill_trajectory_mode: Optional[Literal["legacy", "causal"]] = None
     auto_commit_policy: Optional[AutoCommitPolicyRequest] = None
     memory_extraction_config: Optional[MemoryExtractionConfigRequest] = None
     telemetry: TelemetryRequest = False
@@ -314,6 +315,7 @@ async def create_session(
             _ctx,
             request.session_id,
             memory_policy=request.memory_policy,
+            skill_trajectory_mode=request.skill_trajectory_mode,
             auto_commit_policy=auto_commit_policy_payload,
             update_auto_commit_policy=update_auto_commit_policy,
             event_tags=event_tags,
@@ -638,6 +640,14 @@ class CommitRequest(BaseModel):
         ),
     )
     telemetry: TelemetryRequest = False
+    outcome_evaluator_results: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Explicit evaluator results for post-commit failure attribution.",
+    )
+    aig_question: Optional[str] = Field(
+        default=None,
+        description="Task question for four-role AIG construction.",
+    )
 
     @model_validator(mode="after")
     def validate_turn_retention_opt_in(self) -> "CommitRequest":
@@ -685,6 +695,10 @@ async def commit_session(
     event_tags = _commit_event_tags(body.extraction_metadata)
     if event_tags is not None:
         commit_kwargs["event_tags"] = event_tags
+    if body.outcome_evaluator_results is not None:
+        commit_kwargs["outcome_evaluator_results"] = body.outcome_evaluator_results
+    if body.aig_question is not None:
+        commit_kwargs["aig_question"] = body.aig_question
     execution = await run_operation(
         operation="session.commit",
         telemetry=body.telemetry,

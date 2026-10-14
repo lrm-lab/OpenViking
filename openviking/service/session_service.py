@@ -270,6 +270,7 @@ class SessionService:
         auto_commit_policy: Optional[Dict[str, Any]] = None,
         update_auto_commit_policy: bool = False,
         event_tags: Optional[List[str]] = None,
+        skill_trajectory_mode: Optional[str] = None,
     ) -> Session:
         """Create a session and persist its root path.
 
@@ -294,6 +295,10 @@ class SessionService:
                 if await existing.exists():
                     raise AlreadyExistsError(f"Session '{session_id}' already exists")
             session = self.session(ctx, session_id)
+            if skill_trajectory_mode is not None:
+                if skill_trajectory_mode not in {"legacy", "causal"}:
+                    raise ValueError("skill_trajectory_mode must be legacy or causal")
+                session.meta.skill_trajectory_mode = skill_trajectory_mode
             if memory_policy is not None:
                 policy = MemoryPolicy.from_dict(memory_policy)
                 policy.validate_memory_types(
@@ -413,6 +418,8 @@ class SessionService:
         min_raw_tail_steps: Optional[int] = None,
         event_tags: Optional[List[str]] = None,
         reset_context: bool = False,
+        outcome_evaluator_results: Optional[List[Dict[str, Any]]] = None,
+        aig_question: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Commit a session (archive messages and extract memories).
 
@@ -435,6 +442,8 @@ class SessionService:
             min_raw_tail_steps=min_raw_tail_steps,
             event_tags=event_tags,
             reset_context=reset_context,
+            outcome_evaluator_results=outcome_evaluator_results,
+            aig_question=aig_question,
         )
 
     async def commit_async(
@@ -449,6 +458,8 @@ class SessionService:
         min_raw_tail_steps: Optional[int] = None,
         event_tags: Optional[List[str]] = None,
         reset_context: bool = False,
+        outcome_evaluator_results: Optional[List[Dict[str, Any]]] = None,
+        aig_question: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Async commit a session.
 
@@ -480,6 +491,10 @@ class SessionService:
             commit_kwargs["event_tags"] = event_tags
         if reset_context:
             commit_kwargs["reset_context"] = True
+        if outcome_evaluator_results is not None:
+            commit_kwargs["outcome_evaluator_results"] = outcome_evaluator_results
+        if aig_question is not None:
+            commit_kwargs["aig_question"] = aig_question
         result = await session.commit_async(**commit_kwargs)
         self._record_lifecycle_metric("commit", "ok" if result.get("status") else "error")
         self._record_archive_metric("ok" if result.get("archived") else "skip")

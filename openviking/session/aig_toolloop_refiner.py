@@ -36,11 +36,15 @@ REFINER_SUCCESS_PROMPT = """输入：当前图 + 违规清单。你持构建工�
 - 确实无法解决的违规，输出 {violation_id, action: "unresolvable", reason}，不要盲改。
 停止条件：所有违规解决或声明 unresolvable 后交回；轮数由服务端计（≤3）。"""
 
+REFINER_NEUTRAL_PROMPT = REFINER_SYSTEM_PROMPT + "\n任务结果尚未判定；只按图和 AO 证据修订。"
+
 
 def refiner_prompt_for_mode(mode: str | None) -> str:
     """Fail-closed: None or an unknown mode keeps the fail narrative."""
     if closed_attribution_mode(mode) == "success":
         return REFINER_SUCCESS_PROMPT
+    if mode == "neutral":
+        return REFINER_NEUTRAL_PROMPT
     return REFINER_SYSTEM_PROMPT
 
 REFINER_READ_VERBS = frozenset({"get_graph", "read_step", "read_step_range"})

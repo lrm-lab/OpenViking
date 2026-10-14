@@ -69,11 +69,23 @@ BUILDER_SUCCESS_PROMPT = (
     "\n停止条件：submit 前自检三件事——有且仅有一个 task 根；有且仅有一个 conclusion 汇；每个非 task 节点都有指向它的入边（沿边可从 task 根到达它），每个非 conclusion 节点都有出边（沿边可达 conclusion）。三者齐备才调用 submit（一次性，不可撤销）。预算耗尽由服务端截断。"
 )
 
+BUILDER_NEUTRAL_PROMPT = BUILDER_SUCCESS_PROMPT.replace(
+    "一条成功轨迹", "一条结果尚未判定的轨迹"
+).replace(
+    "这次复用如何促成最终正确结果", "这次复用如何影响下游状态或结果"
+).replace(
+    "没有促成正确结果的复用就不要加边", "没有日志证实的复用就不要加边"
+).replace(
+    "成功轨迹仍可有未达标记录", "任务结果未知也应如实标记未达标记录"
+)
+
 
 def builder_prompt_for_mode(mode: str | None) -> str:
     """Fail-closed: None or an unknown mode keeps the fail narrative."""
     if closed_attribution_mode(mode) == "success":
         return BUILDER_SUCCESS_PROMPT
+    if mode == "neutral":
+        return BUILDER_NEUTRAL_PROMPT
     return BUILDER_SYSTEM_PROMPT
 
 

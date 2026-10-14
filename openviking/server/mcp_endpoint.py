@@ -95,7 +95,6 @@ from openviking_cli.exceptions import (
 )
 from openviking_cli.retrieve import ContextType
 from openviking_cli.utils import get_logger
-from openviking_cli.utils.config.memory_config import is_causal_mode_enabled
 from openviking_cli.utils.config.open_viking_config import get_openviking_config
 
 logger = get_logger(__name__)
@@ -553,11 +552,6 @@ async def _open_causal_facade(session_id: str):
     """
     service = get_service()
     ctx = _get_ctx()
-    if not is_causal_mode_enabled(get_openviking_config(), session_id=session_id):
-        raise FailedPreconditionError(
-            "causal retrieval is not enabled for this server "
-            "(memory.skill_trajectory_mode is not causal)"
-        )
     try:
         session = service.sessions.session(ctx, session_id)
     except NotFoundError:
@@ -565,6 +559,12 @@ async def _open_causal_facade(session_id: str):
     if session is None:
         raise NotFoundError(session_id, "session")
     await session.load()
+    from openviking.session.causal_mode import is_session_causal
+
+    if not is_session_causal(session, get_openviking_config()):
+        raise FailedPreconditionError(
+            "causal retrieval is not enabled for this session"
+        )
     if session_directory(session) is None:
         raise NotFoundError(session_id, "session")
     viking_fs = getattr(session, "_viking_fs", None)

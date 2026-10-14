@@ -35,11 +35,17 @@ CRITIC_SUCCESS_PROMPT = (
     "无违规输出空数组。\n你没有编辑工具。不要臆造日志里不存在的内容。"
 )
 
+CRITIC_NEUTRAL_PROMPT = CRITIC_SUCCESS_PROMPT.replace(
+    "下游成功确实源于该复用", "注记中的下游影响确有日志依据"
+)
+
 
 def critic_prompt_for_mode(mode: str | None) -> str:
     """Fail-closed: None or an unknown mode keeps the fail narrative."""
     if closed_attribution_mode(mode) == "success":
         return CRITIC_SUCCESS_PROMPT
+    if mode == "neutral":
+        return CRITIC_NEUTRAL_PROMPT
     return CRITIC_SYSTEM_PROMPT
 
 CRITIC_VERBS = frozenset(

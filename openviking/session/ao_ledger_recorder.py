@@ -271,6 +271,10 @@ def _fallback_digest_from_parts(session_id: str, action: dict[str, Any], observa
 def _stored_dedup_identity(record: AORecord) -> tuple[str, ...]:
     """Identity already written on a ledger row, else a recomputed fallback."""
     message_ref = record.message_ref or {}
+    if message_ref.get("key_kind") == "source_message":
+        source_ids = message_ref.get("source_message_ids")
+        if isinstance(source_ids, list) and source_ids:
+            return ("source_message", *sorted(str(item) for item in source_ids))
     if message_ref.get("key_kind") == "fallback" and message_ref.get("dedup_key"):
         return ("fallback", str(message_ref["dedup_key"]))
     primary = _exchange_dedup_key(record.message_ref)
@@ -441,6 +445,44 @@ class AOLedgerRecorder:
 
         recorded: list[AORecord] = []
         for message in messages:
+            source_ids = getattr(message, "source_message_ids", None)
+            content = getattr(message, "content", "")
+            if (
+                isinstance(source_ids, list) and source_ids
+                and all(isinstance(item, str) and item for item in source_ids)
+                and isinstance(content, str) and content.strip()
+            ):
+                key = ("source_message", *sorted(source_ids))
+                with self._dedup_lock:
+                    if key in self._seen_exchange_keys:
+                        self.duplicate_skip_count += 1
+                        captured = False
+                    else:
+                        self._seen_exchange_keys.add(key)
+                        captured = True
+                if captured:
+                    try:
+                        participant = getattr(message, "peer_id", None) or getattr(message, "role", "")
+                        record = self.ledger.append(
+                            action={
+                                "kind": "channel_message",
+                                "participant_id": participant,
+                                "segment_id": source_ids[0],
+                                "text": content,
+                            },
+                            observation={"text": content, "delivery": "recorded"},
+                            skill_invocations=[],
+                            message_ref={
+                                "key_kind": "source_message",
+                                "source_message_ids": list(source_ids),
+                                "message_id": getattr(message, "id", None),
+                            },
+                        )
+                        recorded.append(record)
+                    except Exception:
+                        with self._dedup_lock:
+                            self._seen_exchange_keys.discard(key)
+                        logger.warning("AO ledger source message capture failed", exc_info=True)
             for part in getattr(message, "parts", None) or []:
                 if not _is_tool_part(part) or not _has_tool_result(part):
                     continue
@@ -469,7 +511,9 @@ class AOLedgerRecorder:
 def maybe_record_session_tool_exchanges(session: Any, messages: list[Any]) -> None:
     """Causal-only live hook. Legacy is a single boolean check and returns."""
     try:
-        if not is_causal_mode_enabled(session_id=getattr(session, "session_id", None)):
+        from openviking.session.causal_mode import is_session_causal
+
+        if not is_session_causal(session, mode_resolver=is_causal_mode_enabled):
             return
         recorder = _get_or_create_recorder(session)
         if recorder is None:
@@ -485,7 +529,9 @@ def maybe_record_session_tool_exchanges(session: Any, messages: list[Any]) -> No
 def maybe_write_session_archive_attribution(session: Any, archive_uri: str) -> None:
     """Causal-only Phase 1 hook. Writes ``ao-attribution.jsonl`` next to archive."""
     try:
-        if not is_causal_mode_enabled(session_id=getattr(session, "session_id", None)):
+        from openviking.session.causal_mode import is_session_causal
+
+        if not is_session_causal(session, mode_resolver=is_causal_mode_enabled):
             return
         session_dir = _session_uri_path(session, getattr(session, "_session_uri", None))
         archive_dir = _session_uri_path(session, archive_uri)
