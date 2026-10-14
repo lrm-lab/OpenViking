@@ -274,6 +274,7 @@ TOOL_SCHEMAS: Mapping[str, dict[str, Any]] = {
         ("from", "to"),
     ),
     "get_graph": _json_object({}),
+    "get_graph_block": _json_object({"block_id": {"type": "string"}}, required=["block_id"]),
     "get_overview": _json_object({}),
     "get_question": _json_object({}),
     "get_story": _json_object({}),

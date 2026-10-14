@@ -124,9 +124,7 @@ def _open_run(surface: AigToolSurface, run_id: str = "run-reader") -> AigConstru
 
 def test_transfer_stops_at_the_block_whose_effect_the_log_confirms(tmp_path: Path) -> None:
     _surface, snapshot, compiled = _compiled(tmp_path)
-    graph = load_frozen_paper_graph(
-        compiled.revision, snapshot, sidecar_path=compiled.sidecar_path
-    )
+    graph = load_frozen_paper_graph(compiled.revision, snapshot, sidecar_path=compiled.sidecar_path)
     report = transfer_responsibility(graph, snapshot)
     assert report.critical_block_id == "agent-b"
     assert report.responsible_agent == "Verification_Expert"
@@ -201,9 +199,7 @@ def test_budget_exhaustion_records_unresolved_and_still_freezes(tmp_path: Path) 
 
 def test_catalog_rejects_build_verbs_and_a_bad_sidecar(tmp_path: Path) -> None:
     surface, snapshot, compiled = _compiled(tmp_path)
-    graph = load_frozen_paper_graph(
-        compiled.revision, snapshot, sidecar_path=compiled.sidecar_path
-    )
+    graph = load_frozen_paper_graph(compiled.revision, snapshot, sidecar_path=compiled.sidecar_path)
     view = ReaderView(snapshot, graph, root=tmp_path, run_id="run-view")
     names = {name for name, _text in reader_catalog()}
     assert names == READER_VERBS
@@ -223,9 +219,7 @@ def test_catalog_rejects_build_verbs_and_a_bad_sidecar(tmp_path: Path) -> None:
 
 def test_fake_provider_report_must_match_the_block(tmp_path: Path) -> None:
     surface, snapshot, compiled = _compiled(tmp_path)
-    graph = load_frozen_paper_graph(
-        compiled.revision, snapshot, sidecar_path=compiled.sidecar_path
-    )
+    graph = load_frozen_paper_graph(compiled.revision, snapshot, sidecar_path=compiled.sidecar_path)
     body = {
         "critical_block_id": "agent-b",
         "decisive_ao_refs": [1],
@@ -237,7 +231,12 @@ def test_fake_provider_report_must_match_the_block(tmp_path: Path) -> None:
     result = run_reader(
         compiled.revision,
         snapshot,
-        FakeReaderProvider([ReaderInvocation("report", report=body)]),
+        FakeReaderProvider(
+            [
+                ReaderInvocation("tool", "read_step", {"index": 1}),
+                ReaderInvocation("report", report=body),
+            ]
+        ),
         root=tmp_path,
         run_id="run-fake",
         construction_run=run,
@@ -261,3 +260,139 @@ def test_fake_provider_report_must_match_the_block(tmp_path: Path) -> None:
         )
     assert caught.value.code == "invalid_reader_output"
     assert anchor_candidates(graph, result.report)[0] == "agent-b"
+
+
+def test_reader_deduplicates_repeated_evidence_and_requests_final_report(tmp_path: Path) -> None:
+    surface, snapshot, compiled = _compiled(tmp_path)
+    body = {
+        "critical_block_id": "agent-b",
+        "decisive_ao_refs": [1],
+        "reason": "read AO 1",
+        "responsible_agent": "Verification_Expert",
+        "unresolved_areas": [],
+    }
+    provider = FakeReaderProvider(
+        [
+            ReaderInvocation("tool", "read_step", {"index": 1}),
+            ReaderInvocation("tool", "read_step", {"index": 1}),
+            ReaderInvocation("report", report=body),
+        ]
+    )
+    result = run_reader(
+        compiled.revision,
+        snapshot,
+        provider,
+        root=tmp_path,
+        run_id="dedup",
+        construction_run=_open_run(surface, "dedup"),
+        sidecar_path=compiled.sidecar_path,
+        reader_policy="guarded",
+    )
+    assert result.report.decisive_ao_refs == (1,)
+    assert provider.turns[-1].read_ao_refs == (1,)
+    assert "record" in provider.turns[-1].history[0]["result"]
+    assert "record" not in provider.turns[-1].history[1]["result"]
+    assert provider.turns[-1].history[1]["result"]["duplicate_of"] == 0
+
+
+def test_guarded_reader_rejects_graph_only_citations(tmp_path: Path) -> None:
+    surface, snapshot, compiled = _compiled(tmp_path)
+    provider = FakeReaderProvider(
+        [
+            ReaderInvocation(
+                "report",
+                report={
+                    "critical_block_id": "agent-b",
+                    "decisive_ao_refs": [1],
+                    "reason": "guess",
+                    "responsible_agent": "Verification_Expert",
+                    "unresolved_areas": [],
+                },
+            )
+        ]
+    )
+    with pytest.raises(ReaderError, match="unread_decisive_refs"):
+        run_reader(
+            compiled.revision,
+            snapshot,
+            provider,
+            root=tmp_path,
+            run_id="unread",
+            construction_run=_open_run(surface, "unread"),
+            sidecar_path=compiled.sidecar_path,
+            reader_policy="guarded",
+        )
+
+
+def test_guarded_reader_stops_stalled_reads_with_final_opportunity(tmp_path: Path) -> None:
+    surface, snapshot, compiled = _compiled(tmp_path)
+    provider = FakeReaderProvider([ReaderInvocation("tool", "read_step", {"index": 1})] * 16)
+    result = run_reader(
+        compiled.revision,
+        snapshot,
+        provider,
+        root=tmp_path,
+        run_id="stall",
+        construction_run=_open_run(surface, "stall"),
+        sidecar_path=compiled.sidecar_path,
+        reader_policy="guarded",
+    )
+    assert result.tool_calls == 4
+    assert provider.turns[-1].final_only is True
+    assert result.stop_reason == "no_progress"
+    assert result.report.unresolved_areas == ("no_progress",)
+    assert len(result.reads) == 4
+
+
+def test_reader_handoff_preserves_topology_and_loads_body_on_demand(tmp_path: Path) -> None:
+    from openviking.session.aig_handoff import build_handoff
+
+    surface, snapshot, compiled = _compiled(tmp_path)
+    graph = load_frozen_paper_graph(compiled.revision, snapshot, sidecar_path=compiled.sidecar_path)
+    packet = build_handoff(graph, role="reader", snapshot=snapshot)
+    assert packet == build_handoff(graph, role="reader", snapshot=snapshot)
+    assert len(packet["graph_index"]["edges"]) == len(graph["edges"])
+    assert {b["block_id"] for b in packet["graph_index"]["blocks"]} == {
+        b["block_id"] for b in graph["blocks"]
+    }
+    assert "responsible_agent" not in json.dumps(packet)
+    assert "ps detection used entry_id" not in json.dumps(packet)
+    assert "report" not in packet["upstream_claims"]
+    view = ReaderView(snapshot, graph, root=tmp_path, run_id="lazy", context_policy="handoff")
+    assert view.call("get_graph")["blocks"] == packet["graph_index"]["blocks"]
+    loaded = view.call("get_graph_block", {"block_id": "agent-b"})
+    assert loaded["block"] == next(b for b in graph["blocks"] if b["block_id"] == "agent-b")
+    assert loaded["edges"]
+    with pytest.raises(ReaderError, match="invalid_args"):
+        view.call("get_graph_block", {"block_id": "missing"})
+
+
+def test_guarded_reader_can_declare_unresolved_without_inventing_citations(tmp_path: Path) -> None:
+    surface, snapshot, compiled = _compiled(tmp_path)
+    provider = FakeReaderProvider(
+        [
+            ReaderInvocation(
+                "report",
+                report={
+                    "critical_block_id": "",
+                    "decisive_ao_refs": [],
+                    "responsible_agent": "",
+                    "reason": "No evidence read",
+                    "unresolved_areas": ["need to verify effects"],
+                },
+            )
+        ]
+    )
+    result = run_reader(
+        compiled.revision,
+        snapshot,
+        provider,
+        root=tmp_path,
+        run_id="unresolved",
+        construction_run=_open_run(surface, "unresolved"),
+        sidecar_path=compiled.sidecar_path,
+        reader_policy="guarded",
+    )
+    assert result.report.decisive_ao_refs == ()
+    assert result.report.unresolved_areas == ("need to verify effects",)
+    assert result.read_ao_refs == ()

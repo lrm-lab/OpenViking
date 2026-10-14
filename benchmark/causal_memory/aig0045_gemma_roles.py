@@ -21,6 +21,7 @@ from benchmark.causal_memory.lenovo_gemma_provider import (
     openai_tools_from_catalog,
     parse_tool_invocation,
 )
+from openviking.session.aig_handoff import build_handoff
 from openviking.session.aig_tool_surface import TOOL_SCHEMAS
 from openviking.session.aig_toolloop_builder import ToolInvocation, ToolloopTurn
 from openviking.session.aig_toolloop_critic import (
@@ -134,11 +135,18 @@ def _tool(payload: Mapping[str, Any], catalog: tuple[tuple[str, str], ...]) -> T
 
 
 def role_request_body(
-    turn: CriticTurn | RefinerTurn | ReaderTurn, *, role: str, model: str
+    turn: CriticTurn | RefinerTurn | ReaderTurn,
+    *,
+    role: str,
+    model: str,
+    context_policy: str = "full",
+    handoff: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Mode prompt, closed role catalog, current graph and completed history."""
     catalogs = {"critic": critic_catalog, "refiner": refiner_catalog, "reader": reader_catalog}
-    catalog = tuple(item for item in catalogs[role]() if item[0] in dict(turn.tools))
+    context_policy = getattr(turn, "context_policy", context_policy)
+    available = reader_catalog(context_policy) if role == "reader" else catalogs[role]()
+    catalog = tuple(item for item in available if item[0] in dict(turn.tools))
     examples = {
         "critic": 'Final JSON only, no extra keys: {"violations": []} when clean; '
         'otherwise {"violations": [{"object_id":"b1","kind":"semantic",'
@@ -176,11 +184,38 @@ def role_request_body(
     state = {"catalog": catalog}
     if role == "reader":
         state["frozen_graph"] = turn.graph
+        if turn.remaining_calls is not None:
+            state["reader_progress"] = {
+                "read_ao_refs": list(turn.read_ao_refs),
+                "remaining_calls": turn.remaining_calls,
+                "stop_reason": turn.stop_reason,
+            }
+            prompt += "\nDecisive AO refs must have been read through read_step/read_step_range."
+            if turn.remaining_calls <= 3 or turn.final_only:
+                prompt += "\nReading budget nearly exhausted. Form a report from verified evidence now; list uncertainty in unresolved_areas. Do not guess unread evidence."
+            if turn.final_only:
+                prompt += '\nNo more tools. Return the final report now. If evidence is insufficient, return {"responsible_agent":"","decisive_ao_refs":[],"reason":"insufficient verified evidence","critical_block_id":"","unresolved_areas":["describe the missing verification"]}.'
     else:
         state["draft"] = turn.draft
         state["structural_violations" if role == "critic" else "violations"] = (
             turn.structural_violations if role == "critic" else turn.violations
         )
+    if context_policy == "handoff":
+        if role == "reader":
+            state["handoff"] = turn.handoff or build_handoff(turn.graph, role="reader")
+            state.pop("frozen_graph", None)
+            prompt = prompt.replace("frozen_graph.blocks", "handoff.graph_index.blocks")
+            prompt += "\nThe handoff contains only a neutral topology index. Load block prose, agent_name and incident edge effects with get_graph_block before deciding. Upstream claims are not evidence."
+        else:
+            expected = build_handoff(
+                turn.draft,
+                role=role,
+                violations=state.get("violations", state.get("structural_violations", ())),
+            )
+            if handoff is not None and handoff.get("graph_hash") != expected["graph_hash"]:
+                raise ValueError("stale_handoff")
+            state["handoff"] = dict(handoff) if handoff is not None else expected
+            state.pop("draft", None)
     history = getattr(turn, "history", ())
     exchanges = []
     for item in history:
@@ -215,13 +250,28 @@ def role_request_body(
             for item in turn.violations
         }
     messages.append({"role": "user", "content": _dump(state)})
-    return {"model": model, "messages": messages, "tools": tools, "tool_choice": "auto"}
+    return {
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "tool_choice": "none" if role == "reader" and turn.final_only else "auto",
+    }
 
 
 class _GemmaRoleProvider(LenovoGemmaProvider):
     fallback: str
 
-    def __init__(self, *, output_retries: int = DEFAULT_OUTPUT_RETRIES, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        output_retries: int = DEFAULT_OUTPUT_RETRIES,
+        context_policy: str = "full",
+        **kwargs: Any,
+    ) -> None:
+        if context_policy not in {"full", "handoff"}:
+            raise ValueError("invalid_context_policy")
+        self._context_policy = context_policy
+        self._handoff: dict[str, Any] | None = None
         if (
             isinstance(output_retries, bool)
             or not isinstance(output_retries, int)
@@ -231,6 +281,9 @@ class _GemmaRoleProvider(LenovoGemmaProvider):
         super().__init__(**kwargs)
         self._output_retries = output_retries
         self._failures: list[dict[str, str]] = []
+
+    def bind_handoff(self, packet: Mapping[str, Any]) -> None:
+        self._handoff = json.loads(_dump(packet))
 
     @property
     def failures(self) -> tuple[dict[str, str], ...]:
@@ -285,7 +338,13 @@ class GemmaCriticProvider(_GemmaRoleProvider):
         self._view = view
 
     def __call__(self, turn: CriticTurn) -> Mapping[str, Any] | str:
-        body = role_request_body(turn, role="critic", model=self._model)
+        body = role_request_body(
+            turn,
+            role="critic",
+            model=self._model,
+            context_policy=self._context_policy,
+            handoff=self._handoff,
+        )
         if self._view is not None:
             row_count = self._view.call("get_overview")["row_count"]
         else:
@@ -369,7 +428,27 @@ class GemmaRefinerProvider(_GemmaRoleProvider):
     fallback = "done"
 
     def __call__(self, turn: RefinerTurn) -> RefinerAction:
-        body = role_request_body(turn, role="refiner", model=self._model)
+        packet = self._handoff
+        if self._context_policy == "handoff":
+            packet = build_handoff(
+                turn.draft,
+                role="refiner",
+                violations=turn.violations,
+                edits=[
+                    item
+                    for item in turn.history
+                    if item.get("ok") and item.get("verb") in REFINER_EDIT_VERBS
+                ],
+            )
+            if self._handoff is not None:
+                packet["raw_facts"] = self._handoff["raw_facts"]
+        body = role_request_body(
+            turn,
+            role="refiner",
+            model=self._model,
+            context_policy=self._context_policy,
+            handoff=packet,
+        )
         by_id = {item["violation_id"]: item for item in turn.violations}
 
         def parse(payload: Mapping[str, Any]) -> tuple[RefinerAction, str]:
@@ -451,7 +530,15 @@ class GemmaReaderProvider(_GemmaRoleProvider):
                     "tool", invocation.verb, invocation.arguments
                 ), invocation.verb
             loaded = _strict_json(message.get("content"))
-            report = parse_reader_report(loaded, turn.graph)
+            report = parse_reader_report(
+                loaded,
+                turn.validation_graph or turn.graph,
+                allow_unresolved=turn.remaining_calls is not None,
+            )
+            if turn.remaining_calls is not None and not set(report.decisive_ao_refs) <= set(
+                turn.read_ao_refs
+            ):
+                raise ReaderError("unread_decisive_refs")
             return ReaderInvocation("report", report=report.to_dict()), "report"
 
         result = self._validated(body, parse)
