@@ -143,10 +143,10 @@ def role_request_body(
         "critic": 'Final JSON only, no extra keys: {"violations": []} when clean; '
         'otherwise {"violations": [{"object_id":"b1","kind":"semantic",'
         '"severity":"high","evidence_ao_refs":[1],"note":"AO contradicts summary"}]}. '
-        'object_id must name a block in draft.blocks (never an edge); '
-        'kind is semantic or granularity; severity is high or low; '
-        'evidence_ao_refs are integer snapshot indices; note is nonempty text. '
-        'Do not copy structural violations into this output. Otherwise call one read-only tool.',
+        "object_id must name a block in draft.blocks (never an edge); "
+        "kind is semantic or granularity; severity is high or low; "
+        "evidence_ao_refs are integer snapshot indices; note is nonempty text. "
+        "Do not copy structural violations into this output. Otherwise call one read-only tool.",
         "refiner": "Call one tool; edits require violation_id in arguments. Example: "
         '{"block_id":"b1","fields":{"summary":"corrected"},"violation_id":"v1"}. '
         'Or JSON {"action":"unresolvable","violation_id":"v1","reason":"missing evidence"}; '
@@ -154,12 +154,12 @@ def role_request_body(
         "reader": "Call one read-only tool or final JSON, for example "
         '{"responsible_agent":"worker","decisive_ao_refs":[1],"reason":"AO confirms effect",'
         '"critical_block_id":"b1","unresolved_areas":[]}. Exactly these five keys. '
-        'Choose critical_block_id from frozen_graph.blocks based on verified evidence. '
-        'Copy that block\'s entire step_refs list in the same order into decisive_ao_refs '
-        '(not a subset, not indices from other blocks). Copy its agent_name exactly into '
+        "Choose critical_block_id from frozen_graph.blocks based on verified evidence. "
+        "Copy that block's entire step_refs list in the same order into decisive_ao_refs "
+        "(not a subset, not indices from other blocks). Copy its agent_name exactly into "
         'responsible_agent; if agent_name is absent, use the empty string "". '
-        'reason must be nonempty text; unresolved_areas must be an array of strings. '
-        'The example IDs are placeholders, not evidence.',
+        "reason must be nonempty text; unresolved_areas must be an array of strings. "
+        "The example IDs are placeholders, not evidence.",
     }
     prompt = (
         turn.system_prompt
@@ -191,11 +191,29 @@ def role_request_body(
             and item.get("violation_id")
         ):
             item["arguments"] = {**item.get("arguments", {}), "violation_id": item["violation_id"]}
-        exchanges.append(item)
+        if isinstance(item.get("arguments"), Mapping) and isinstance(item.get("verb"), str):
+            exchanges.append(item)
     messages = messages_from_turn(ToolloopTurn(prompt, catalog, tuple(exchanges)))
-    # Refiner history includes unresolvable and rejected edits without arguments.
-    # Retain those records in the state even when no tool exchange can be rebuilt.
-    state["history"] = history
+    # Only non-tool outcomes need a separate representation; tool results are
+    # already present in messages and must not be serialized twice.
+    outcomes = [
+        item
+        for item in history
+        if not (isinstance(item.get("arguments"), Mapping) and isinstance(item.get("verb"), str))
+    ]
+    if outcomes:
+        state["history"] = outcomes
+    if role == "refiner":
+        state["edit_constraints"] = {
+            item["violation_id"]: {
+                "allowed_verbs": ["modify_block"]
+                if item["kind"] in {"semantic", "granularity"}
+                else sorted(REFINER_EDIT_VERBS),
+                "scope": item.get("scope"),
+                "involved_ids": item.get("involved_ids", []),
+            }
+            for item in turn.violations
+        }
     messages.append({"role": "user", "content": _dump(state)})
     return {"model": model, "messages": messages, "tools": tools, "tool_choice": "auto"}
 
@@ -227,7 +245,10 @@ class _GemmaRoleProvider(LenovoGemmaProvider):
             except Exception as exc:  # Output/transport failures are local to this role call.
                 code = getattr(exc, "code", "invalid_provider_result")
                 self._record("", started, code)
-                if code in {"network_error", "http_error", "missing_api_key"} or attempt == self._output_retries:
+                if (
+                    code in {"network_error", "http_error", "missing_api_key"}
+                    or attempt == self._output_retries
+                ):
                     self._failures.append({"code": code, "fallback": self.fallback})
                     return None
                 body["messages"].append(

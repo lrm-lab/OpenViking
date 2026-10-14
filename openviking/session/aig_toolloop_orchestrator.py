@@ -110,6 +110,8 @@ def run_critic_refiner(
         )
     run.submit_draft(run.session_for("builder"), surface.get_graph())
     rounds = 0
+    stop_reason = None
+    seen_graphs = {canonical_dumps(surface.get_graph())}
     for round_index in range(1, MAX_REVISION_ROUNDS + 1):
         rounds = round_index
         run.critique(run.session_for("critic"), [item.to_dict() for item in violations])
@@ -122,8 +124,17 @@ def run_critic_refiner(
             {
                 "edits": [dict(item) for item in refined.edits],
                 "unresolvable": [dict(item) for item in refined.unresolvable],
+                "stop_reason": refined.stop_reason,
             },
         )
+        graph_key = canonical_dumps(surface.get_graph())
+        if refined.stop_reason or graph_key in seen_graphs:
+            # A later stalled action must not discard an earlier successful repair.
+            if refined.edits:
+                violations = _audit(surface, critic, trajectory, round_index, mode=mode)
+            stop_reason = "no_progress"
+            break
+        seen_graphs.add(graph_key)
         declared = {item["violation_id"] for item in refined.unresolvable}
         current_ids = {item.violation_id for item in violations}
         if current_ids and current_ids <= declared and not refined.edits:
@@ -147,13 +158,15 @@ def run_critic_refiner(
     if any(item.severity == "high" for item in violations):
         run.fail()
         marker = _fallback_marker(run_id, snapshot.watermark, violations)
+        if stop_reason:
+            marker["reason"] = stop_reason
         trajectory.append(
             "decision",
             rounds,
             {
                 "construction_mode": CONSTRUCTION_FALLBACK,
                 "known_violations": [item.to_dict() for item in violations],
-                "reason": "high_severity_violations",
+                "reason": marker["reason"],
                 "status": "fallback",
             },
         )

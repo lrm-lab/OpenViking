@@ -69,9 +69,7 @@ def test_request_body_maps_system_tools_and_history() -> None:
     assert body["messages"][0] == {"role": "system", "content": "build the graph"}
     assert body["messages"][1]["role"] == "assistant"
     assert body["messages"][1]["tool_calls"][0]["function"]["name"] == "read_step"
-    assert json.loads(body["messages"][1]["tool_calls"][0]["function"]["arguments"]) == {
-        "index": 0
-    }
+    assert json.loads(body["messages"][1]["tool_calls"][0]["function"]["arguments"]) == {"index": 0}
     assert body["messages"][2]["role"] == "tool"
     assert body["messages"][2]["tool_call_id"] == "call-0"
     names = [item["function"]["name"] for item in body["tools"]]
@@ -123,9 +121,7 @@ def test_bad_arguments_json_is_auditable_not_a_crash(monkeypatch: pytest.MonkeyP
             {
                 "finish_reason": "tool_calls",
                 "message": {
-                    "tool_calls": [
-                        {"function": {"arguments": "{not-json", "name": "add_block"}}
-                    ]
+                    "tool_calls": [{"function": {"arguments": "{not-json", "name": "add_block"}}]
                 },
             }
         ]
@@ -174,9 +170,7 @@ def test_retries_once_on_5xx_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> N
             {
                 "finish_reason": "tool_calls",
                 "message": {
-                    "tool_calls": [
-                        {"function": {"arguments": "{}", "name": "get_overview"}}
-                    ]
+                    "tool_calls": [{"function": {"arguments": "{}", "name": "get_overview"}}]
                 },
             }
         ]
@@ -187,9 +181,7 @@ def test_retries_once_on_5xx_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> N
         assert isinstance(request, object)
         calls["n"] += 1
         if calls["n"] == 1:
-            raise urllib.error.HTTPError(
-                GATEWAY_URL, 502, "bad gateway", None, io.BytesIO(b"")
-            )
+            raise urllib.error.HTTPError(GATEWAY_URL, 502, "bad gateway", None, io.BytesIO(b""))
         return _response(ok)
 
     provider = LenovoGemmaProvider(urlopen=urlopen, sleep=sleeps.append)
@@ -219,9 +211,7 @@ def test_exhausts_retries_on_persistent_5xx(monkeypatch: pytest.MonkeyPatch) -> 
         del timeout
         assert isinstance(request, object)
         calls["n"] += 1
-        raise urllib.error.HTTPError(
-            GATEWAY_URL, 502, "bad gateway", None, io.BytesIO(b"")
-        )
+        raise urllib.error.HTTPError(GATEWAY_URL, 502, "bad gateway", None, io.BytesIO(b""))
 
     provider = LenovoGemmaProvider(urlopen=urlopen, sleep=sleeps.append)
     with pytest.raises(LenovoGemmaError) as caught:
@@ -248,9 +238,7 @@ def test_http_request_uses_gateway_and_does_not_echo_the_key(
         "choices": [
             {
                 "finish_reason": "tool_calls",
-                "message": {
-                    "tool_calls": [{"function": {"arguments": "{}", "name": "submit"}}]
-                },
+                "message": {"tool_calls": [{"function": {"arguments": "{}", "name": "submit"}}]},
             }
         ]
     }
@@ -277,9 +265,7 @@ def test_flush_audit_writes_stats(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         "choices": [
             {
                 "finish_reason": "tool_calls",
-                "message": {
-                    "tool_calls": [{"function": {"arguments": "{}", "name": "submit"}}]
-                },
+                "message": {"tool_calls": [{"function": {"arguments": "{}", "name": "submit"}}]},
             }
         ]
     }
@@ -296,29 +282,125 @@ def test_flush_audit_writes_stats(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert json.loads(lines[0])["status"] == "ok"
 
 
-@pytest.mark.parametrize("failure", [429, 408, ConnectionResetError(), __import__("http.client", fromlist=["IncompleteRead"]).IncompleteRead(b"partial")])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        429,
+        408,
+        ConnectionResetError(),
+        __import__("http.client", fromlist=["IncompleteRead"]).IncompleteRead(b"partial"),
+    ],
+)
 def test_transient_transport_failure_stays_inside_request_retry(failure):
     calls = []
     sleeps = []
+
     def transport(request, **kwargs):
         calls.append(request)
         if len(calls) == 1:
             if isinstance(failure, int):
-                raise urllib.error.HTTPError(GATEWAY_URL, failure, "temporary", {"Retry-After": "3"}, io.BytesIO())
+                raise urllib.error.HTTPError(
+                    GATEWAY_URL, failure, "temporary", {"Retry-After": "3"}, io.BytesIO()
+                )
             raise failure
-        return _response({"choices": [{"message": {"tool_calls": [{"function": {"name": "get_overview", "arguments": "{}"}}]}}]})
+        return _response(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {"function": {"name": "get_overview", "arguments": "{}"}}
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+
     instance = LenovoGemmaProvider(api_key="test-key", urlopen=transport, sleep=sleeps.append)
     assert instance(_turn()).verb == "get_overview"
     assert len(calls) == 2 and len(instance.stats) == 1
-    assert sleeps[0] >= (3 if isinstance(failure, int) else .25)
+    assert sleeps[0] >= (3 if isinstance(failure, int) else 0.25)
 
 
 def test_pooled_request_client_waits_longer_than_pool_budget(monkeypatch):
     monkeypatch.setenv("LENOVO_GATEWAY_TIMEOUT_SECONDS", "960")
     seen = []
+
     def transport(request, *, timeout):
         seen.append(timeout)
-        return _response({"choices": [{"message": {"tool_calls": [{"function": {"name": "get_overview", "arguments": "{}"}}]}}]})
+        return _response(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {"function": {"name": "get_overview", "arguments": "{}"}}
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+
     instance = LenovoGemmaProvider(api_key="test-key", urlopen=transport)
     assert instance(_turn()).verb == "get_overview"
     assert seen == [960]
+
+
+def test_builder_compacts_only_consumed_evidence_and_old_build_actions() -> None:
+    from benchmark.causal_memory.lenovo_gemma_provider import request_body_from_turn
+    from openviking.session.aig_toolloop_builder import ToolloopTurn
+
+    history = [
+        {
+            "verb": "read_step_range",
+            "arguments": {"start": 0, "end": 1},
+            "ok": True,
+            "result": [
+                {"index": 0, "record": {"action": {"text": "ALREADY_COVERED_EVIDENCE"}}},
+                {"index": 1, "record": {"action": {"text": "STILL_REQUIRED_EVIDENCE"}}},
+            ],
+        },
+        *[
+            {
+                "verb": "add_block",
+                "arguments": {"kind": "agent", "fields": {"summary": f"OLD_OPERATION_{i}"}},
+                "ok": True,
+                "result": {"block_id": f"b{i}"},
+            }
+            for i in range(10)
+        ],
+    ]
+    draft = {"blocks": [{"block_id": "b0", "step_refs": [0]}], "edges": []}
+    turn = ToolloopTurn("instructions", (), tuple(history), draft=draft)
+    body = request_body_from_turn(turn)
+    serialized = json.dumps(body)
+    assert "ALREADY_COVERED_EVIDENCE" not in serialized
+    assert "STILL_REQUIRED_EVIDENCE" in serialized
+    assert "OLD_OPERATION_0" not in serialized
+    assert "OLD_OPERATION_9" in serialized
+    assert json.loads(body["messages"][-1]["content"])["draft"] == draft
+
+
+def test_builder_keeps_freshly_reread_evidence_even_when_covered() -> None:
+    from benchmark.causal_memory.lenovo_gemma_provider import request_body_from_turn
+    from openviking.session.aig_toolloop_builder import ToolloopTurn
+
+    history = (
+        {
+            "verb": "read_step",
+            "arguments": {"index": 0},
+            "ok": True,
+            "result": {"index": 0, "record": {"observation": {"text": "FRESH_VERIFICATION"}}},
+        },
+    )
+    body = request_body_from_turn(
+        ToolloopTurn(
+            "instructions",
+            (),
+            history,
+            draft={"blocks": [{"block_id": "b0", "step_refs": [0]}], "edges": []},
+        )
+    )
+    assert "FRESH_VERIFICATION" in json.dumps(body)

@@ -226,7 +226,9 @@ def test_repeated_backward_pair_feedback_ignores_note_wording(tmp_path: Path) ->
             ("submit", {}),
         ]
     )
-    result = run_toolloop(_snapshot(), "what failed?", provider, root=tmp_path, run_id="pair-repeat")
+    result = run_toolloop(
+        _snapshot(), "what failed?", provider, root=tmp_path, run_id="pair-repeat"
+    )
     assert result.status == "submitted"
     feedback = provider.turns[-1].history[-1]
     assert feedback["error_code"] == "edge_not_forward"
@@ -274,3 +276,16 @@ def test_invalid_budget_and_question(tmp_path: Path) -> None:
     with pytest.raises(ToolloopError) as missing:
         run_toolloop(_snapshot(), "  ", provider, root=tmp_path, run_id="run-bad")
     assert missing.value.code == "question_missing"
+
+
+def test_alternating_redundant_reads_exit_without_spending_whole_budget(tmp_path: Path) -> None:
+    from benchmark.causal_memory.aig0045_verdict_smoke import synthetic_materials
+
+    spec = synthetic_materials()[0]
+    snapshot = AoSnapshot(spec.records, watermark="wm-stalled", question=spec.question)
+    provider = FakeToolloopProvider([("get_question", {}), ("get_overview", {})] * 20)
+    result = run_toolloop(
+        snapshot, spec.question, provider, root=tmp_path, run_id="alternating-stall", max_calls=64
+    )
+    assert result.status == "no_progress"
+    assert len(result.audit) < 20

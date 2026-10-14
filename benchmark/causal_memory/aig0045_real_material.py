@@ -145,106 +145,105 @@ def _iter_transcript_messages(path: Path) -> list[dict]:
 
 
 def transcript_to_records(path: Path, *, participant: str | None = None) -> list[AORecord]:
-    """Convert one Pi-style daemon session jsonl into AORecord rows.
-
-    Mapping: assistant toolCall -> action{tool,args}; its toolResult ->
-    observation on the same row; user/assistant text -> action{text}. The
-    session uuid inside the file is the stable session_id. Every action
-    carries ``participant_id`` (caller-supplied role name such as
-    ``task-agent`` / ``memory-agent``, else ``daemon-agent``) and
-    ``segment_id`` (session id) so ``compile_paper_graph`` can share one
-    participant across the block. Session / segment ids keep the uuid.
-    """
-    session_id = ""
+    """Keep actions in native order and attach results by their tool-call identity."""
+    with path.open("r", encoding="utf-8") as handle:
+        header = json.loads(handle.readline())
+    session_id = str(header.get("id") or path.stem)
     participant_id = participant or "daemon-agent"
     records: list[AORecord] = []
-    pending_tool: AORecord | None = None
+    pending: dict[str, AORecord] = {}
+    legacy_pending: list[AORecord] = []
+    timestamp = ""
+    native_message_id = ""
 
-    class _Counter:
-        value = 0
-
-        def next(self) -> int:
-            self.value += 1
-            return self.value
-
-    counter = _Counter()
-
-    def _record(action: dict, observation: dict | None) -> AORecord:
-        action["participant_id"] = participant_id
-        action["segment_id"] = session_id
-        return AORecord(
-            ao_id=f"{session_id}:{counter.next()}",
+    def record(action: dict, observation: dict | None = None) -> AORecord:
+        sequence = len(records) + 1
+        row = AORecord(
+            ao_id=f"{session_id}:{sequence}",
             session_id=session_id,
-            sequence=counter.value,
-            action=action,
+            sequence=sequence,
+            action={
+                **action,
+                "participant_id": participant_id,
+                "segment_id": session_id,
+                "native_message_id": native_message_id,
+            },
             observation=observation,
             skill_invocations=[],
             message_ref="",
-            created_at=last_timestamp[0],
+            created_at=timestamp,
             captured_state=None,
         )
+        records.append(row)
+        return row
 
-    last_timestamp = [""]
+    def attach_result(call_id: str, body: str) -> None:
+        row = pending.pop(call_id, None) if call_id else None
+        if (
+            row is None
+            and not call_id
+            and len(legacy_pending) + len(pending) == 1
+            and legacy_pending
+        ):
+            row = legacy_pending.pop()
+        elif row is None and not call_id and len(legacy_pending) + len(pending) == 1 and pending:
+            row = pending.pop(next(iter(pending)))
+        if row is not None:
+            records[row.sequence - 1] = replace(row, observation={"text": body[:4000]})
+        else:
+            record(
+                {"tool": "tool_result_orphan", "role": "toolResult", "tool_call_id": call_id},
+                {"text": body[:4000]},
+            )
+
     for payload in _iter_transcript_messages(path):
         message = payload.get("message") or {}
         role = message.get("role")
         content = message.get("content")
-        last_timestamp[0] = str(payload.get("timestamp") or "")
-        if not session_id:
-            # first line of the file carries {"type":"session","id":...}
-            with path.open("r", encoding="utf-8") as handle:
-                first = json.loads(handle.readline())
-                session_id = str(first.get("id") or path.stem)
-        parts = content if isinstance(content, list) else []
+        timestamp = str(payload.get("timestamp") or "")
+        native_message_id = str(payload.get("id") or "")
+        parts = (
+            content
+            if isinstance(content, list)
+            else ([{"type": "text", "text": content}] if isinstance(content, str) else [])
+        )
         if role == "toolResult":
             body = "\n".join(
                 str(part.get("text") or "")
                 for part in parts
                 if isinstance(part, dict) and part.get("type") == "text"
             )
-            if pending_tool is not None and body.strip():
-                records.append(replace(pending_tool, observation={"text": body[:4000]}))
-                pending_tool = None
-            elif body.strip():
-                records.append(
-                    _record({"tool": "tool_result_orphan", "role": role}, {"text": body[:4000]})
-                )
+            attach_result(str(message.get("toolCallId") or ""), body)
             continue
         for part in parts:
-            ptype = part.get("type")
-            if ptype == "toolCall":
-                if pending_tool is not None:
-                    records.append(pending_tool)
-                pending_tool = _record(
-                    {"tool": str(part.get("name") or ""), "args": part.get("arguments"), "role": role},
-                    None,
+            if not isinstance(part, dict):
+                continue
+            kind = part.get("type")
+            if kind == "toolCall":
+                call_id = str(part.get("id") or "")
+                if call_id and call_id in pending:
+                    raise ValueError("duplicate_tool_call_id")
+                row = record(
+                    {
+                        "tool": str(part.get("name") or ""),
+                        "args": part.get("arguments"),
+                        "role": role,
+                        **({"tool_call_id": call_id} if call_id else {}),
+                    }
                 )
-            elif ptype == "toolResult":
-                if pending_tool is not None:
-                    body = part.get("value")
-                    if not isinstance(body, str):
-                        body = json.dumps(body, ensure_ascii=False)
-                    pending_tool.observation = {"text": body[:4000]}
-                    records.append(pending_tool)
-                    pending_tool = None
+                if call_id:
+                    pending[call_id] = row
                 else:
-                    body = part.get("value")
-                    if not isinstance(body, str):
-                        body = json.dumps(body, ensure_ascii=False)
-                    records.append(
-                        _record(
-                            {"tool": "tool_result_orphan", "role": role},
-                            {"text": body[:4000]},
-                        )
-                    )
-            elif ptype == "text":
+                    legacy_pending.append(row)
+            elif kind == "toolResult":
+                body = part.get("value")
+                if not isinstance(body, str):
+                    body = json.dumps(body, ensure_ascii=False)
+                attach_result(str(part.get("toolCallId") or part.get("id") or ""), body)
+            elif kind == "text":
                 text = str(part.get("text") or "")
-                if not text.strip():
-                    continue
-                records.append(_record({"text": text[:6000], "role": role}, None))
-            # thinking parts are skipped: not agent operations
-    if pending_tool is not None:
-        records.append(pending_tool)
+                if text.strip():
+                    record({"text": text[:6000], "role": role})
     return records
 
 
@@ -259,11 +258,10 @@ def _session_blob(path: Path) -> str:
 
 def cmd_export(args: argparse.Namespace) -> int:
     manifest = [
-        json.loads(line)
-        for line in Path(args.manifest).open("r", encoding="utf-8")
-        if line.strip()
+        json.loads(line) for line in Path(args.manifest).open("r", encoding="utf-8") if line.strip()
     ]
-    prompts = {str(row["episode_id"]): row["turns"][0]["prompt"][:300] for row in manifest}
+    questions = {str(row["episode_id"]): row["turns"][0]["prompt"] for row in manifest}
+    prompts = {episode: question[:300] for episode, question in questions.items()}
     verdicts_path = Path(args.verdicts)
     verdicts = (
         [json.loads(line) for line in verdicts_path.open("r", encoding="utf-8") if line.strip()]
@@ -310,7 +308,7 @@ def cmd_export(args: argparse.Namespace) -> int:
             # session; both sequences are chronological, so zip 1:1. Content
             # matching cannot discriminate here: the task agent re-reads the
             # full channel history, so every session contains every prompt.
-            for path, claim in zip(task_sessions, successes):
+            for path, claim in zip(task_sessions, successes, strict=True):
                 _export_session(path, claim, "task-zip", "task-agent")
             unassigned = [ep for ep in episode_order if ep not in successes]
         else:
@@ -365,6 +363,7 @@ def cmd_export(args: argparse.Namespace) -> int:
             print(f"  episode {episode_id} matched session {session_id} but has no verdict row")
             continue
         row["session_id"] = session_id
+        row["question"] = questions[episode_id]
         row.setdefault("detail", {})["session_candidates"] = [
             {"session_id": sid, "records": n} for sid, n in sorted(candidates)
         ]
@@ -379,7 +378,9 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 
 def cmd_sessions(args: argparse.Namespace) -> int:
-    for work_dir in sorted({str(row["work_dir"]) for row in _read_attempts(args.attempts) if row.get("work_dir")}):
+    for work_dir in sorted(
+        {str(row["work_dir"]) for row in _read_attempts(args.attempts) if row.get("work_dir")}
+    ):
         print(f"== {work_dir}")
         for path in sorted((Path(work_dir) / ".builtin-sessions").glob("*.jsonl")):
             print(f"  {path.name} ({path.stat().st_size} bytes)")

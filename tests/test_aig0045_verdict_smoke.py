@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-from benchmark.causal_memory.ao_record_export import export_sessions, load_session_records
 from benchmark.causal_memory.aig0045_verdict_smoke import (
     ROW_KEYS,
     SCHEMA,
@@ -20,6 +19,7 @@ from benchmark.causal_memory.aig0045_verdict_smoke import (
     synthetic_materials,
     write_report,
 )
+from benchmark.causal_memory.ao_record_export import export_sessions, load_session_records
 from openviking.session.aig_toolloop_builder import FakeToolloopProvider
 from openviking.session.ao_ledger import AORecord
 from openviking.session.outcome_signal import normalize_verdict, select_attribution_mode
@@ -320,13 +320,16 @@ def test_jobs_parallel_rows_match_serial(tmp_path: Path) -> None:
     materials = synthetic_materials()
     factory = lambda mode: FakeToolloopProvider(legal_builder_script(mode))  # noqa: E731
     serial = run_smoke(materials, root=tmp_path / "serial", builder_factory=factory)
-    parallel = run_smoke(
-        materials, root=tmp_path / "parallel", builder_factory=factory, jobs=4
-    )
+    parallel = run_smoke(materials, root=tmp_path / "parallel", builder_factory=factory, jobs=4)
 
     def strip_timing(rows):
         rows = json.loads(json.dumps(rows))
         for row in rows:
+            report_path = row.pop("reader_report_path", None)
+            if report_path:
+                persisted = json.loads(Path(report_path).read_text())
+                assert persisted["report"] == row["reader_report"]
+                assert persisted["reader_report_hash"] == row["reader_report_hash"]
             for entry in row.get("toolloop_audit") or []:
                 entry.pop("elapsed_ms", None)
         return rows
@@ -395,9 +398,7 @@ def test_attempts_folds_any_submit_and_reports_detail(tmp_path: Path) -> None:
     for row in success_rows:
         assert row["submit"] is True, "one flaky attempt must not fail the material"
         assert len(row["attempts"]) == 2
-        crashed_attempts += sum(
-            1 for item in row["attempts"] if item["submit"] is False
-        )
+        crashed_attempts += sum(1 for item in row["attempts"] if item["submit"] is False)
     assert crashed_attempts >= 1
     for row in rows.values():
         assert len(row["attempts"]) == 2
@@ -407,12 +408,109 @@ def test_attempts_folds_any_submit_and_reports_detail(tmp_path: Path) -> None:
 
 
 def test_provider_failure_cannot_count_as_successful_review() -> None:
-    gates = score_gates([{
-        "verdict": "fail", "mode": "fail", "submit": True,
-        "phi_violations_after_refine": 0, "reader_schema_ok": True,
-        "decisive_refs_in_snapshot": True,
-        "provider_failures": [{"role": "critic", "code": "network_error"}],
-    }])
+    gates = score_gates(
+        [
+            {
+                "verdict": "fail",
+                "mode": "fail",
+                "submit": True,
+                "phi_violations_after_refine": 0,
+                "reader_schema_ok": True,
+                "decisive_refs_in_snapshot": True,
+                "provider_failures": [{"role": "critic", "code": "network_error"}],
+            }
+        ]
+    )
     assert gates["submit_rate"]["pass"] is False
     assert gates["phi_violations_zero"]["pass"] is False
     assert gates["reader_schema_and_refs"]["pass"] is False
+
+
+def test_full_chain_persists_reader_report_and_distinct_stage_statuses(tmp_path: Path) -> None:
+    spec = next(item for item in synthetic_materials() if item.run_id == "syn-swe-fail")
+    report = run_smoke(
+        [spec],
+        root=tmp_path,
+        builder_factory=lambda mode: FakeToolloopProvider(legal_builder_script(mode)),
+    )
+    row = report["materials"][0]
+    assert row["builder_submitted"] is True
+    assert row["graph_frozen"] is True
+    assert row["reader_verified"] is True
+    saved = json.loads(Path(row["reader_report_path"]).read_text())
+    assert saved["report"] == row["reader_report"]
+    assert set(saved["report"]) == {
+        "responsible_agent",
+        "decisive_ao_refs",
+        "reason",
+        "critical_block_id",
+        "unresolved_areas",
+    }
+    assert saved["reader_report_hash"] == row["reader_report_hash"]
+    assert saved["reads"]
+    assert row["status"] == "reader_verified"
+
+
+def test_three_skipped_attempts_remain_no_signal_instead_of_submit_failure(tmp_path: Path) -> None:
+    spec = next(item for item in synthetic_materials() if "nosignal" in item.run_id)
+    report = run_smoke([spec], root=tmp_path, attempts=3)
+    row = report["materials"][0]
+    assert row["fallback_reason"] == "not_triggered"
+    assert row["status"] == "skipped_no_signal"
+    assert row["builder_submitted"] is False
+    assert row["reader_verified"] is False
+
+
+def test_debug_attempt_policy_stops_after_first_complete_verification(tmp_path: Path) -> None:
+    spec = next(item for item in synthetic_materials() if item.run_id == "syn-swe-fail")
+    calls = []
+
+    def factory(mode):
+        calls.append(mode)
+        return FakeToolloopProvider(legal_builder_script(mode))
+
+    report = run_smoke(
+        [spec], root=tmp_path, attempts=3, attempt_policy="until-verified", builder_factory=factory
+    )
+    assert len(calls) == 1
+    assert len(report["materials"][0]["attempts"]) == 1
+    assert report["settings"]["attempt_policy"] == "until-verified"
+    assert report["attempt_summary"]["reader_verified"] == 1
+
+
+def test_old_material_restores_question_from_human_message_in_tool_observation(
+    tmp_path: Path,
+) -> None:
+    record = AORecord(
+        ao_id="old:1",
+        session_id="old",
+        sequence=1,
+        action={"text": "[CoForge inbox notice: new message]", "role": "user"},
+        observation={
+            "text": "[target=#software-engineering msg=abc type=human] @runner: @memory ## Bug Description\nFix nested model separability.\n"
+        },
+        skill_invocations=[],
+        message_ref=None,
+        created_at="2026-10-14T00:00:00Z",
+        captured_state="live",
+    )
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    (sessions / "old.jsonl").write_text(json.dumps(record.to_dict()) + "\n")
+    verdicts = tmp_path / "verdicts.jsonl"
+    verdicts.write_text(
+        json.dumps(
+            {
+                "run_id": "old",
+                "domain_kind": "swe",
+                "session_id": "old",
+                "reward": 1,
+                "graded": True,
+                "error": None,
+            }
+        )
+        + "\n"
+    )
+    spec = load_real_materials(verdicts, sessions)[0]
+    assert "Fix nested model separability." in spec.question
+    assert "CoForge inbox notice" not in spec.question
