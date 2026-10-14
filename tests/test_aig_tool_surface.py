@@ -182,7 +182,7 @@ def test_catalog_covers_nineteen_verbs() -> None:
     assert len(names) == 19
 
 
-def test_overview_full_log_and_step_bounds(tmp_path: Path) -> None:
+def test_overview_full_segment_and_step_bounds(tmp_path: Path) -> None:
     surface, _snapshot = _open(tmp_path, ["alpha", "beta"])
     overview = surface.get_overview()
     assert overview["row_count"] == 2
@@ -194,8 +194,10 @@ def test_overview_full_log_and_step_bounds(tmp_path: Path) -> None:
         overview["rows"][0]["size"] > overview["rows"][1]["size"]
         or overview["rows"][0]["size"] > 0
     )
-    assert "alpha" in surface.read_full_log()
-    assert "beta" in surface.read_full_log()
+    full = surface.read_full_segment("seg-1")
+    assert "alpha" in full
+    assert "beta" in full
+    assert surface.call("read_full_segment", {"s": "seg-1"}) == full
     step = surface.read_step(0)
     assert step["index"] == 0
     assert step["record"]["action"]["text"] == "alpha"
@@ -208,6 +210,71 @@ def test_overview_full_log_and_step_bounds(tmp_path: Path) -> None:
     _assert_code(lambda: surface.call("read_step", {"index": "0"}), "invalid_args")
     _assert_code(lambda: surface.call("get_overview", {"extra": 1}), "invalid_args")
     _assert_code(lambda: surface.call("not_a_verb"), "unknown_verb")
+
+
+def test_read_full_segment_filters_and_reports_unknown(tmp_path: Path) -> None:
+    records = (
+        _record(0, "alpha", segment="seg-a"),
+        _record(1, "beta", segment="seg-b"),
+        _record(2, "gamma", segment="seg-a"),
+    )
+    surface, _snapshot = _open(tmp_path, [], records=records)
+    seg_a = surface.read_full_segment("seg-a")
+    assert "alpha" in seg_a
+    assert "gamma" in seg_a
+    assert "beta" not in seg_a
+    assert "[2]" in seg_a
+    assert "[1]" not in seg_a
+    assert "beta" in surface.read_full_segment("seg-b")
+    with pytest.raises(ToolSurfaceError) as caught:
+        surface.read_full_segment("seg-x")
+    assert caught.value.code == "unknown_segment"
+    assert caught.value.detail == {"available_segments": ["seg-a", "seg-b"]}
+    _assert_code(lambda: surface.call("read_full_segment", {}), "invalid_args")
+    _assert_code(
+        lambda: surface.call("read_full_segment", {"segment": 1}), "invalid_args"
+    )
+
+
+def test_bulk_reads_truncate_but_read_step_stays_full(tmp_path: Path) -> None:
+    long_action = "A" * 5000
+    long_obs = "B" * 5000
+    records = (
+        _record(0, "alpha", observation=long_obs),
+        _record(1, long_action),
+    )
+    records[0].action["text"] = long_action
+    surface, _snapshot = _open(tmp_path, [], records=records)
+
+    full = surface.read_full_segment("seg-1")
+    assert "…[truncated" in full
+    assert "A" * 5000 not in full
+    assert "B" * 5000 not in full
+    for line in full.split("\n\n"):
+        assert len(line) < 2 * 2000 + 400  # two capped fields plus row header
+
+    ranged = surface.read_step_range(0, 1)
+    for row in ranged:
+        assert isinstance(row["record"]["action"], dict)
+        assert isinstance(row["record"]["observation"], dict)
+        text = row["record"]["observation"].get("text") or ""
+        if len(text):
+            assert len(text) < 5000 or "…[truncated" in text
+    assert ranged[0]["record"]["observation"]["text"].startswith("B" * 2000)
+    assert "…[truncated" in ranged[0]["record"]["observation"]["text"]
+    assert ranged[1]["record"]["action"]["text"].startswith("A" * 2000)
+    assert "…[truncated" in ranged[1]["record"]["action"]["text"]
+
+    step = surface.read_step(0)
+    assert step["record"]["observation"]["text"] == long_obs
+    step1 = surface.read_step(1)
+    assert step1["record"]["action"]["text"] == long_action
+
+    overview = surface.get_overview()
+    assert overview["rows"][0]["size"] > 2 * 2000
+
+    matches = surface.call("search", {"pattern": "B{4500}"})
+    assert len(matches) >= 1
 
 
 def test_search_caps_matches_and_honors_flags(tmp_path: Path) -> None:
@@ -369,6 +436,22 @@ def test_submit_does_not_require_root_or_sink(tmp_path: Path) -> None:
     assert graph["submitted"] is True
     assert [block["kind"] for block in graph["blocks"]] == ["agent"]
     assert graph["edges"] == []
+
+
+def test_backward_edge_reports_both_spans_without_mutation(tmp_path: Path) -> None:
+    surface, snapshot = _populate(tmp_path)
+    before = surface.get_graph()
+    with pytest.raises(ToolSurfaceError) as caught:
+        surface.add_inheritance_note("end-1", "task-1", "later", "backwards")
+    assert caught.value.code == "edge_not_forward"
+    detail = caught.value.detail
+    assert detail["source"] == {"block_id": "end-1", "span": [3, 3]}
+    assert detail["target"] == {"block_id": "task-1", "span": [0, 0]}
+    assert "source.span[0] < target.span[0]" in detail["required_order"]
+    assert "effect" in detail["hint"]
+    assert surface.get_graph() == before
+    reopened = AigToolSurface(snapshot, root=tmp_path, run_id="run-1")
+    assert reopened.get_graph() == before
 
 
 def test_hard_invariants_reject_without_mutation(tmp_path: Path) -> None:

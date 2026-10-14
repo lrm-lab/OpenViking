@@ -317,7 +317,7 @@ def _verb_script() -> list[tuple[str, dict[str, Any]]]:
     end = {"content": "the answer", "step_refs": [4]}
     return [
         ("get_overview", {}),
-        ("read_full_log", {}),
+        ("read_full_segment", {"segment": "seg"}),
         ("read_step", {"index": 0}),
         ("read_step_range", {"start": 0, "end": 1}),
         ("list_agents", {}),

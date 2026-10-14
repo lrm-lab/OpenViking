@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from benchmark.causal_memory import lenovo_gemma_provider as provider_module
 from benchmark.causal_memory.lenovo_gemma_provider import (
     API_KEY_ENV,
     DEFAULT_MODEL,
@@ -195,7 +196,40 @@ def test_retries_once_on_5xx_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> N
     invocation = provider(_turn())
     assert invocation.verb == "get_overview"
     assert calls["n"] == 2
-    assert sleeps == [0.25]
+    assert len(sleeps) == 1
+    assert 0.25 <= sleeps[0] <= 0.5
+
+
+def test_retry_backoff_delay_is_exponential_with_jitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(provider_module.random, "uniform", lambda _a, b: b)
+    assert provider_module.retry_backoff_delay(0) == pytest.approx(0.5)
+    assert provider_module.retry_backoff_delay(1) == pytest.approx(0.75)
+    assert provider_module.retry_backoff_delay(2) == pytest.approx(1.25)
+    assert provider_module.retry_backoff_delay(-3) == pytest.approx(0.5)
+
+
+def test_exhausts_retries_on_persistent_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(API_KEY_ENV, "test-key")
+    calls = {"n": 0}
+    sleeps: list[float] = []
+
+    def urlopen(request: object, timeout: float = 0) -> _FakeHttp:
+        del timeout
+        assert isinstance(request, object)
+        calls["n"] += 1
+        raise urllib.error.HTTPError(
+            GATEWAY_URL, 502, "bad gateway", None, io.BytesIO(b"")
+        )
+
+    provider = LenovoGemmaProvider(urlopen=urlopen, sleep=sleeps.append)
+    with pytest.raises(LenovoGemmaError) as caught:
+        provider(_turn())
+    assert caught.value.code == "network_error"
+    assert calls["n"] == 1 + provider_module.MAX_NETWORK_RETRIES
+    assert len(sleeps) == provider_module.MAX_NETWORK_RETRIES
+    assert sleeps[0] < sleeps[1] < sleeps[2]
 
 
 def test_missing_key_is_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -231,7 +265,7 @@ def test_http_request_uses_gateway_and_does_not_echo_the_key(
     provider = LenovoGemmaProvider(urlopen=urlopen, sleep=lambda _s: None)
     provider(_turn())
     assert captured["url"] == GATEWAY_URL
-    assert captured["timeout"] == 120.0
+    assert captured["timeout"] == provider_module.DEFAULT_TIMEOUT_SECONDS
     assert captured["headers"]["Authorization"] == "Bearer test-key"
     assert "test-key" not in json.dumps(captured["body"])
     assert captured["body"]["model"] == DEFAULT_MODEL

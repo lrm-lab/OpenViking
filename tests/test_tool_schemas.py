@@ -28,6 +28,7 @@ from openviking.session.aig_toolloop_builder import (
 from openviking.session.ao_ledger import AORecord
 
 _SCHEMA_ALIASES = {
+    "read_full_segment": frozenset({"s"}),
     "read_step": frozenset({"i"}),
     "read_step_range": frozenset({"a", "b"}),
 }
@@ -46,7 +47,7 @@ _SCHEMA_REQUIRED: dict[str, list[str]] = {
     "list_block_kinds": [],
     "mark_defect_recorded": ["block_id", "note"],
     "modify_block": ["block_id", "fields"],
-    "read_full_log": [],
+    "read_full_segment": ["segment"],
     "read_step": ["index"],
     "read_step_range": ["start", "end"],
     "search": ["pattern"],

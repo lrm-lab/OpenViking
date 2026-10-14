@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from benchmark.causal_memory.ao_record_export import export_sessions, load_session_records
 from benchmark.causal_memory.aig0045_verdict_smoke import (
     ROW_KEYS,
@@ -336,13 +338,14 @@ def test_jobs_parallel_rows_match_serial(tmp_path: Path) -> None:
     assert parallel["gates"] == serial["gates"]
 
 
-def test_parallel_batch_isolates_driver_exceptions(tmp_path: Path) -> None:
+@pytest.mark.parametrize("jobs", [1, 3])
+def test_batch_isolates_driver_exceptions(tmp_path: Path, jobs: int) -> None:
     def factory(mode: str):
         if mode == "success":
             raise RuntimeError("boom")
         return FakeToolloopProvider(legal_builder_script(mode))
 
-    report = run_smoke(synthetic_materials(), root=tmp_path, builder_factory=factory, jobs=3)
+    report = run_smoke(synthetic_materials(), root=tmp_path, builder_factory=factory, jobs=jobs)
     rows = {row["run_id"]: row for row in report["materials"]}
     crashed = [row for row in rows.values() if row["verdict"] == "driver_exception"]
     assert crashed, "success-mode materials must crash the factory"
@@ -401,3 +404,15 @@ def test_attempts_folds_any_submit_and_reports_detail(tmp_path: Path) -> None:
         for key in ("run_id", "submit", "verdict"):
             assert key in row
     assert json.dumps(report["materials"], ensure_ascii=False)
+
+
+def test_provider_failure_cannot_count_as_successful_review() -> None:
+    gates = score_gates([{
+        "verdict": "fail", "mode": "fail", "submit": True,
+        "phi_violations_after_refine": 0, "reader_schema_ok": True,
+        "decisive_refs_in_snapshot": True,
+        "provider_failures": [{"role": "critic", "code": "network_error"}],
+    }])
+    assert gates["submit_rate"]["pass"] is False
+    assert gates["phi_violations_zero"]["pass"] is False
+    assert gates["reader_schema_and_refs"]["pass"] is False

@@ -42,9 +42,11 @@ _REPEAT_STOP = 5
 _REPEAT_MESSAGE = "identical call repeated; change arguments or proceed"
 
 BUILDER_SYSTEM_PROMPT = (
-    "你从空图构建一条失败轨迹的自适应影响图。你有一组检查工具（T_log：概览/读单步/读区间/正则搜索/列智能体/看问题/看当前图）与一组构建工具（T_build）。日志步骤即 AO "
-    "行（行动-观察对）。\n流程：先用 get_overview/get_question 建立全局认识 → 交替\"读日志（read_step/read_step_range/search）"
+    "你从空图构建一条失败轨迹的自适应影响图。你有一组检查工具（T_log：概览/读整段/读区间/读单步/正则搜索/列智能体/看问题/看当前图）与一组构建工具（T_build）。日志步骤即 AO "
+    "行（行动-观察对）。\n流程：先用 get_overview/get_question 建立全局认识 → 交替\"读日志（read_full_segment/read_step_range/read_step/search）"
     "—建图（add_block/add_inheritance_note/add_skip_attribution）\"，直到你认为图完整、忠实、可导航。\n规则：\n- "
+    "读策略：get_overview 列出每个 segment 的行号与规模；一个 segment 的全部内容用一次 read_full_segment 拿全（segment 参数取 overview 里的值），"
+    "不要逐行 read_step 穷举扫描；只关心局部时用 read_step_range 取大区间；read_step 仅用于核验个别疑点行；已读过的内容不重复读；为建图、修补与 submit 留足调用预算。\n- "
     "只把日志里真实存在的步骤合入节点（step_refs 必须落在快照内；服务端逐调用校验）。\n- 四类节点：task=用户问题（唯一根）；orchestrator=调度回合；"
     "agent=工作回合（唯一带 input/output/authorship 的类型）；conclusion=最终答案（唯一汇）。\n- 边只能从较早节点指向较晚节点。相邻继承用 "
     "add_inheritance_note；跨接归因用 add_skip_attribution。边应形成从 task 到 conclusion 的链，每个中间节点都要在链上；不要从 task 直接连到 conclusion 而绕过中间节点。inherited 写\"后一节点复用了前一节点的什么\"，effect "
@@ -54,9 +56,11 @@ BUILDER_SYSTEM_PROMPT = (
 )
 
 BUILDER_SUCCESS_PROMPT = (
-    "你从空图构建一条成功轨迹的自适应影响图。你有一组检查工具（T_log：概览/读单步/读区间/正则搜索/列智能体/看问题/看当前图）与一组构建工具（T_build）。日志步骤即 AO "
-    "行（行动-观察对）。\n流程：先用 get_overview/get_question 建立全局认识 → 交替\"读日志（read_step/read_step_range/search）"
+    "你从空图构建一条成功轨迹的自适应影响图。你有一组检查工具（T_log：概览/读整段/读区间/读单步/正则搜索/列智能体/看问题/看当前图）与一组构建工具（T_build）。日志步骤即 AO "
+    "行（行动-观察对）。\n流程：先用 get_overview/get_question 建立全局认识 → 交替\"读日志（read_full_segment/read_step_range/read_step/search）"
     "—建图（add_block/add_inheritance_note/add_skip_attribution）\"，直到你认为图完整、忠实、可导航。\n规则：\n- "
+    "读策略：get_overview 列出每个 segment 的行号与规模；一个 segment 的全部内容用一次 read_full_segment 拿全（segment 参数取 overview 里的值），"
+    "不要逐行 read_step 穷举扫描；只关心局部时用 read_step_range 取大区间；read_step 仅用于核验个别疑点行；已读过的内容不重复读；为建图、修补与 submit 留足调用预算。\n- "
     "只把日志里真实存在的步骤合入节点（step_refs 必须落在快照内；服务端逐调用校验）。\n- 四类节点：task=用户问题（唯一根）；orchestrator=调度回合；"
     "agent=工作回合（唯一带 input/output/authorship 的类型）；conclusion=最终答案（唯一汇）。\n- 边只能从较早节点指向较晚节点。相邻继承用 "
     "add_inheritance_note；跨接归因用 add_skip_attribution。边应形成从 task 到 conclusion 的链，每个中间节点都要在链上；不要从 task 直接连到 conclusion 而绕过中间节点。inherited 写\"后一节点复用了前一节点的什么\"，effect "
@@ -200,6 +204,7 @@ def run_toolloop(
     system_prompt = builder_prompt_for_mode(mode)
     last_call_key: tuple[str, str] | None = None
     repeat_count = 0
+    edge_rejections: dict[str, int] = {}
     while True:
         if len(audit) >= max_calls or now() - started >= max_seconds:
             return _fallback(run_id, bound.watermark, audit)
@@ -263,6 +268,18 @@ def run_toolloop(
             result = surface.call(invocation.verb, arguments)
         except ToolSurfaceError as exc:
             elapsed = _elapsed_ms(call_started, now())
+            detail = getattr(exc, "detail", None)
+            if exc.code == "edge_not_forward" and isinstance(detail, dict):
+                pair_key = json.dumps(
+                    [detail["source"], detail["target"]], sort_keys=True
+                )
+                edge_rejections[pair_key] = edge_rejections.get(pair_key, 0) + 1
+                detail = {**detail, "same_pair_rejections": edge_rejections[pair_key]}
+                if edge_rejections[pair_key] > 1:
+                    detail["progress_hint"] = (
+                        "Changing inherited/effect text has not repaired this pair's "
+                        "time order. Recheck the AO anchors before trying this edge again."
+                    )
             _record(
                 audit,
                 history,
@@ -270,7 +287,7 @@ def run_toolloop(
                 arguments,
                 ok=False,
                 error_code=exc.code,
-                result=getattr(exc, "detail", None),
+                result=detail,
                 elapsed_ms=elapsed,
                 repeat_count=repeat_count,
             )

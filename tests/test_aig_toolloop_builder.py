@@ -216,6 +216,25 @@ def test_rejection_returns_the_error_code_for_retry(tmp_path: Path) -> None:
     assert rejected.verb == "add_block"
 
 
+def test_repeated_backward_pair_feedback_ignores_note_wording(tmp_path: Path) -> None:
+    provider = FakeToolloopProvider(
+        [
+            ("add_block", {"kind": "task", "block_id": "t", "fields": _task([0])}),
+            ("add_block", {"kind": "conclusion", "block_id": "c", "fields": _end([1])}),
+            ("add_inheritance_note", {"from": "c", "to": "t", "inherited": "a", "effect": "b"}),
+            ("add_inheritance_note", {"from": "c", "to": "t", "inherited": "c", "effect": "d"}),
+            ("submit", {}),
+        ]
+    )
+    result = run_toolloop(_snapshot(), "what failed?", provider, root=tmp_path, run_id="pair-repeat")
+    assert result.status == "submitted"
+    feedback = provider.turns[-1].history[-1]
+    assert feedback["error_code"] == "edge_not_forward"
+    assert feedback["result"]["same_pair_rejections"] == 2
+    assert "Changing inherited/effect text" in feedback["result"]["progress_hint"]
+    assert result.draft["edges"] == []
+
+
 def test_partial_graph_is_not_returned_as_an_aig(tmp_path: Path) -> None:
     provider = FakeToolloopProvider(
         [("add_block", {"kind": "task", "fields": _task([0]), "block_id": "task-1"})]

@@ -11,6 +11,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import random
 import time
 import urllib.error
 import urllib.request
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from benchmark.causal_memory.model_usage import ModelUsageRecorder
 from openviking.session.aig_native_protocol import canonical_dumps
 from openviking.session.aig_tool_surface import TOOL_CATALOG, TOOL_SCHEMAS
 from openviking.session.aig_toolloop_builder import ToolInvocation, ToolloopError, ToolloopTurn
@@ -26,9 +28,15 @@ from openviking.session.aig_toolloop_builder import ToolInvocation, ToolloopErro
 GATEWAY_URL = "https://modelfactory.lenovo.com/llm/v1/chat/completions"
 DEFAULT_MODEL = "gemma-4-31B-it"
 API_KEY_ENV = "LENOVO_GATEWAY_API_KEY"
-DEFAULT_TIMEOUT_SECONDS = 120.0
+DEFAULT_TIMEOUT_SECONDS = 240.0
 RETRY_BACKOFF_SECONDS = 0.25
-MAX_NETWORK_RETRIES = 1
+MAX_NETWORK_RETRIES = 3
+
+
+def retry_backoff_delay(attempt: int) -> float:
+    """Exponential backoff with jitter: base * 2**attempt + U(0, base)."""
+    base = RETRY_BACKOFF_SECONDS * (2 ** max(0, attempt))
+    return base + random.uniform(0.0, RETRY_BACKOFF_SECONDS)
 
 
 class LenovoGemmaError(ToolloopError):
@@ -162,6 +170,7 @@ class LenovoGemmaProvider:
         sleep: Callable[[float], None] | None = None,
         clock: Callable[[], float] | None = None,
         audit_path: Path | str | None = None,
+        usage_path: Path | str | None = None,
     ) -> None:
         key = api_key if api_key is not None else os.environ.get(API_KEY_ENV, "")
         if not isinstance(key, str) or not key.strip():
@@ -175,12 +184,16 @@ class LenovoGemmaProvider:
         self._clock = clock or time.monotonic
         self._stats: list[ProviderCallStat] = []
         self._audit_path = Path(audit_path) if audit_path is not None else None
+        self._usage = ModelUsageRecorder(usage_path)
         if self._audit_path is not None:
             atexit.register(self.flush_audit)
 
     @property
     def stats(self) -> tuple[ProviderCallStat, ...]:
         return tuple(self._stats)
+
+    def bind_audit_context(self, *, role: str, run_id: str) -> None:
+        self._usage.bind(role=role, run_id=run_id)
 
     def flush_audit(self, path: Path | str | None = None) -> Path | None:
         """Write model-side stats as JSONL. Used as the process-exit hook."""
@@ -221,9 +234,16 @@ class LenovoGemmaProvider:
 
     def _complete(self, body: Mapping[str, Any]) -> dict[str, Any]:
         raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self._usage.begin_completion()
         last_error: Exception | None = None
         attempts = 1 + MAX_NETWORK_RETRIES
         for attempt in range(attempts):
+            request_id, request_started = self._usage.started(
+                model=self._model, network_attempt=attempt
+            )
+            request_status = "provider_error"
+            http_status: int | None = None
+            loaded: dict[str, Any] | None = None
             request = urllib.request.Request(
                 self._url,
                 data=raw,
@@ -236,31 +256,48 @@ class LenovoGemmaProvider:
             try:
                 with self._urlopen(request, timeout=self._timeout) as response:
                     status = int(getattr(response, "status", 200) or 200)
+                    http_status = status
                     blob = response.read()
                 if status >= 500:
+                    request_status = "http_error"
                     raise _RetryableHttp(status)
                 if status >= 400:
+                    request_status = "http_error"
                     raise LenovoGemmaError("http_error")
                 try:
                     loaded = json.loads(blob.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    request_status = "invalid_provider_result"
                     raise LenovoGemmaError("invalid_provider_result") from exc
                 if not isinstance(loaded, dict):
+                    loaded = None
+                    request_status = "invalid_provider_result"
                     raise LenovoGemmaError("invalid_provider_result")
+                request_status = "ok"
                 return loaded
             except _RetryableHttp as exc:
                 last_error = exc
             except urllib.error.HTTPError as exc:
+                request_status = "http_error"
+                http_status = exc.code
                 if exc.code >= 500:
                     last_error = exc
                 else:
                     raise LenovoGemmaError("http_error") from exc
             except urllib.error.URLError as exc:
+                request_status = "network_error"
                 last_error = exc
             except TimeoutError as exc:
+                request_status = "network_error"
                 last_error = exc
+            finally:
+                self._usage.completed(
+                    request_id=request_id, started=request_started, model=self._model,
+                    network_attempt=attempt, status=request_status,
+                    http_status=http_status, payload=loaded,
+                )
             if attempt + 1 < attempts:
-                self._sleep(RETRY_BACKOFF_SECONDS)
+                self._sleep(retry_backoff_delay(attempt))
                 continue
             if last_error is not None:
                 raise LenovoGemmaError("network_error") from last_error
@@ -271,6 +308,7 @@ class LenovoGemmaProvider:
         if elapsed < 0:
             elapsed = 0
         self._stats.append(ProviderCallStat(verb=verb, elapsed_ms=elapsed, status=status))
+        self._usage.append("completion_validated", verb=verb, status=status)
 
 
 def _invocation_from_tool_call(call: Any) -> ToolInvocation:

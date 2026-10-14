@@ -50,6 +50,7 @@ META_FILENAME = "meta.json"
 DRAFT_LOG_FILENAME = "draft.jsonl"
 SEARCH_MATCH_LIMIT = 20
 _SNIPPET_LIMIT = 120
+_READ_TRUNCATE_CHARS = 2000
 _READONLY_FILE = stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
 _READONLY_DIR = (
     stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
@@ -57,7 +58,7 @@ _READONLY_DIR = (
 
 T_LOG_VERBS = (
     "get_overview",
-    "read_full_log",
+    "read_full_segment",
     "read_step",
     "read_step_range",
     "list_agents",
@@ -99,9 +100,21 @@ TOOL_CATALOG: tuple[tuple[str, str], ...] = (
         "Call once at the start; re-read it after a step_refs_overlap rejection "
         "to see which spans are already claimed.",
     ),
-    ("read_full_log", "Return every snapshot row joined as text."),
+    (
+        "read_full_segment",
+        "Return every snapshot row of one segment joined as text, keeping global "
+        "row indexes. Argument segment (alias s) is the segment value listed by "
+        "get_overview; one call reads that segment completely. Each row's action "
+        "and observation are each capped at 2000 chars (marked when truncated); "
+        "use read_step for the untruncated row.",
+    ),
     ("read_step", "Return one snapshot row. Argument index (alias i) is the row handle."),
-    ("read_step_range", "Return a closed row interval. Arguments start/end (aliases a/b)."),
+    (
+        "read_step_range",
+        "Return a closed row interval. Arguments start/end (aliases a/b). "
+        "Long string fields inside action and observation are capped at 2000 "
+        "chars (marked when truncated); use read_step for untruncated rows.",
+    ),
     ("list_agents", "List identity, role, and capability. System prompts are omitted."),
     ("get_question", "Return the original user question carried by the snapshot."),
     ("search", "Regex search over row text. At most 20 matches. Optional flags i/m/s."),
@@ -209,7 +222,7 @@ TOOL_EXACT_ARGS: Mapping[str, tuple[frozenset[str], frozenset[str]]] = {
     "list_block_kinds": (frozenset(), frozenset()),
     "mark_defect_recorded": (frozenset({"block_id", "note"}), frozenset({"block_id", "note"})),
     "modify_block": (frozenset({"block_id", "fields"}), frozenset({"block_id", "fields"})),
-    "read_full_log": (frozenset(), frozenset()),
+    "read_full_segment": (frozenset({"segment", "s"}), frozenset()),
     "read_step": (frozenset({"index", "i"}), frozenset()),
     "read_step_range": (frozenset({"start", "end", "a", "b"}), frozenset()),
     "search": (frozenset({"pattern", "flags"}), frozenset({"pattern"})),
@@ -274,7 +287,7 @@ TOOL_SCHEMAS: Mapping[str, dict[str, Any]] = {
         {"block_id": {"type": "string"}, "fields": _block_fields_schema()},
         ("block_id", "fields"),
     ),
-    "read_full_log": _json_object({}),
+    "read_full_segment": _json_object({"segment": {"type": "string"}}, ("segment",)),
     "read_step": _json_object({"index": {"type": "integer"}}, ("index",)),
     "read_step_range": _json_object(
         {"end": {"type": "integer"}, "start": {"type": "integer"}},
@@ -436,6 +449,30 @@ def _step_text(index: int, record: AORecord) -> str:
         f"[{index}] participant={_participant(record)} segment={_segment(record)}\n"
         f"action: {canonical_dumps(record.action)}\n"
         f"observation: {canonical_dumps(record.observation)}"
+    )
+
+
+def _truncate_chars(text: str, limit: int = _READ_TRUNCATE_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}…[truncated {len(text) - limit} chars]"
+
+
+def _cap_record_strings(value: Any) -> Any:
+    if isinstance(value, str):
+        return _truncate_chars(value)
+    if isinstance(value, dict):
+        return {key: _cap_record_strings(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_cap_record_strings(item) for item in value]
+    return value
+
+
+def _step_text_capped(index: int, record: AORecord) -> str:
+    return (
+        f"[{index}] participant={_participant(record)} segment={_segment(record)}\n"
+        f"action: {_truncate_chars(canonical_dumps(record.action))}\n"
+        f"observation: {_truncate_chars(canonical_dumps(record.observation))}"
     )
 
 
@@ -668,6 +705,26 @@ def _validate_block_row_uniformity(block: _Block, records: Sequence[AORecord]) -
         )
 
 
+def _forward_link_detail(
+    blocks: Mapping[str, _Block], source: str, target: str
+) -> dict[str, Any]:
+    def endpoint(block_id: str) -> dict[str, Any]:
+        refs = blocks[block_id].fields["step_refs"]
+        return {"block_id": block_id, "span": [refs[0], refs[-1]]}
+
+    return {
+        "source": endpoint(source),
+        "target": endpoint(target),
+        "required_order": "source.span[0] < target.span[0]",
+        "hint": (
+            "Changing inherited/effect text cannot repair time order. Check AO anchors; "
+            "correct step_refs only when supported by the log, or choose a forward "
+            "source/target only when the evidence supports that inheritance. "
+            "Do not reverse the causal claim just to pass validation."
+        ),
+    }
+
+
 def _validate(
     blocks: Mapping[str, _Block], edges: Sequence[_Edge], records: Sequence[AORecord]
 ) -> None:
@@ -752,7 +809,9 @@ def _validate(
         source_min = blocks[edge.source_id].fields["step_refs"][0]
         target_min = blocks[edge.target_id].fields["step_refs"][0]
         if source_min >= target_min:
-            raise ToolSurfaceError("edge_not_forward")
+            raise ToolSurfaceError(
+                "edge_not_forward", _forward_link_detail(blocks, edge.source_id, edge.target_id)
+            )
         expected = (
             _LINK_KIND_ADJACENT
             if _is_adjacent(blocks, edge.source_id, edge.target_id)
@@ -790,7 +849,7 @@ class AigToolSurface:
         self._refine_open = False
         self._handlers = {
             "get_overview": self._get_overview,
-            "read_full_log": self._read_full_log,
+            "read_full_segment": self._read_full_segment,
             "read_step": self._read_step,
             "read_step_range": self._read_step_range,
             "list_agents": self._list_agents,
@@ -850,9 +909,9 @@ class AigToolSurface:
         """Return row count plus each row's participant, segment, and size."""
         return self.call("get_overview")
 
-    def read_full_log(self) -> str:
-        """Return every snapshot row joined as text."""
-        return self.call("read_full_log")
+    def read_full_segment(self, segment: str) -> str:
+        """Return every row of one segment joined as text."""
+        return self.call("read_full_segment", {"segment": segment})
 
     def read_step(self, index: int) -> dict[str, Any]:
         """Return the snapshot row at ``index``."""
@@ -1115,11 +1174,22 @@ class AigToolSurface:
             ]
         return payload
 
-    def _read_full_log(self, arguments: Mapping[str, Any]) -> str:
-        _require_verb_args("read_full_log", arguments)
-        return "\n\n".join(
-            _step_text(index, record) for index, record in enumerate(self._records)
-        )
+    def _read_full_segment(self, arguments: Mapping[str, Any]) -> str:
+        _require_verb_args("read_full_segment", arguments)
+        segment = _one_of(arguments, "segment", "s")
+        if not isinstance(segment, str) or not segment:
+            raise ToolSurfaceError("invalid_args")
+        rows = [
+            (index, record)
+            for index, record in enumerate(self._records)
+            if _segment(record) == segment
+        ]
+        if not rows:
+            available = sorted({_segment(record) for record in self._records})
+            raise ToolSurfaceError(
+                "unknown_segment", {"available_segments": available}
+            )
+        return "\n\n".join(_step_text_capped(index, record) for index, record in rows)
 
     def _read_step(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         _require_verb_args("read_step", arguments)
@@ -1133,7 +1203,10 @@ class AigToolSurface:
         if start > end:
             raise ToolSurfaceError("invalid_range")
         return [
-            {"index": index, "record": self._records[index].to_dict()}
+            {
+                "index": index,
+                "record": _cap_record_strings(self._records[index].to_dict()),
+            }
             for index in range(start, end + 1)
         ]
 
@@ -1702,7 +1775,7 @@ def _checked_link(
     source_min = blocks[source].fields["step_refs"][0]
     target_min = blocks[target].fields["step_refs"][0]
     if source_min >= target_min:
-        raise ToolSurfaceError("edge_not_forward")
+        raise ToolSurfaceError("edge_not_forward", _forward_link_detail(blocks, source, target))
     if any(edge.source_id == source and edge.target_id == target for edge in edges):
         raise ToolSurfaceError("duplicate_edge")
     kind = _LINK_KIND_ADJACENT if _is_adjacent(blocks, source, target) else _LINK_KIND_SKIP
