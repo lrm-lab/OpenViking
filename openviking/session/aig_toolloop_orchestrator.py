@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from openviking.session.aig_handoff import build_handoff
 from openviking.session.aig_native_protocol import canonical_dumps, is_safe_id
 from openviking.session.aig_role_chain import MAX_REVISION_ROUNDS, AigConstructionRun
 from openviking.session.aig_tool_surface import AigToolSurface, AoSnapshot
@@ -76,7 +75,6 @@ def run_critic_refiner(
     frozen_at: str,
     construction_run: AigConstructionRun | None = None,
     mode: str = "fail",
-    context_policy: str = "full",
 ) -> ToolloopCycleResult:
     """Audit the submitted draft, refine up to three rounds, then compile or fall back."""
     if not isinstance(surface, AigToolSurface) or not surface.submitted:
@@ -96,16 +94,6 @@ def run_critic_refiner(
     if not isinstance(run, AigConstructionRun) or run.run_id != run_id:
         raise OrchestratorError("run_mismatch")
     trajectory = _Trajectory(_trajectory_path(root, run_id), run_id)
-    trajectory.context_policy = context_policy
-    trajectory.snapshot = snapshot
-    if context_policy == "handoff":
-        trajectory.append(
-            "builder_handoff",
-            0,
-            build_handoff(surface.get_graph(), role="critic", snapshot=snapshot),
-        )
-    if context_policy == "handoff" and hasattr(critic, "bind_handoff"):
-        critic.bind_handoff(build_handoff(surface.get_graph(), role="critic", snapshot=snapshot))
     violations = _audit(surface, critic, trajectory, 0, mode=mode)
     if not violations:
         return _freeze(
@@ -127,40 +115,9 @@ def run_critic_refiner(
     for round_index in range(1, MAX_REVISION_ROUNDS + 1):
         rounds = round_index
         run.critique(run.session_for("critic"), [item.to_dict() for item in violations])
-        if context_policy == "handoff" and hasattr(refiner, "bind_handoff"):
-            refiner.bind_handoff(
-                build_handoff(
-                    surface.get_graph(),
-                    role="refiner",
-                    snapshot=snapshot,
-                    violations=[v.to_dict() for v in violations],
-                )
-            )
         session = RefinerSession(surface, violations)
         refined = run_refiner_round(session, refiner, mode=mode)
         run.refine(run.session_for("refiner"), surface.get_graph())
-        if context_policy == "handoff":
-            trajectory.append(
-                "refiner_handoff",
-                round_index,
-                build_handoff(
-                    surface.get_graph(),
-                    role="critic",
-                    snapshot=snapshot,
-                    violations=[v.to_dict() for v in violations],
-                    edits=refined.edits,
-                ),
-            )
-        if context_policy == "handoff" and hasattr(critic, "bind_handoff"):
-            critic.bind_handoff(
-                build_handoff(
-                    surface.get_graph(),
-                    role="critic",
-                    snapshot=snapshot,
-                    edits=refined.edits,
-                    violations=[v.to_dict() for v in violations],
-                )
-            )
         trajectory.append(
             "refine_round",
             round_index,
@@ -263,19 +220,7 @@ def _audit(
         round_index,
         {"violations": [item.to_dict() for item in semantic]},
     )
-    combined = tuple(sorted([*report.violations, *semantic], key=lambda item: item.violation_id))
-    if getattr(trajectory, "context_policy", "full") == "handoff":
-        trajectory.append(
-            "critic_handoff",
-            round_index,
-            build_handoff(
-                surface.get_graph(),
-                role="refiner",
-                snapshot=trajectory.snapshot,
-                violations=[v.to_dict() for v in combined],
-            ),
-        )
-    return combined
+    return tuple(sorted([*report.violations, *semantic], key=lambda item: item.violation_id))
 
 
 def _freeze(

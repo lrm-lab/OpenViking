@@ -38,7 +38,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from openviking.session.aig_handoff import build_handoff, graph_index
 from openviking.session.aig_native_protocol import TOOLLOOP_BUILD_VERBS, canonical_dumps, is_safe_id
 from openviking.session.aig_role_chain import AigConstructionRun, AigContractError
 from openviking.session.aig_tool_surface import (
@@ -180,9 +179,6 @@ class ReaderTurn:
     remaining_calls: int | None = None
     final_only: bool = False
     stop_reason: str | None = None
-    context_policy: str = "full"
-    handoff: dict[str, Any] | None = None
-    validation_graph: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -198,7 +194,6 @@ class ReaderNavigationResult:
     reads: tuple[dict[str, Any], ...] = ()
     read_ao_refs: tuple[int, ...] = ()
     stop_reason: str | None = None
-    handoff: dict[str, Any] | None = None
 
 
 class ReaderProvider(Protocol):
@@ -247,16 +242,12 @@ class DeterministicReader:
         return ReaderInvocation("report", report=report.to_dict())
 
 
-def reader_catalog(context_policy: str = "full") -> tuple[tuple[str, str], ...]:
+def reader_catalog() -> tuple[tuple[str, str], ...]:
     """Read-only verbs. No ``T_build`` entry is included."""
     rows = []
     for name, text in TOOL_CATALOG:
         if name in READER_VERBS:
             rows.append((name, _FROZEN_TEXT.get(name, text)))
-    if context_policy == "handoff":
-        rows.append(
-            ("get_graph_block", "Read one block body and all its incident edge claims by ID.")
-        )
     return tuple(rows)
 
 
@@ -393,13 +384,9 @@ class ReaderView:
         *,
         root: Path,
         run_id: str,
-        context_policy: str = "full",
     ) -> None:
         if not isinstance(snapshot, AoSnapshot) or not is_safe_id(run_id):
             raise ReaderError("invalid_snapshot")
-        if context_policy not in {"full", "handoff"}:
-            raise ReaderError("invalid_context_policy")
-        self._context_policy = context_policy
         log_id = "reader-" + hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:20]
         self._graph = {
             "blocks": list(graph["blocks"]),
@@ -409,7 +396,7 @@ class ReaderView:
         self._log = AigToolSurface(snapshot, root=root, run_id=log_id)
 
     def catalog(self) -> tuple[tuple[str, str], ...]:
-        return reader_catalog(self._context_policy)
+        return reader_catalog()
 
     def call(self, verb: str, arguments: Mapping[str, Any] | None = None) -> Any:
         if not isinstance(verb, str):
@@ -421,25 +408,9 @@ class ReaderView:
         args = {} if arguments is None else arguments
         if not isinstance(args, Mapping):
             raise ReaderError("invalid_args")
-        if verb == "get_graph_block":
-            if set(args) != {"block_id"} or not isinstance(args["block_id"], str):
-                raise ReaderError("invalid_args")
-            block = next(
-                (b for b in self._graph["blocks"] if b["block_id"] == args["block_id"]), None
-            )
-            if block is None:
-                raise ReaderError("invalid_args")
-            return {
-                "block": block,
-                "edges": [
-                    e for e in self._graph["edges"] if args["block_id"] in (e["from"], e["to"])
-                ],
-            }
         if verb in {"get_story", "get_graph"}:
             if dict(args):
                 raise ReaderError("invalid_args")
-            if self._context_policy == "handoff":
-                return graph_index(self._graph)
             return self._story() if verb == "get_story" else dict(self._graph)
         try:
             return self._log.call(verb, args)
@@ -482,7 +453,6 @@ def run_reader(
     max_calls: int = DEFAULT_READER_CALLS,
     mode: str = "fail",
     reader_policy: str = "guarded",
-    context_policy: str = "full",
 ) -> ReaderNavigationResult:
     """Navigate, then freeze the report on the existing reader chain.
 
@@ -498,7 +468,7 @@ def run_reader(
     if reader_policy not in {"legacy", "guarded"}:
         raise ReaderError("invalid_reader_policy")
     graph = load_frozen_paper_graph(revision, snapshot, sidecar_path=sidecar_path)
-    view = ReaderView(snapshot, graph, root=root, run_id=run_id, context_policy=context_policy)
+    view = ReaderView(snapshot, graph, root=root, run_id=run_id)
     history: list[dict[str, Any]] = []
     tool_calls = 0
     report: ReaderReport | None = None
@@ -510,19 +480,14 @@ def run_reader(
     while tool_calls < max_calls:
         turn = ReaderTurn(
             system_prompt=reader_prompt_for_mode(mode),
-            tools=reader_catalog(context_policy),
-            graph=graph_index(graph) if context_policy == "handoff" else graph,
+            tools=reader_catalog(),
+            graph=graph,
             history=tuple(history),
             read_ao_refs=tuple(sorted(read_refs)),
             remaining_calls=max_calls - tool_calls if reader_policy == "guarded" else None,
             final_only=reader_policy == "guarded"
             and (stalled >= 3 or (max_calls > 1 and max_calls - tool_calls <= 1)),
             stop_reason="no_progress" if stalled >= 3 else None,
-            context_policy=context_policy,
-            handoff=build_handoff(graph, role="reader", snapshot=snapshot)
-            if context_policy == "handoff"
-            else None,
-            validation_graph=graph,
         )
         try:
             invocation = provider(turn)
@@ -609,9 +574,6 @@ def run_reader(
         reads=tuple(history),
         read_ao_refs=tuple(sorted(read_refs)),
         stop_reason=stop_reason or ("budget_exhausted" if exhausted else None),
-        handoff=build_handoff(graph, role="reader", snapshot=snapshot)
-        if context_policy == "handoff"
-        else None,
     )
 
 

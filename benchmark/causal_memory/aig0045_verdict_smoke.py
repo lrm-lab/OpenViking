@@ -309,7 +309,6 @@ def run_smoke(
     attempts: int = 1,
     attempt_policy: str = "fixed",
     reader_policy: str = "guarded",
-    context_policy: str = "full",
 ) -> dict[str, Any]:
     """Run every material. Role factories receive the attribution mode.
 
@@ -344,7 +343,6 @@ def run_smoke(
         "builder": builder,
         "builder_factory": builder_factory,
         "reader_policy": reader_policy,
-        "context_policy": context_policy,
         "role_factories": {
             "critic": critic_factory,
             "refiner": refiner_factory,
@@ -434,7 +432,6 @@ def run_smoke(
             "attempts": attempts,
             "attempt_policy": attempt_policy,
             "reader_policy": reader_policy,
-            "context_policy": context_policy,
             "dry_run": dry_run,
             "jobs": jobs,
             "max_calls": max_calls,
@@ -467,7 +464,6 @@ def _run_all(
     role_factories: Mapping[str, Callable[[str], Any] | None],
     jobs: int,
     reader_policy: str = "guarded",
-    context_policy: str = "full",
 ) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
     if jobs <= 1 or len(materials) <= 1:
         return [
@@ -481,7 +477,6 @@ def _run_all(
                 builder_factory=builder_factory,
                 role_factories=role_factories,
                 reader_policy=reader_policy,
-                context_policy=context_policy,
             )
             for spec in materials
         ]
@@ -498,7 +493,6 @@ def _run_all(
                 builder_factory=builder_factory,
                 role_factories=role_factories,
                 reader_policy=reader_policy,
-                context_policy=context_policy,
             )
             for spec in materials
         ]
@@ -635,7 +629,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Fixed N-run evaluation, or debug mode stopping at first complete verification.",
     )
     parser.add_argument("--reader-policy", choices=("legacy", "guarded"), default="guarded")
-    parser.add_argument("--context-policy", choices=("full", "handoff"), default="full")
     parser.add_argument("--max-calls", type=int, default=DEFAULT_MAX_CALLS)
     parser.add_argument("--max-seconds", type=float, default=DEFAULT_MAX_SECONDS)
     parser.add_argument(
@@ -674,8 +667,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Override the builder. Default: fake on synthetic, gemma on real.",
     )
     args = parser.parse_args(argv)
-    if args.context_policy == "handoff" and args.reader != "gemma":
-        parser.error("handoff context requires --reader gemma")
     if args.material == "synthetic":
         materials = synthetic_materials()
     else:
@@ -736,7 +727,6 @@ def main(argv: list[str] | None = None) -> int:
                     args.model,
                     url=args.url,
                     usage_path=work / "model-usage.jsonl",
-                    context_policy=args.context_policy,
                 )
     report = run_smoke(
         materials,
@@ -753,7 +743,6 @@ def main(argv: list[str] | None = None) -> int:
         attempts=max(1, args.attempts),
         attempt_policy=args.attempt_policy,
         reader_policy=args.reader_policy,
-        context_policy=args.context_policy,
     )
     report["settings"].update(
         {
@@ -785,7 +774,6 @@ def _run_one(
     builder_factory: Callable[[str], ToolloopProvider] | None,
     role_factories: Mapping[str, Callable[[str], Any] | None],
     reader_policy: str = "guarded",
-    context_policy: str = "full",
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     outcome = normalize_verdict(
         spec.domain_kind,
@@ -869,7 +857,6 @@ def _run_one(
             run_id=spec.run_id,
             frozen_at=FROZEN_AT,
             mode=mode,
-            context_policy=context_policy,
         )
     except Exception as exc:  # Record role failure for both serial and parallel batches.
         row["fallback_reason"] = f"critic_refiner_failed:{getattr(exc, 'code', type(exc).__name__)}"
@@ -908,7 +895,6 @@ def _run_one(
             sidecar_path=cycle.sidecar_path,
             mode=mode,
             reader_policy=reader_policy,
-            context_policy=context_policy,
         )
     except Exception as exc:
         row["reader_schema_ok"] = False
@@ -930,7 +916,6 @@ def _run_one(
             "reads": list(navigation.reads),
             "read_ao_refs": list(navigation.read_ao_refs),
             "stop_reason": navigation.stop_reason,
-            "handoff": navigation.handoff,
             "budget_exhausted": navigation.budget_exhausted,
             "sidecar_path": str(cycle.sidecar_path),
         },
@@ -1081,7 +1066,6 @@ def _gemma_role_factory(
     *,
     url: str | None = None,
     usage_path: Path | None = None,
-    context_policy: str = "full",
 ) -> Callable[[str], Any]:
     """Fresh provider for every material/attempt, even with jobs=1."""
 
@@ -1089,8 +1073,6 @@ def _gemma_role_factory(
         kwargs: dict[str, Any] = _model_kwargs(model, url)
         if usage_path is not None:
             kwargs["usage_path"] = usage_path
-        if context_policy != "full":
-            kwargs["context_policy"] = context_policy
         return provider_type(**kwargs)
 
     return factory

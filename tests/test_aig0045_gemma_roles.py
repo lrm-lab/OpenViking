@@ -651,9 +651,8 @@ def test_refiner_invalid_arguments_or_truncation_are_failures(response: dict[str
 
 
 @pytest.mark.parametrize("jobs", [1, 3])
-@pytest.mark.parametrize("context_policy", ["full", "handoff"])
 def test_cli_four_gemma_roles_full_chain_fake_http(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, jobs: int, context_policy: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, jobs: int
 ) -> None:
     created: dict[str, list[Any]] = {
         role: [] for role in ("builder", "critic", "refiner", "reader")
@@ -752,8 +751,6 @@ def test_cli_four_gemma_roles_full_chain_fake_http(
                 "http://127.0.0.1:18740/llm/v1/chat/completions",
                 "--jobs",
                 str(jobs),
-                "--context-policy",
-                context_policy,
                 "--attempts",
                 "2",
                 "--out",
@@ -766,13 +763,6 @@ def test_cli_four_gemma_roles_full_chain_fake_http(
     )
     result = json.loads(out.read_text())
     row = result["materials"][0]
-    if context_policy == "handoff":
-        audit = next((tmp_path / "work").rglob("trajectory.jsonl"), None)
-        assert audit is not None
-        events = [json.loads(line) for line in audit.read_text().splitlines()]
-        assert {"builder_handoff", "critic_handoff", "refiner_handoff"} <= {
-            e["record_kind"] for e in events
-        }
     assert row["submit"] is True and row["reader_schema_ok"] is True
     assert row["phi_violations_after_refine"] == 0
     assert row["decisive_refs_in_snapshot"] is True
@@ -913,26 +903,3 @@ def test_reader_near_budget_disables_tools_and_keeps_progress_index() -> None:
     assert "Reading budget nearly exhausted" in body["messages"][0]["content"]
     state = json.loads(body["messages"][-1]["content"])
     assert state["reader_progress"]["read_ao_refs"] == [1]
-
-
-def test_reader_handoff_validates_against_authoritative_graph_without_sending_prose() -> None:
-    from dataclasses import replace
-
-    from openviking.session.aig_handoff import build_handoff, graph_index
-
-    original = turn("reader")
-    current = replace(
-        original,
-        graph=graph_index(original.graph),
-        context_policy="handoff",
-        tools=reader_catalog("handoff"),
-        validation_graph=original.graph,
-        handoff=build_handoff(original.graph, role="reader"),
-    )
-    transport = Transport(content(report()))
-    assert provider(GemmaReaderProvider, transport)(current).report == report()
-    body = transport.bodies[0]
-    state = json.loads(body["messages"][-1]["content"])
-    assert "frozen_graph" not in state
-    assert "graph" not in state["handoff"]["upstream_claims"]
-    assert any(t["function"]["name"] == "get_graph_block" for t in body["tools"])

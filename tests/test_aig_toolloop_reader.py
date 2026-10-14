@@ -344,29 +344,6 @@ def test_guarded_reader_stops_stalled_reads_with_final_opportunity(tmp_path: Pat
     assert len(result.reads) == 4
 
 
-def test_reader_handoff_preserves_topology_and_loads_body_on_demand(tmp_path: Path) -> None:
-    from openviking.session.aig_handoff import build_handoff
-
-    surface, snapshot, compiled = _compiled(tmp_path)
-    graph = load_frozen_paper_graph(compiled.revision, snapshot, sidecar_path=compiled.sidecar_path)
-    packet = build_handoff(graph, role="reader", snapshot=snapshot)
-    assert packet == build_handoff(graph, role="reader", snapshot=snapshot)
-    assert len(packet["graph_index"]["edges"]) == len(graph["edges"])
-    assert {b["block_id"] for b in packet["graph_index"]["blocks"]} == {
-        b["block_id"] for b in graph["blocks"]
-    }
-    assert "responsible_agent" not in json.dumps(packet)
-    assert "ps detection used entry_id" not in json.dumps(packet)
-    assert "report" not in packet["upstream_claims"]
-    view = ReaderView(snapshot, graph, root=tmp_path, run_id="lazy", context_policy="handoff")
-    assert view.call("get_graph")["blocks"] == packet["graph_index"]["blocks"]
-    loaded = view.call("get_graph_block", {"block_id": "agent-b"})
-    assert loaded["block"] == next(b for b in graph["blocks"] if b["block_id"] == "agent-b")
-    assert loaded["edges"]
-    with pytest.raises(ReaderError, match="invalid_args"):
-        view.call("get_graph_block", {"block_id": "missing"})
-
-
 def test_guarded_reader_can_declare_unresolved_without_inventing_citations(tmp_path: Path) -> None:
     surface, snapshot, compiled = _compiled(tmp_path)
     provider = FakeReaderProvider(
@@ -396,3 +373,100 @@ def test_guarded_reader_can_declare_unresolved_without_inventing_citations(tmp_p
     assert result.report.decisive_ao_refs == ()
     assert result.report.unresolved_areas == ("need to verify effects",)
     assert result.read_ao_refs == ()
+
+
+def _guard_report():
+    return {
+        "critical_block_id": "agent-b",
+        "decisive_ao_refs": [1],
+        "reason": "AO 1 contains the proposed script",
+        "responsible_agent": "Verification_Expert",
+        "unresolved_areas": [],
+    }
+
+
+def test_guarded_range_read_establishes_evidence_coverage(tmp_path: Path) -> None:
+    surface, snapshot, compiled = _compiled(tmp_path)
+    provider = FakeReaderProvider(
+        [
+            ReaderInvocation("tool", "read_step_range", {"start": 0, "end": 2}),
+            ReaderInvocation("report", report=_guard_report()),
+        ]
+    )
+    result = run_reader(
+        compiled.revision,
+        snapshot,
+        provider,
+        root=tmp_path,
+        run_id="range-coverage",
+        construction_run=_open_run(surface, "range-coverage"),
+        sidecar_path=compiled.sidecar_path,
+    )
+    assert result.read_ao_refs == (0, 1, 2)
+    assert result.report.decisive_ao_refs == (1,)
+
+
+def test_search_results_do_not_establish_decisive_evidence(tmp_path: Path) -> None:
+    surface, snapshot, compiled = _compiled(tmp_path)
+    provider = FakeReaderProvider(
+        [
+            ReaderInvocation("tool", "search", {"pattern": "python"}),
+            ReaderInvocation("report", report=_guard_report()),
+        ]
+    )
+    with pytest.raises(ReaderError, match="unread_decisive_refs"):
+        run_reader(
+            compiled.revision,
+            snapshot,
+            provider,
+            root=tmp_path,
+            run_id="search-coverage",
+            construction_run=_open_run(surface, "search-coverage"),
+            sidecar_path=compiled.sidecar_path,
+        )
+    assert provider.turns[-1].history[0]["ok"] is True
+    assert provider.turns[-1].read_ao_refs == ()
+
+
+def test_final_budget_slot_accepts_report_from_previously_read_evidence(tmp_path: Path) -> None:
+    surface, snapshot, compiled = _compiled(tmp_path)
+    provider = FakeReaderProvider(
+        [
+            *(ReaderInvocation("tool", "read_step", {"index": i}) for i in [1, 2, 3]),
+            ReaderInvocation("report", report=_guard_report()),
+        ]
+    )
+    result = run_reader(
+        compiled.revision,
+        snapshot,
+        provider,
+        root=tmp_path,
+        run_id="final-slot",
+        construction_run=_open_run(surface, "final-slot"),
+        sidecar_path=compiled.sidecar_path,
+        max_calls=4,
+    )
+    assert result.tool_calls == 3
+    assert result.budget_exhausted is False
+    assert provider.turns[-1].remaining_calls == 1
+    assert provider.turns[-1].final_only is True
+    assert result.report.decisive_ao_refs == (1,)
+
+
+def test_failed_reads_stop_without_polluting_evidence_coverage(tmp_path: Path) -> None:
+    surface, snapshot, compiled = _compiled(tmp_path)
+    provider = FakeReaderProvider([ReaderInvocation("tool", "read_step", {"index": 999})] * 16)
+    result = run_reader(
+        compiled.revision,
+        snapshot,
+        provider,
+        root=tmp_path,
+        run_id="failed-reads",
+        construction_run=_open_run(surface, "failed-reads"),
+        sidecar_path=compiled.sidecar_path,
+    )
+    assert result.tool_calls == 3
+    assert result.read_ao_refs == ()
+    assert all(not row["ok"] for row in result.reads)
+    assert result.stop_reason == "no_progress"
+    assert result.report.unresolved_areas == ("no_progress",)
