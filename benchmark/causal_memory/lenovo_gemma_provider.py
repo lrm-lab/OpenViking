@@ -9,9 +9,12 @@ read from ``LENOVO_GATEWAY_API_KEY`` and is never logged or stored on ``stats``.
 from __future__ import annotations
 
 import atexit
+import email.utils
+import http.client
 import json
 import os
 import random
+import re
 import time
 import urllib.error
 import urllib.request
@@ -21,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from benchmark.causal_memory.model_usage import ModelUsageRecorder
-from openviking.session.aig_native_protocol import canonical_dumps
+from openviking.session.aig_native_protocol import TOOLLOOP_BUILD_VERBS, canonical_dumps
 from openviking.session.aig_tool_surface import TOOL_CATALOG, TOOL_SCHEMAS
 from openviking.session.aig_toolloop_builder import ToolInvocation, ToolloopError, ToolloopTurn
 
@@ -29,14 +32,16 @@ GATEWAY_URL = "https://modelfactory.lenovo.com/llm/v1/chat/completions"
 DEFAULT_MODEL = "gemma-4-31B-it"
 API_KEY_ENV = "LENOVO_GATEWAY_API_KEY"
 DEFAULT_TIMEOUT_SECONDS = 240.0
-RETRY_BACKOFF_SECONDS = 0.25
-MAX_NETWORK_RETRIES = 3
+RETRY_BACKOFF_SECONDS = 15.0
+MAX_NETWORK_RETRIES = 6
+MAX_RETRY_DELAY_SECONDS = 120.0
+RETRYABLE_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
 
 
 def retry_backoff_delay(attempt: int) -> float:
     """Exponential backoff with jitter: base * 2**attempt + U(0, base)."""
     base = RETRY_BACKOFF_SECONDS * (2 ** max(0, attempt))
-    return base + random.uniform(0.0, RETRY_BACKOFF_SECONDS)
+    return min(MAX_RETRY_DELAY_SECONDS, base + random.uniform(0.0, 5.0))
 
 
 class LenovoGemmaError(ToolloopError):
@@ -126,12 +131,65 @@ def messages_from_turn(turn: ToolloopTurn) -> list[dict[str, Any]]:
     return messages
 
 
-def request_body_from_turn(
-    turn: ToolloopTurn, *, model: str = DEFAULT_MODEL
-) -> dict[str, Any]:
+def compact_builder_history(turn: ToolloopTurn) -> tuple[dict[str, Any], ...]:
+    """Keep unread evidence and recent actions beside the authoritative draft.
+
+    Compaction changes only model context; the complete audit remains untouched.
+    A fresh read is retained for one decision even if its AO is already represented.
+    """
+    if turn.draft is None:
+        return turn.history
+    covered = {ref for block in turn.draft.get("blocks", []) for ref in block.get("step_refs", [])}
+    build_positions = [
+        i for i, item in enumerate(turn.history) if item.get("verb") in TOOLLOOP_BUILD_VERBS
+    ]
+    keep_build = set(build_positions[-6:])
+    compacted = []
+    for index, item in enumerate(turn.history):
+        verb = item.get("verb")
+        if verb in TOOLLOOP_BUILD_VERBS and index not in keep_build:
+            continue
+        item = dict(item)
+        result = item.get("result")
+        if item.get("ok") and index != len(turn.history) - 1:
+            if verb == "read_step_range" and isinstance(result, list):
+                remaining = [row for row in result if row.get("index") not in covered]
+                item["result"] = remaining or {"compacted": True, "reopen_with": "read_step_range"}
+            elif (
+                verb == "read_step"
+                and isinstance(result, Mapping)
+                and result.get("index") in covered
+            ):
+                item["result"] = {"compacted": True, "reopen_with": "read_step"}
+            elif verb == "read_full_segment" and isinstance(result, str):
+                chunks = re.split(r"\n\n(?=\[\d+\] participant=)", result)
+                retained = []
+                for chunk in chunks:
+                    match = re.match(r"\[(\d+)\] participant=", chunk)
+                    if match and int(match[1]) in covered:
+                        # The continuation notice must survive removing its preceding row.
+                        marker = chunk.find("…[segment truncated:")
+                        if marker >= 0:
+                            retained.append(chunk[marker:])
+                    else:
+                        retained.append(chunk)
+                item["result"] = (
+                    "\n\n".join(retained)
+                    or "AO rows represented in draft; reread with read_step_range."
+                )
+        compacted.append(item)
+    return tuple(compacted)
+
+
+def request_body_from_turn(turn: ToolloopTurn, *, model: str = DEFAULT_MODEL) -> dict[str, Any]:
     """JSON body for ``/chat/completions``. No secrets."""
+    messages = messages_from_turn(
+        ToolloopTurn(turn.system_prompt, turn.tools, compact_builder_history(turn))
+    )
+    if turn.draft is not None:
+        messages.append({"role": "user", "content": _dump_json({"draft": turn.draft})})
     return {
-        "messages": messages_from_turn(turn),
+        "messages": messages,
         "model": model,
         "tool_choice": "required",
         "tools": openai_tools_from_catalog(turn.tools),
@@ -165,7 +223,7 @@ class LenovoGemmaProvider:
         api_key: str | None = None,
         model: str = DEFAULT_MODEL,
         url: str = GATEWAY_URL,
-        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        timeout_seconds: float | None = None,
         urlopen: Callable[..., Any] | None = None,
         sleep: Callable[[float], None] | None = None,
         clock: Callable[[], float] | None = None,
@@ -178,7 +236,11 @@ class LenovoGemmaProvider:
         self._api_key = key.strip()
         self._model = model
         self._url = url
-        self._timeout = float(timeout_seconds)
+        self._timeout = float(
+            timeout_seconds
+            if timeout_seconds is not None
+            else os.environ.get("LENOVO_GATEWAY_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
+        )
         self._urlopen = urlopen or urllib.request.urlopen
         self._sleep = sleep or time.sleep
         self._clock = clock or time.monotonic
@@ -244,6 +306,7 @@ class LenovoGemmaProvider:
             request_status = "provider_error"
             http_status: int | None = None
             loaded: dict[str, Any] | None = None
+            retry_after = 0.0
             request = urllib.request.Request(
                 self._url,
                 data=raw,
@@ -251,6 +314,7 @@ class LenovoGemmaProvider:
                 headers={
                     "Authorization": f"Bearer {self._api_key}",
                     "Content-Type": "application/json",
+                    "X-Coforge-LLM-Client": os.environ.get("COFORGE_EVAL_LLM_CLIENT", "four_roles"),
                 },
             )
             try:
@@ -258,7 +322,7 @@ class LenovoGemmaProvider:
                     status = int(getattr(response, "status", 200) or 200)
                     http_status = status
                     blob = response.read()
-                if status >= 500:
+                if status in RETRYABLE_HTTP_STATUS:
                     request_status = "http_error"
                     raise _RetryableHttp(status)
                 if status >= 400:
@@ -280,24 +344,45 @@ class LenovoGemmaProvider:
             except urllib.error.HTTPError as exc:
                 request_status = "http_error"
                 http_status = exc.code
-                if exc.code >= 500:
+                if exc.code in RETRYABLE_HTTP_STATUS:
                     last_error = exc
+                    value = exc.headers.get("Retry-After", "") if exc.headers else ""
+                    try:
+                        retry_after = float(value)
+                    except ValueError:
+                        try:
+                            retry_after = (
+                                email.utils.parsedate_to_datetime(value).timestamp() - time.time()
+                            )
+                        except (ValueError, TypeError, OverflowError):
+                            pass
                 else:
                     raise LenovoGemmaError("http_error") from exc
             except urllib.error.URLError as exc:
                 request_status = "network_error"
                 last_error = exc
-            except TimeoutError as exc:
+            except (
+                TimeoutError,
+                ConnectionError,
+                http.client.IncompleteRead,
+                http.client.RemoteDisconnected,
+            ) as exc:
                 request_status = "network_error"
                 last_error = exc
             finally:
                 self._usage.completed(
-                    request_id=request_id, started=request_started, model=self._model,
-                    network_attempt=attempt, status=request_status,
-                    http_status=http_status, payload=loaded,
+                    request_id=request_id,
+                    started=request_started,
+                    model=self._model,
+                    network_attempt=attempt,
+                    status=request_status,
+                    http_status=http_status,
+                    payload=loaded,
                 )
             if attempt + 1 < attempts:
-                self._sleep(retry_backoff_delay(attempt))
+                self._sleep(
+                    min(MAX_RETRY_DELAY_SECONDS, max(retry_after, retry_backoff_delay(attempt)))
+                )
                 continue
             if last_error is not None:
                 raise LenovoGemmaError("network_error") from last_error

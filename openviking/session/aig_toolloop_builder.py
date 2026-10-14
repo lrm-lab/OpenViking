@@ -43,28 +43,28 @@ _REPEAT_MESSAGE = "identical call repeated; change arguments or proceed"
 
 BUILDER_SYSTEM_PROMPT = (
     "你从空图构建一条失败轨迹的自适应影响图。你有一组检查工具（T_log：概览/读整段/读区间/读单步/正则搜索/列智能体/看问题/看当前图）与一组构建工具（T_build）。日志步骤即 AO "
-    "行（行动-观察对）。\n流程：先用 get_overview/get_question 建立全局认识 → 交替\"读日志（read_full_segment/read_step_range/read_step/search）"
-    "—建图（add_block/add_inheritance_note/add_skip_attribution）\"，直到你认为图完整、忠实、可导航。\n规则：\n- "
-    "读策略：get_overview 列出每个 segment 的行号与规模；一个 segment 的全部内容用一次 read_full_segment 拿全（segment 参数取 overview 里的值），"
+    '行（行动-观察对）。\n流程：先用 get_overview/get_question 建立全局认识 → 交替"读日志（read_full_segment/read_step_range/read_step/search）'
+    '—建图（add_block/add_inheritance_note/add_skip_attribution）"，直到你认为图完整、忠实、可导航。\n规则：\n- '
+    "读策略：get_overview 列出每个 segment 的行号与规模；先用 read_full_segment 读取 segment（参数取 overview 里的值）；返回最多 20,000 字符，只在完整 AO 边界截断；若有截断提示，从提示的 next AO index 用 read_step_range 继续读取未返回的部分，"
     "不要逐行 read_step 穷举扫描；只关心局部时用 read_step_range 取大区间；read_step 仅用于核验个别疑点行；已读过的内容不重复读；为建图、修补与 submit 留足调用预算。\n- "
     "只把日志里真实存在的步骤合入节点（step_refs 必须落在快照内；服务端逐调用校验）。\n- 四类节点：task=用户问题（唯一根）；orchestrator=调度回合；"
     "agent=工作回合（唯一带 input/output/authorship 的类型）；conclusion=最终答案（唯一汇）。\n- 边只能从较早节点指向较晚节点。相邻继承用 "
-    "add_inheritance_note；跨接归因用 add_skip_attribution。边应形成从 task 到 conclusion 的链，每个中间节点都要在链上；不要从 task 直接连到 conclusion 而绕过中间节点。inherited 写\"后一节点复用了前一节点的什么\"，effect "
-    "写\"它在下游如何出错\"——没有失效相关复用就不要加边。\n- 节点不重叠（每个行号只属于一个块；行号冲突时先用 modify_block 调整已有块的 step_refs）；summary 是抽象不是抄录；authorship 如实（authored/relayed/executed"
+    'add_inheritance_note；跨接归因用 add_skip_attribution。边应形成从 task 到 conclusion 的链，每个中间节点都要在链上；不要从 task 直接连到 conclusion 而绕过中间节点。inherited 写"后一节点复用了前一节点的什么"，effect '
+    '写"它在下游如何出错"——没有失效相关复用就不要加边。\n- 节点不重叠（每个行号只属于一个块；行号冲突时先用 modify_block 调整已有块的 step_refs）；summary 是抽象不是抄录；authorship 如实（authored/relayed/executed'
     "）。\n- 发现某节点输出未满足下发的 instruction_or_question 却被提交下游，用 mark_defect_recorded 标记。\n停止条件：submit 前自检三件事——有且仅有一个 task 根；有且仅有一个 conclusion 汇；每个非 task 节点都有指向它的入边（沿边可从 task 根到达它），每个非 conclusion 节点都有出边（沿边可达 conclusion）。三者齐备才调用 "
     "submit（一次性，不可撤销）。预算耗尽由服务端截断。"
 )
 
 BUILDER_SUCCESS_PROMPT = (
     "你从空图构建一条成功轨迹的自适应影响图。你有一组检查工具（T_log：概览/读整段/读区间/读单步/正则搜索/列智能体/看问题/看当前图）与一组构建工具（T_build）。日志步骤即 AO "
-    "行（行动-观察对）。\n流程：先用 get_overview/get_question 建立全局认识 → 交替\"读日志（read_full_segment/read_step_range/read_step/search）"
-    "—建图（add_block/add_inheritance_note/add_skip_attribution）\"，直到你认为图完整、忠实、可导航。\n规则：\n- "
-    "读策略：get_overview 列出每个 segment 的行号与规模；一个 segment 的全部内容用一次 read_full_segment 拿全（segment 参数取 overview 里的值），"
+    '行（行动-观察对）。\n流程：先用 get_overview/get_question 建立全局认识 → 交替"读日志（read_full_segment/read_step_range/read_step/search）'
+    '—建图（add_block/add_inheritance_note/add_skip_attribution）"，直到你认为图完整、忠实、可导航。\n规则：\n- '
+    "读策略：get_overview 列出每个 segment 的行号与规模；先用 read_full_segment 读取 segment（参数取 overview 里的值）；返回最多 20,000 字符，只在完整 AO 边界截断；若有截断提示，从提示的 next AO index 用 read_step_range 继续读取未返回的部分，"
     "不要逐行 read_step 穷举扫描；只关心局部时用 read_step_range 取大区间；read_step 仅用于核验个别疑点行；已读过的内容不重复读；为建图、修补与 submit 留足调用预算。\n- "
     "只把日志里真实存在的步骤合入节点（step_refs 必须落在快照内；服务端逐调用校验）。\n- 四类节点：task=用户问题（唯一根）；orchestrator=调度回合；"
     "agent=工作回合（唯一带 input/output/authorship 的类型）；conclusion=最终答案（唯一汇）。\n- 边只能从较早节点指向较晚节点。相邻继承用 "
-    "add_inheritance_note；跨接归因用 add_skip_attribution。边应形成从 task 到 conclusion 的链，每个中间节点都要在链上；不要从 task 直接连到 conclusion 而绕过中间节点。inherited 写\"后一节点复用了前一节点的什么\"，effect "
-    "写\"这次复用如何促成最终正确结果\"——没有促成正确结果的复用就不要加边。\n- 节点不重叠（每个行号只属于一个块；行号冲突时先用 modify_block 调整已有块的 step_refs）；summary 是抽象不是抄录；authorship 如实（authored/relayed/executed"
+    'add_inheritance_note；跨接归因用 add_skip_attribution。边应形成从 task 到 conclusion 的链，每个中间节点都要在链上；不要从 task 直接连到 conclusion 而绕过中间节点。inherited 写"后一节点复用了前一节点的什么"，effect '
+    '写"这次复用如何促成最终正确结果"——没有促成正确结果的复用就不要加边。\n- 节点不重叠（每个行号只属于一个块；行号冲突时先用 modify_block 调整已有块的 step_refs）；summary 是抽象不是抄录；authorship 如实（authored/relayed/executed'
     "）。\n- 发现某节点输出未满足下发的 instruction_or_question 却被提交下游，用 mark_defect_recorded 标记。成功轨迹仍可有未达标记录。"
     "\n停止条件：submit 前自检三件事——有且仅有一个 task 根；有且仅有一个 conclusion 汇；每个非 task 节点都有指向它的入边（沿边可从 task 根到达它），每个非 conclusion 节点都有出边（沿边可达 conclusion）。三者齐备才调用 submit（一次性，不可撤销）。预算耗尽由服务端截断。"
 )
@@ -119,6 +119,7 @@ class ToolloopTurn:
     system_prompt: str
     tools: tuple[tuple[str, str], ...]
     history: tuple[dict[str, Any], ...]
+    draft: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -217,15 +218,21 @@ def run_toolloop(
     last_call_key: tuple[str, str] | None = None
     repeat_count = 0
     edge_rejections: dict[str, int] = {}
+    stagnant_calls = 0
+    seen_information: set[str] = set()
     while True:
+        if stagnant_calls >= 6:
+            return _fallback(run_id, bound.watermark, audit, reason="no_progress")
         if len(audit) >= max_calls or now() - started >= max_seconds:
             return _fallback(run_id, bound.watermark, audit)
         turn = ToolloopTurn(
             system_prompt=system_prompt,
             tools=TOOL_CATALOG,
             history=tuple(_json_copy(item) for item in history),
+            draft=surface.get_graph(),
         )
         invocation = provider(turn)
+        stagnant_calls += 1
         if not isinstance(invocation, ToolInvocation):
             raise ToolloopError("invalid_provider_result")
         try:
@@ -271,20 +278,17 @@ def run_toolloop(
                 repeat_count=repeat_count,
             )
             if repeat_count >= _REPEAT_STOP:
-                return _fallback(
-                    run_id, bound.watermark, audit, reason=REPEAT_LOOP_REASON
-                )
+                return _fallback(run_id, bound.watermark, audit, reason=REPEAT_LOOP_REASON)
             continue
         call_started = now()
+        before_graph = surface.get_graph()
         try:
             result = surface.call(invocation.verb, arguments)
         except ToolSurfaceError as exc:
             elapsed = _elapsed_ms(call_started, now())
             detail = getattr(exc, "detail", None)
             if exc.code == "edge_not_forward" and isinstance(detail, dict):
-                pair_key = json.dumps(
-                    [detail["source"], detail["target"]], sort_keys=True
-                )
+                pair_key = json.dumps([detail["source"], detail["target"]], sort_keys=True)
                 edge_rejections[pair_key] = edge_rejections.get(pair_key, 0) + 1
                 detail = {**detail, "same_pair_rejections": edge_rejections[pair_key]}
                 if edge_rejections[pair_key] > 1:
@@ -304,6 +308,21 @@ def run_toolloop(
                 repeat_count=repeat_count,
             )
             continue
+        if surface.get_graph() != before_graph:
+            stagnant_calls = 0
+        elif invocation.verb in {
+            "get_overview",
+            "get_question",
+            "read_step",
+            "read_step_range",
+            "read_full_segment",
+            "search",
+            "list_agents",
+        }:
+            information = json.dumps({"verb": invocation.verb, "result": result}, sort_keys=True)
+            if information not in seen_information:
+                seen_information.add(information)
+                stagnant_calls = 0
         elapsed = _elapsed_ms(call_started, now())
         _record(
             audit,

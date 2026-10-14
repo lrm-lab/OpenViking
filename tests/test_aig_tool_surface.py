@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -77,9 +78,7 @@ def _snapshot(
     records: tuple[AORecord, ...] | None = None,
 ) -> AoSnapshot:
     rows = (
-        records
-        if records is not None
-        else tuple(_record(i, text) for i, text in enumerate(texts))
+        records if records is not None else tuple(_record(i, text) for i, text in enumerate(texts))
     )
     return AoSnapshot(rows, watermark=watermark, question=question, agents=agents)
 
@@ -191,8 +190,7 @@ def test_overview_full_segment_and_step_bounds(tmp_path: Path) -> None:
     assert overview["rows"][0]["segment"] == "seg-1"
     assert overview["rows"][0]["index"] == 0
     assert (
-        overview["rows"][0]["size"] > overview["rows"][1]["size"]
-        or overview["rows"][0]["size"] > 0
+        overview["rows"][0]["size"] > overview["rows"][1]["size"] or overview["rows"][0]["size"] > 0
     )
     full = surface.read_full_segment("seg-1")
     assert "alpha" in full
@@ -231,9 +229,91 @@ def test_read_full_segment_filters_and_reports_unknown(tmp_path: Path) -> None:
     assert caught.value.code == "unknown_segment"
     assert caught.value.detail == {"available_segments": ["seg-a", "seg-b"]}
     _assert_code(lambda: surface.call("read_full_segment", {}), "invalid_args")
-    _assert_code(
-        lambda: surface.call("read_full_segment", {"segment": 1}), "invalid_args"
+    _assert_code(lambda: surface.call("read_full_segment", {"segment": 1}), "invalid_args")
+
+
+@pytest.mark.parametrize("interleaved", [False, True])
+def test_full_segment_total_limit_keeps_complete_aos_and_global_indices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interleaved: bool
+) -> None:
+    records = tuple(
+        _record(
+            i,
+            "行动" * 1500,
+            observation="观察" * 1500,
+            segment="other" if interleaved and i % 2 else "seg-1",
+        )
+        for i in range(20)
     )
+    surface, _snapshot = _open(tmp_path, [], records=records)
+    setting = "openviking.session.aig_tool_surface._READ_FULL_SEGMENT_MAX_CHARS"
+    monkeypatch.setattr(setting, 1_000_000, raising=False)
+    complete = surface.read_full_segment("seg-1").split("\n\n")
+    monkeypatch.setattr(setting, 20_000)
+    result = surface.read_full_segment("seg-1")
+    pieces = result.split("\n\n")
+    returned, notice = pieces[:-1], pieces[-1]
+    assert len(result) <= 20_000
+    assert 0 < len(returned) < len(complete)
+    assert returned == complete[: len(returned)]
+    assert "segment truncated" in notice
+    assert f"returned {len(returned)}/{len(complete)} AO rows" in notice
+    match = re.search(r"next AO index=(\d+)", notice)
+    assert match is not None
+    next_index = int(match.group(1))
+    assert complete[len(returned)].startswith(f"[{next_index}] ")
+    assert "read_step_range" in notice
+    assert surface.read_step(next_index)["record"]["observation"]["text"] == "观察" * 1500
+    assert surface.call("read_full_segment", {"s": "seg-1"}) == result
+
+
+def test_full_segment_exact_limit_does_not_truncate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    surface, _snapshot = _open(tmp_path, ["first" * 100, "second" * 100])
+    result = surface.read_full_segment("seg-1")
+    monkeypatch.setattr(
+        "openviking.session.aig_tool_surface._READ_FULL_SEGMENT_MAX_CHARS",
+        len(result),
+        raising=False,
+    )
+    assert surface.read_full_segment("seg-1") == result
+    assert "segment truncated" not in result
+
+
+def test_full_segment_reserves_notice_space_without_cutting_last_ao(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    surface, _snapshot = _open(tmp_path, ["first" * 100, "second" * 100])
+    complete = surface.read_full_segment("seg-1")
+    monkeypatch.setattr(
+        "openviking.session.aig_tool_surface._READ_FULL_SEGMENT_MAX_CHARS",
+        len(complete) - 1,
+        raising=False,
+    )
+    result = surface.read_full_segment("seg-1")
+    first, notice = result.split("\n\n")
+    assert first == complete.split("\n\n")[0]
+    assert len(result) <= len(complete) - 1
+    assert "returned 1/2 AO rows" in notice
+    assert "next AO index=1" in notice
+
+
+def test_full_segment_never_cuts_an_oversized_first_ao(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    surface, _snapshot = _open(tmp_path, ["A" * 5000])
+    monkeypatch.setattr(
+        "openviking.session.aig_tool_surface._READ_FULL_SEGMENT_MAX_CHARS",
+        500,
+        raising=False,
+    )
+    result = surface.read_full_segment("seg-1")
+    assert len(result) <= 500
+    assert "returned 0/1 AO rows" in result
+    assert "next AO index=0" in result
+    assert "action:" not in result
+    assert surface.read_step(0)["record"]["action"]["text"] == "A" * 5000
 
 
 def test_bulk_reads_truncate_but_read_step_stays_full(tmp_path: Path) -> None:
@@ -324,9 +404,7 @@ def test_list_agents_hides_system_prompt(tmp_path: Path) -> None:
         tmp_path, [], records=(derived_row,), run_id="run-derived", agents=()
     )
     catalog = derived.list_agents()
-    assert catalog == [
-        {"identity": "planner", "role": "coordinator", "capability": "routing"}
-    ]
+    assert catalog == [{"identity": "planner", "role": "coordinator", "capability": "routing"}]
     assert _DERIVED_SECRET not in json.dumps(catalog)
     assert "system_prompt" not in json.dumps(catalog)
 
@@ -635,10 +713,7 @@ def test_gap_requires_skip_attribution(tmp_path: Path) -> None:
         revision_id="rev-run-gap",
         frozen_at="2026-10-11T00:00:00.000Z",
     )
-    edges = {
-        (edge.source_block_id, edge.target_block_id): edge
-        for edge in compiled.revision.edges
-    }
+    edges = {(edge.source_block_id, edge.target_block_id): edge for edge in compiled.revision.edges}
     assert edges[("a", "b")].relation_type == "skip"
 
 
@@ -693,17 +768,13 @@ def test_participant_mismatch_offers_modify_repair(tmp_path: Path) -> None:
             "fields": {"agent_name": "task-agent"},
         }
     ]
-    surface.add_block(
-        "agent", _agent([0], agent_name="task-agent"), block_id="agent-1"
-    )
+    surface.add_block("agent", _agent([0], agent_name="task-agent"), block_id="agent-1")
     with pytest.raises(ToolSurfaceError) as again:
         surface.modify_block("agent-1", {"agent_name": "task"})
     assert again.value.code == "participant_mismatch"
     repair = again.value.detail["repairs"][0]
     surface.modify_block(repair["block_id"], repair["fields"])
-    agent = next(
-        block for block in surface.get_graph()["blocks"] if block["block_id"] == "agent-1"
-    )
+    agent = next(block for block in surface.get_graph()["blocks"] if block["block_id"] == "agent-1")
     assert agent["agent_name"] == "task-agent"
 
 

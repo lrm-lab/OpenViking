@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 
 from openviking.session.aig_native_protocol import canonical_dumps, read_native_edge_revision
-from openviking.session.aig_role_chain import AigConstructionRun
 from openviking.session.aig_tool_surface import AigToolSurface, AoSnapshot
 from openviking.session.aig_toolloop_critic import FakeCriticProvider
 from openviking.session.aig_toolloop_orchestrator import run_critic_refiner
@@ -135,7 +134,7 @@ def test_empty_set_compiles_without_entering_the_loop(tmp_path: Path) -> None:
     assert result.run.critique(result.run.session_for("critic"), []) == 1
 
 
-def test_high_severity_exhausts_rounds_into_fallback(tmp_path: Path) -> None:
+def test_high_severity_without_progress_stops_into_fallback(tmp_path: Path) -> None:
     surface, snapshot = _legal_surface(tmp_path, "run-high")
     critic = FakeCriticProvider([{"violations": [_violation("high")]}])
     refiner = FakeRefinerProvider()
@@ -150,20 +149,20 @@ def test_high_severity_exhausts_rounds_into_fallback(tmp_path: Path) -> None:
     )
     assert result.status == "fallback"
     assert result.entered_loop is True
-    assert result.revision_rounds == 3
+    assert result.revision_rounds == 1
     assert result.revision is None
     assert result.sidecar_path is None
-    assert result.run.critic_rounds == 3
-    assert result.run.refiner_rounds == 3
+    assert result.run.critic_rounds == 1
+    assert result.run.refiner_rounds == 1
     assert result.run.construction_mode == "fallback"
     assert result.run.trust == "provisional"
     assert result.fallback_marker is not None
     assert result.fallback_marker["accepted_as_aig"] is False
     assert result.fallback_marker["deterministic_view"] == "build_minimal_fallback_view"
-    assert result.fallback_marker["reason"] == "high_severity_violations"
-    assert len(critic.turns) == 4
+    assert result.fallback_marker["reason"] == "no_progress"
+    assert len(critic.turns) == 1
     rows = _chain(result.trajectory_path)
-    assert sum(row["record_kind"] == "refine_round" for row in rows) == 3
+    assert sum(row["record_kind"] == "refine_round" for row in rows) == 1
     assert rows[-1]["body"]["status"] == "fallback"
     sidecar = tmp_path / "toolloop-audit" / "run-high" / "rev-run-high.paper-graph.json"
     assert not sidecar.exists()
@@ -184,7 +183,7 @@ def test_low_severity_freezes_with_known_violations(tmp_path: Path) -> None:
     )
     assert result.status == "frozen"
     assert result.entered_loop is True
-    assert result.revision_rounds == 3
+    assert result.revision_rounds == 1
     assert result.revision is not None
     assert result.revision.construction_mode == CONSTRUCTION_MODE_ADAPTIVE_AGENTIC
     assert result.run.construction_mode == "native_single_pass_aig"
@@ -198,7 +197,7 @@ def test_low_severity_freezes_with_known_violations(tmp_path: Path) -> None:
     assert parsed.revision.construction_mode == CONSTRUCTION_MODE_ADAPTIVE_AGENTIC
     assert parsed.revision.known_violations[0]["severity"] == "low"
     rows = _chain(result.trajectory_path)
-    assert sum(row["record_kind"] == "refine_round" for row in rows) == 3
+    assert sum(row["record_kind"] == "refine_round" for row in rows) == 1
     assert rows[-1]["body"]["status"] == "frozen"
 
 
@@ -353,9 +352,7 @@ def test_appendix_f_shape_compiles_and_round_trips(tmp_path: Path) -> None:
     assert blocks["D"].authorship == "relayed"
     assert (blocks["D"].ao_start_seq, blocks["D"].ao_end_seq) == (4, 5)
     assert len(blocks["D"].source_refs) == 2
-    edges = {
-        (edge.source_block_id, edge.target_block_id): edge for edge in compiled.revision.edges
-    }
+    edges = {(edge.source_block_id, edge.target_block_id): edge for edge in compiled.revision.edges}
     assert edges[("B", "C")].relation_type == "influence"
     assert edges[("C", "D")].relation_type == "influence"
     assert edges[("A", "D")].relation_type == "skip"
@@ -419,3 +416,32 @@ def test_invalid_authorship_is_rejected(tmp_path: Path) -> None:
             frozen_at=_FROZEN_AT,
         )
     assert caught.value.code == "invalid_authorship"
+
+
+def test_refiner_stall_after_real_fix_reaudits_before_fallback(tmp_path: Path) -> None:
+    surface, snapshot = _legal_surface(tmp_path, "run-fixed-then-stalled")
+    critic = FakeCriticProvider([{"violations": [_violation("high")]}, {"violations": []}])
+    refiner = FakeRefinerProvider(
+        [
+            RefinerAction(
+                "edit",
+                "modify_block",
+                {"block_id": "agent-1", "fields": {"summary": "corrected"}},
+                "critic:0:semantic:agent-1",
+            ),
+            RefinerAction("edit", "get_graph", {}),
+            RefinerAction("edit", "get_graph", {}),
+        ]
+    )
+    result = run_critic_refiner(
+        surface,
+        snapshot,
+        critic=critic,
+        refiner=refiner,
+        root=tmp_path,
+        run_id="run-fixed-then-stalled",
+        frozen_at=_FROZEN_AT,
+    )
+    assert result.status == "frozen"
+    assert result.known_violations == ()
+    assert len(critic.turns) == 2

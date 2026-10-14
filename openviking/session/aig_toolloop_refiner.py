@@ -47,6 +47,7 @@ def refiner_prompt_for_mode(mode: str | None) -> str:
         return REFINER_NEUTRAL_PROMPT
     return REFINER_SYSTEM_PROMPT
 
+
 REFINER_READ_VERBS = frozenset({"get_graph", "read_step", "read_step_range"})
 REFINER_EDIT_VERBS = frozenset(TOOLLOOP_BUILD_VERBS - {"submit"})
 _ENDPOINT_VERBS = frozenset(
@@ -103,6 +104,7 @@ class RefinerRound:
     edits: tuple[dict[str, Any], ...]
     unresolvable: tuple[dict[str, Any], ...]
     draft: dict[str, Any]
+    stop_reason: str | None = None
 
 
 class RefinerProvider(Protocol):
@@ -168,6 +170,22 @@ class RefinerSession:
             raise RefinerError("verb_not_in_role")
         chosen, args = _take_violation_id(arguments, violation_id)
         self._check_scope(chosen, verb, args)
+        if verb == "modify_block":
+            block = next(
+                (
+                    item
+                    for item in self._surface.get_graph()["blocks"]
+                    if item["block_id"] == args.get("block_id")
+                ),
+                None,
+            )
+            fields = args.get("fields")
+            if (
+                block is not None
+                and isinstance(fields, Mapping)
+                and all(key in block and block[key] == value for key, value in fields.items())
+            ):
+                raise RefinerError("no_effect_edit")
         try:
             return self._surface.apply_refine(verb, args)
         except ToolSurfaceError as exc:
@@ -219,6 +237,9 @@ def run_refiner_round(
     history: list[dict[str, Any]] = []
     edits: list[dict[str, Any]] = []
     declared: list[dict[str, str]] = []
+    failures: dict[str, int] = {}
+    seen_reads: set[str] = set()
+    stop_reason = None
     for _ in range(max_calls):
         turn = RefinerTurn(
             system_prompt=refiner_prompt_for_mode(mode),
@@ -245,6 +266,14 @@ def run_refiner_round(
             continue
         if action.kind != "edit":
             raise RefinerError("invalid_provider_result")
+        if action.verb in REFINER_READ_VERBS:
+            from openviking.session.aig_native_protocol import canonical_dumps
+
+            read_key = canonical_dumps({"verb": action.verb, "arguments": action.arguments})
+            if read_key in seen_reads:
+                stop_reason = "no_progress"
+                break
+            seen_reads.add(read_key)
         try:
             result = session.call(action.verb, action.arguments, violation_id=action.violation_id)
         except RefinerError as exc:
@@ -253,9 +282,14 @@ def run_refiner_round(
                     "error_code": exc.code,
                     "ok": False,
                     "verb": action.verb,
+                    "arguments": dict(action.arguments),
                     "violation_id": action.violation_id,
                 }
             )
+            failures[action.violation_id] = failures.get(action.violation_id, 0) + 1
+            if failures[action.violation_id] >= 2:
+                stop_reason = "no_progress"
+                break
             continue
         edit = {
             "arguments": dict(action.arguments),
@@ -263,12 +297,21 @@ def run_refiner_round(
             "verb": action.verb,
             "violation_id": action.violation_id,
         }
-        edits.append(edit)
+        if action.verb in REFINER_EDIT_VERBS:
+            edits.append(edit)
+            failures.clear()
+            seen_reads.clear()
         history.append({"ok": True, **edit})
+    if stop_reason:
+        declared_ids = {item["violation_id"] for item in declared}
+        for violation_id in session._by_id:
+            if violation_id not in declared_ids:
+                declared.append(session.declare_unresolvable(violation_id, stop_reason))
     return RefinerRound(
         edits=tuple(edits),
         unresolvable=tuple(declared),
         draft=session._surface.get_graph(),
+        stop_reason=stop_reason,
     )
 
 

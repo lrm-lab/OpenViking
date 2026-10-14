@@ -87,7 +87,9 @@ def _assert_to_dict_roundtrip(records: list[AORecord], path: Path) -> list[AORec
     with path.open("w", encoding="utf-8") as handle:
         for record in records:
             handle.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
-    raw = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    raw = [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
     assert raw == [record.to_dict() for record in records]
     loaded = _load_ao_jsonl(path)
     assert len(loaded) == len(records)
@@ -102,7 +104,9 @@ def _assert_to_dict_roundtrip(records: list[AORecord], path: Path) -> list[AORec
     return loaded
 
 
-def _export_args(tmp_path: Path, attempts: Path, manifest: Path, verdicts: Path) -> argparse.Namespace:
+def _export_args(
+    tmp_path: Path, attempts: Path, manifest: Path, verdicts: Path
+) -> argparse.Namespace:
     return argparse.Namespace(
         attempts=attempts,
         manifest=manifest,
@@ -146,7 +150,12 @@ def test_transcript_to_records_pairs_tools_skips_thinking_and_roundtrips(tmp_pat
                 "assistant",
                 [
                     {"type": "thinking", "text": "I should run ls, not a real action"},
-                    {"type": "toolCall", "name": "bash", "arguments": {"command": "ls"}},
+                    {
+                        "type": "toolCall",
+                        "id": "call-bash",
+                        "name": "bash",
+                        "arguments": {"command": "ls"},
+                    },
                 ],
                 "2026-01-01T00:00:02Z",
             ),
@@ -170,7 +179,14 @@ def test_transcript_to_records_pairs_tools_skips_thinking_and_roundtrips(tmp_pat
             _message(
                 "m4",
                 "assistant",
-                [{"type": "toolCall", "name": "grep", "arguments": {"pattern": "foo"}}],
+                [
+                    {
+                        "type": "toolCall",
+                        "id": "call-grep",
+                        "name": "grep",
+                        "arguments": {"pattern": "foo"},
+                    }
+                ],
                 "2026-01-01T00:00:05Z",
             ),
             {
@@ -210,7 +226,9 @@ def test_transcript_to_records_pairs_tools_skips_thinking_and_roundtrips(tmp_pat
     assert len(set(sequences)) == len(sequences)
     assert {record.session_id for record in records} == {SESSION_ID}
     _assert_compile_preflight(records, participant="daemon-agent", segment=SESSION_ID)
-    assert all(not (record.action.get("text") or "").startswith("I should run ls") for record in records)
+    assert all(
+        not (record.action.get("text") or "").startswith("I should run ls") for record in records
+    )
 
     paired = [record for record in records if record.action.get("tool") in {"bash", "grep"}]
     assert [record.action["tool"] for record in paired] == ["bash", "grep"]
@@ -275,7 +293,9 @@ def test_cmd_export_success_zip(tmp_path: Path, capsys: Any) -> None:
     assert rc == 0
     assert "task-zip" in captured.out
     rewritten = [
-        json.loads(line) for line in verdicts.read_text(encoding="utf-8").splitlines() if line.strip()
+        json.loads(line)
+        for line in verdicts.read_text(encoding="utf-8").splitlines()
+        if line.strip()
     ]
     by_episode = {row["episode_id"]: row["session_id"] for row in rewritten}
     assert by_episode == {"ep-1": sid_a, "ep-2": sid_b}
@@ -289,8 +309,12 @@ def test_cmd_export_task_seq(tmp_path: Path, capsys: Any) -> None:
     prompt_beta = "PROMPT_BETA unique for sequential claim"
     sid_a = "11111111-1111-1111-1111-111111111111"
     sid_b = "22222222-2222-2222-2222-222222222222"
-    _write_session(sessions / f"{sid_a}.jsonl", sid_a, [_user_text("u1", prompt_beta, "2026-01-01T00:00:01Z")])
-    _write_session(sessions / f"{sid_b}.jsonl", sid_b, [_user_text("u1", prompt_alpha, "2026-01-01T00:00:01Z")])
+    _write_session(
+        sessions / f"{sid_a}.jsonl", sid_a, [_user_text("u1", prompt_beta, "2026-01-01T00:00:01Z")]
+    )
+    _write_session(
+        sessions / f"{sid_b}.jsonl", sid_b, [_user_text("u1", prompt_alpha, "2026-01-01T00:00:01Z")]
+    )
 
     attempts = _write_jsonl(
         tmp_path / "attempts.jsonl",
@@ -319,7 +343,9 @@ def test_cmd_export_task_seq(tmp_path: Path, capsys: Any) -> None:
     assert rc == 0
     assert "task-seq" in captured.out
     rewritten = [
-        json.loads(line) for line in verdicts.read_text(encoding="utf-8").splitlines() if line.strip()
+        json.loads(line)
+        for line in verdicts.read_text(encoding="utf-8").splitlines()
+        if line.strip()
     ]
     by_episode = {row["episode_id"]: row["session_id"] for row in rewritten}
     assert by_episode == {"ep-1": sid_b, "ep-2": sid_a}
@@ -357,7 +383,9 @@ def test_cmd_export_memory_seq(tmp_path: Path, capsys: Any) -> None:
     assert rc == 0
     assert "memory-seq" in captured.out
     rewritten = [
-        json.loads(line) for line in verdicts.read_text(encoding="utf-8").splitlines() if line.strip()
+        json.loads(line)
+        for line in verdicts.read_text(encoding="utf-8").splitlines()
+        if line.strip()
     ]
     assert rewritten[0]["session_id"] == sid_mem
     _assert_exported_sessions(tmp_path / "sessions-out", captured.out, participant="memory-agent")
@@ -373,7 +401,14 @@ def test_transcript_to_records_participant_passthrough(tmp_path: Path) -> None:
             _message(
                 "m1",
                 "assistant",
-                [{"type": "toolCall", "name": "bash", "arguments": {"command": "ls"}}],
+                [
+                    {
+                        "type": "toolCall",
+                        "id": "call-bash",
+                        "name": "bash",
+                        "arguments": {"command": "ls"},
+                    }
+                ],
                 "2026-01-01T00:00:02Z",
             ),
             {
@@ -410,7 +445,12 @@ def test_transcript_to_records_compile_preflight_ids(tmp_path: Path) -> None:
                 "assistant",
                 [
                     {"type": "thinking", "text": "skip me"},
-                    {"type": "toolCall", "name": "bash", "arguments": {"command": "ls"}},
+                    {
+                        "type": "toolCall",
+                        "id": "call-bash",
+                        "name": "bash",
+                        "arguments": {"command": "ls"},
+                    },
                 ],
                 "2026-01-01T00:00:02Z",
             ),
@@ -528,7 +568,9 @@ def test_cmd_reverify_routes_detail_and_skips_unknown(tmp_path: Path, monkeypatc
     assert urlparse(kw_url).port == 9102
     assert kw_payload == {"episode_id": "kw-1", "workspace_dir": "/ws/kw"}
 
-    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = [
+        json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
     assert [row["episode_id"] for row in rows] == ["ir-1", "kw-1"]
     assert rows[0]["domain_kind"] == "browsecomp"
     assert rows[0]["detail"] == {
@@ -545,3 +587,164 @@ def test_cmd_reverify_routes_detail_and_skips_unknown(tmp_path: Path, monkeypatc
         "judge": "glm",
     }
     assert "noise" not in rows[1]["detail"]
+
+
+def test_interleaved_notices_and_parallel_tools_keep_action_order_and_ids(tmp_path: Path) -> None:
+    transcript = tmp_path / f"{SESSION_ID}.jsonl"
+    _write_session(
+        transcript,
+        SESSION_ID,
+        [
+            _user_text("u0", "original task", "2026-01-01T00:00:01Z"),
+            _message(
+                "a1",
+                "assistant",
+                [
+                    {
+                        "type": "toolCall",
+                        "id": "call-a",
+                        "name": "bash",
+                        "arguments": {"command": "first"},
+                    },
+                    {
+                        "type": "toolCall",
+                        "id": "call-b",
+                        "name": "bash",
+                        "arguments": {"command": "second"},
+                    },
+                ],
+                "2026-01-01T00:00:02Z",
+            ),
+            _user_text("u1", "inbox notice", "2026-01-01T00:00:03Z"),
+            {
+                "type": "message",
+                "id": "r-b",
+                "timestamp": "2026-01-01T00:00:04Z",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": "call-b",
+                    "content": [{"type": "text", "text": "second result"}],
+                },
+            },
+            {
+                "type": "message",
+                "id": "r-a",
+                "timestamp": "2026-01-01T00:00:05Z",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": "call-a",
+                    "content": [{"type": "text", "text": "first result"}],
+                },
+            },
+        ],
+    )
+    rows = transcript_to_records(transcript, participant="task-agent")
+    assert [r.sequence for r in rows] == [1, 2, 3, 4]
+    assert [r.action.get("text", r.action.get("args", {}).get("command")) for r in rows] == [
+        "original task",
+        "first",
+        "second",
+        "inbox notice",
+    ]
+    assert rows[1].observation["text"] == "first result"
+    assert rows[2].observation["text"] == "second result"
+    assert rows[1].action["tool_call_id"] == "call-a"
+    assert rows[2].action["tool_call_id"] == "call-b"
+
+
+def test_explicit_unknown_tool_result_does_not_attach_to_other_call(tmp_path: Path) -> None:
+    transcript = tmp_path / f"{SESSION_ID}.jsonl"
+    _write_session(
+        transcript,
+        SESSION_ID,
+        [
+            _message(
+                "a1",
+                "assistant",
+                [
+                    {
+                        "type": "toolCall",
+                        "id": "known",
+                        "name": "bash",
+                        "arguments": {"command": "work"},
+                    },
+                ],
+                "2026-01-01T00:00:01Z",
+            ),
+            {
+                "type": "message",
+                "id": "r1",
+                "timestamp": "2026-01-01T00:00:02Z",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": "different",
+                    "content": [{"type": "text", "text": "unrelated"}],
+                },
+            },
+        ],
+    )
+    rows = transcript_to_records(transcript)
+    assert rows[0].observation is None
+    assert rows[1].action["tool"] == "tool_result_orphan"
+    assert rows[1].observation["text"] == "unrelated"
+
+
+def test_unknown_explicit_id_cannot_consume_an_idless_legacy_call(tmp_path: Path) -> None:
+    transcript = tmp_path / f"{SESSION_ID}.jsonl"
+    _write_session(
+        transcript,
+        SESSION_ID,
+        [
+            _message(
+                "a",
+                "assistant",
+                [{"type": "toolCall", "name": "bash", "arguments": {}}],
+                "2026-01-01T00:00:01Z",
+            ),
+            {
+                "type": "message",
+                "id": "r",
+                "timestamp": "2026-01-01T00:00:02Z",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": "unknown",
+                    "content": [{"type": "text", "text": "unrelated"}],
+                },
+            },
+        ],
+    )
+    rows = transcript_to_records(transcript)
+    assert rows[0].observation is None
+    assert rows[1].action["tool"] == "tool_result_orphan"
+
+
+def test_idless_result_with_mixed_candidates_remains_orphan(tmp_path: Path) -> None:
+    transcript = tmp_path / f"{SESSION_ID}.jsonl"
+    _write_session(
+        transcript,
+        SESSION_ID,
+        [
+            _message(
+                "a",
+                "assistant",
+                [
+                    {"type": "toolCall", "name": "bash", "arguments": {}},
+                    {"type": "toolCall", "id": "known", "name": "read", "arguments": {}},
+                ],
+                "2026-01-01T00:00:01Z",
+            ),
+            {
+                "type": "message",
+                "id": "r",
+                "timestamp": "2026-01-01T00:00:02Z",
+                "message": {
+                    "role": "toolResult",
+                    "content": [{"type": "text", "text": "ambiguous"}],
+                },
+            },
+        ],
+    )
+    rows = transcript_to_records(transcript)
+    assert rows[0].observation is None
+    assert rows[1].observation is None
+    assert rows[2].action["tool"] == "tool_result_orphan"

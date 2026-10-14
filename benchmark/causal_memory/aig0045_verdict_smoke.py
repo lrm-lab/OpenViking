@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
@@ -58,6 +59,7 @@ from openviking.session.aig_toolloop_reader import (  # noqa: E402
 )
 from openviking.session.aig_toolloop_refiner import FakeRefinerProvider  # noqa: E402
 from openviking.session.ao_ledger import AORecord  # noqa: E402
+from openviking.session.append_only import write_exclusive  # noqa: E402
 from openviking.session.outcome_signal import (  # noqa: E402
     normalize_verdict,
     select_attribution_mode,
@@ -235,9 +237,17 @@ def legal_builder_script(mode: str) -> list[tuple[str, dict[str, Any]]]:
     ]
 
 
-def load_real_materials(verdicts_path: Path, sessions_dir: Path) -> list[MaterialSpec]:
+def load_real_materials(
+    verdicts_path: Path, sessions_dir: Path, manifest_path: Path | None = None
+) -> list[MaterialSpec]:
     """Join verdict JSONL rows to exported AORecord JSONL under ``sessions_dir``."""
     by_session = _load_session_groups(sessions_dir)
+    original_questions = {}
+    if manifest_path is not None:
+        for line in Path(manifest_path).read_text().splitlines():
+            if line.strip():
+                entry = json.loads(line)
+                original_questions[str(entry["episode_id"])] = entry["turns"][0]["prompt"]
     materials: list[MaterialSpec] = []
     with Path(verdicts_path).open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -254,12 +264,25 @@ def load_real_materials(verdicts_path: Path, sessions_dir: Path) -> list[Materia
             records = _match_records(row, by_session)
             if not records:
                 continue
+            if len({record.ao_id for record in records}) != len(records):
+                raise ValueError("material_duplicate_ao_id")
+            if any(
+                right.sequence != left.sequence + 1
+                for left, right in zip(records, records[1:], strict=False)
+            ):
+                raise ValueError("material_ao_out_of_order")
             materials.append(
                 MaterialSpec(
                     run_id=_safe_run_id(run_id),
                     domain_kind=domain,
                     style="real",
-                    question=_question_from_records(records) or run_id,
+                    question=str(
+                        original_questions.get(str(row.get("episode_id")))
+                        or row.get("question")
+                        or (row.get("detail") or {}).get("original_question")
+                        or _question_from_records(records)
+                        or run_id
+                    ),
                     records=tuple(records),
                     reward=row.get("reward"),
                     graded=row.get("graded"),
@@ -284,6 +307,7 @@ def run_smoke(
     reader_factory: Callable[[str], Any] | None = None,
     jobs: int = 1,
     attempts: int = 1,
+    attempt_policy: str = "fixed",
 ) -> dict[str, Any]:
     """Run every material. Role factories receive the attribution mode.
 
@@ -300,27 +324,41 @@ def run_smoke(
     submit, quality fields come from the first submitting attempt, and the
     per-attempt outcomes ride along under ``attempts``.
     """
+    if attempt_policy not in {"fixed", "until-verified"}:
+        raise ValueError("invalid_attempt_policy")
     attempts = max(1, int(attempts))
     specs: list[MaterialSpec] = []
+    bases: dict[str, str] = {}
     for spec in materials:
         for index in range(1, attempts + 1):
             run_id = spec.run_id if attempts == 1 else f"{spec.run_id}-a{index}"
             specs.append(replace(spec, run_id=run_id))
-    outcomes = _run_all(
-        specs,
-        root=root,
-        max_calls=max_calls,
-        max_seconds=max_seconds,
-        dry_run=dry_run,
-        builder=builder,
-        builder_factory=builder_factory,
-        role_factories={
+            bases[run_id] = spec.run_id
+    options = {
+        "root": root,
+        "max_calls": max_calls,
+        "max_seconds": max_seconds,
+        "dry_run": dry_run,
+        "builder": builder,
+        "builder_factory": builder_factory,
+        "role_factories": {
             "critic": critic_factory,
             "refiner": refiner_factory,
             "reader": reader_factory,
         },
-        jobs=jobs,
-    )
+    }
+    if attempt_policy == "fixed":
+        outcomes = _run_all(specs, jobs=jobs, **options)
+    else:
+        groups = [specs[index : index + attempts] for index in range(0, len(specs), attempts)]
+        if jobs <= 1:
+            outcomes = [
+                outcome for group in groups for outcome in _run_until_verified(group, **options)
+            ]
+        else:
+            with ThreadPoolExecutor(max_workers=jobs) as pool:
+                futures = [pool.submit(_run_until_verified, group, **options) for group in groups]
+                outcomes = [outcome for future in futures for outcome in future.result()]
     rows: list[dict[str, Any]] = []
     provider_audit: list[dict[str, Any]] = []
     if attempts == 1:
@@ -329,17 +367,13 @@ def run_smoke(
             provider_audit.extend(extra)
     else:
         groups: dict[str, list[tuple[dict[str, Any], list[dict[str, Any]]]]] = {}
-        for index, outcome in enumerate(outcomes):
-            base = materials[index // attempts].run_id
+        for outcome in outcomes:
+            base = bases[outcome[0]["run_id"]]
             groups.setdefault(base, []).append(outcome)
         for spec in materials:
             attempt_rows = groups[spec.run_id]
             submitting = [row for row, _extra in attempt_rows if row.get("submit") is True]
-            clean = [
-                row
-                for row, _extra in attempt_rows
-                if row.get("submit") is True and row.get("phi_violations_after_refine") == 0
-            ]
+            clean = [row for row, _extra in attempt_rows if row.get("reader_verified") is True]
             source = (clean or submitting or [attempt_rows[-1][0]])[0]
             best = dict(source)
             best["run_id"] = spec.run_id
@@ -351,6 +385,17 @@ def run_smoke(
                     "reader_schema_ok": row.get("reader_schema_ok"),
                     "run_id": row["run_id"],
                     "submit": row.get("submit") is True,
+                    "builder_submitted": row.get("builder_submitted", False),
+                    "graph_frozen": row.get("graph_frozen", False),
+                    "reader_verified": row.get("reader_verified", False),
+                    "status": row.get("status"),
+                    **(
+                        {
+                            key: row[key]
+                            for key in ("reader_report", "reader_report_hash", "reader_report_path")
+                            if key in row
+                        }
+                    ),
                     **(
                         {"provider_failures": row["provider_failures"]}
                         if row.get("provider_failures")
@@ -359,7 +404,7 @@ def run_smoke(
                 }
                 for row, _extra in attempt_rows
             ]
-            if not submitting:
+            if not submitting and best.get("triggered"):
                 best["fallback_reason"] = f"all {len(attempt_rows)} attempts failed to submit"
             rows.append(best)
             for _row, extra in attempt_rows:
@@ -368,16 +413,40 @@ def run_smoke(
     return {
         "gates": gates,
         "materials": rows,
+        "attempt_summary": {
+            "scheduled": len(specs),
+            "executed": len(outcomes),
+            "triggered": sum(bool(row.get("triggered")) for row, _ in outcomes),
+            "builder_submitted": sum(bool(row.get("builder_submitted")) for row, _ in outcomes),
+            "graph_frozen": sum(bool(row.get("graph_frozen")) for row, _ in outcomes),
+            "reader_verified": sum(bool(row.get("reader_verified")) for row, _ in outcomes),
+            "skipped_no_signal": sum(
+                row.get("status") == "skipped_no_signal" for row, _ in outcomes
+            ),
+        },
         "provider_audit": provider_audit,
         "schema": SCHEMA,
         "settings": {
             "attempts": attempts,
+            "attempt_policy": attempt_policy,
             "dry_run": dry_run,
             "jobs": jobs,
             "max_calls": max_calls,
             "max_seconds": max_seconds,
         },
     }
+
+
+def _run_until_verified(
+    specs: Sequence[MaterialSpec], **options: Any
+) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
+    outcomes = []
+    for spec in specs:
+        outcome = _run_one_safe(spec, **options)
+        outcomes.append(outcome)
+        if outcome[0].get("reader_verified") or not outcome[0].get("triggered"):
+            break
+    return outcomes
 
 
 def _run_all(
@@ -427,7 +496,27 @@ def _run_all(
 def _run_one_safe(spec: MaterialSpec, **kwargs: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """``_run_one`` plus batch isolation: one crash must not kill the others."""
     try:
-        return _run_one(spec, **kwargs)
+        row, audit = _run_one(spec, **kwargs)
+        row.setdefault("builder_submitted", row.get("submit") is True)
+        row.setdefault("graph_frozen", False)
+        row["reader_verified"] = (
+            row.get("graph_frozen") is True
+            and row.get("reader_schema_ok") is True
+            and row.get("decisive_refs_in_snapshot") is True
+            and not row.get("provider_failures")
+        )
+        row["status"] = (
+            "skipped_no_signal"
+            if not row.get("triggered")
+            else "reader_verified"
+            if row["reader_verified"]
+            else "graph_frozen"
+            if row["graph_frozen"]
+            else "builder_submitted"
+            if row["builder_submitted"]
+            else "failed"
+        )
+        return row, audit
     except Exception as exc:  # noqa: BLE001 - recorded as a failed material
         code = getattr(exc, "code", None)
         suffix = f":{code}" if isinstance(code, str) and code else ""
@@ -436,6 +525,10 @@ def _run_one_safe(spec: MaterialSpec, **kwargs: Any) -> tuple[dict[str, Any], li
             "decisive_refs_in_snapshot": None,
             "domain": spec.domain_kind,
             "fallback_reason": f"driver_exception:{type(exc).__name__}{suffix}",
+            "builder_submitted": False,
+            "graph_frozen": False,
+            "reader_verified": False,
+            "status": "failed",
             "mode": None,
             "phi_violations_after_refine": None,
             "reader_schema_ok": None,
@@ -451,7 +544,9 @@ def score_gates(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Five ADR-0045 lines. Budget exhaustion is recorded, not a fail line."""
     triggered = [row for row in rows if row.get("verdict") != "no-signal"]
     provider_failed = [row for row in triggered if row.get("provider_failures")]
-    submitted = [row for row in triggered if row.get("submit") is True and not row.get("provider_failures")]
+    submitted = [
+        row for row in triggered if row.get("submit") is True and not row.get("provider_failures")
+    ]
     submit_rate = (len(submitted) / len(triggered)) if triggered else 1.0
     phi_total = 0
     phi_scored = 0
@@ -462,8 +557,11 @@ def score_gates(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         if isinstance(phi, int):
             phi_total += phi
             phi_scored += 1
-        if (row.get("reader_schema_ok") is True and row.get("decisive_refs_in_snapshot") is True
-                and not row.get("provider_failures")):
+        if (
+            row.get("reader_schema_ok") is True
+            and row.get("decisive_refs_in_snapshot") is True
+            and not row.get("provider_failures")
+        ):
             reader_ok += 1
         if row.get("submit") is True:
             reader_scored += 1
@@ -509,9 +607,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--material", choices=("synthetic", "real"), default="synthetic")
     parser.add_argument("--verdicts", type=Path, help="Verdict JSONL for --material real.")
     parser.add_argument(
+        "--manifest",
+        type=Path,
+        help="Original episode manifest, preferred over historical AO text.",
+    )
+    parser.add_argument(
         "--sessions",
         type=Path,
         help=f"Directory of AORecord JSONL (export default {DEFAULT_EXPORT_PATH}).",
+    )
+    parser.add_argument(
+        "--attempt-policy",
+        choices=("fixed", "until-verified"),
+        default="fixed",
+        help="Fixed N-run evaluation, or debug mode stopping at first complete verification.",
     )
     parser.add_argument("--max-calls", type=int, default=DEFAULT_MAX_CALLS)
     parser.add_argument("--max-seconds", type=float, default=DEFAULT_MAX_SECONDS)
@@ -521,6 +630,9 @@ def main(argv: list[str] | None = None) -> int:
         default=1,
         help="Material-level parallelism. With gemma and jobs>1 each material "
         "gets its own provider instance; HTTP usage is appended to the work-root ledger.",
+    )
+    parser.add_argument(
+        "--url", default=None, help="Chat completions endpoint, including a shared local LLM pool."
     )
     parser.add_argument(
         "--model",
@@ -554,7 +666,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.verdicts is None or args.sessions is None:
             print("--material real requires --verdicts and --sessions", file=sys.stderr)
             return 2
-        materials = load_real_materials(args.verdicts, args.sessions)
+        materials = load_real_materials(args.verdicts, args.sessions, args.manifest)
     builder_choice = args.builder or ("fake" if args.material == "synthetic" else "gemma")
     work = args.work_root or Path(tempfile.mkdtemp(prefix="aig0045-"))
     work.mkdir(parents=True, exist_ok=True)
@@ -566,17 +678,21 @@ def main(argv: list[str] | None = None) -> int:
         factory = _fake_builder
     elif args.jobs > 1:
         try:
-            LenovoGemmaProvider(**_model_kwargs(args.model))  # fail fast; instance discarded
+            LenovoGemmaProvider(
+                **_model_kwargs(args.model, args.url)
+            )  # fail fast; instance discarded
         except LenovoGemmaError as exc:
             print(f"gemma provider failed ({exc.code}); export {API_KEY_ENV}", file=sys.stderr)
             return 2
-        factory = _parallel_gemma_factory(args.model, usage_path=work / "model-usage.jsonl")
+        factory = _parallel_gemma_factory(
+            args.model, url=args.url, usage_path=work / "model-usage.jsonl"
+        )
     else:
         try:
             shared = LenovoGemmaProvider(
                 audit_path=work / "provider_audit.jsonl",
                 usage_path=work / "model-usage.jsonl",
-                **_model_kwargs(args.model),
+                **_model_kwargs(args.model, args.url),
             )
         except LenovoGemmaError as exc:
             print(f"gemma provider failed ({exc.code}); export {API_KEY_ENV}", file=sys.stderr)
@@ -591,7 +707,7 @@ def main(argv: list[str] | None = None) -> int:
             if getattr(args, role) == "gemma":
                 try:
                     provider_type(
-                        **_model_kwargs(args.model)
+                        **_model_kwargs(args.model, args.url)
                     )  # Validate credentials, zero requests.
                 except LenovoGemmaError as exc:
                     print(
@@ -600,7 +716,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     return 2
                 role_factories[role] = _gemma_role_factory(
-                    provider_type, args.model, usage_path=work / "model-usage.jsonl"
+                    provider_type, args.model, url=args.url, usage_path=work / "model-usage.jsonl"
                 )
     report = run_smoke(
         materials,
@@ -615,6 +731,7 @@ def main(argv: list[str] | None = None) -> int:
         reader_factory=role_factories.get("reader"),
         jobs=max(1, args.jobs),
         attempts=max(1, args.attempts),
+        attempt_policy=args.attempt_policy,
     )
     report["settings"].update(
         {
@@ -706,6 +823,7 @@ def _run_one(
         row["fallback_reason"] = marker.get("reason") or loop.status
         return row, extra
     row["submit"] = True
+    row["builder_submitted"] = True
     surface = AigToolSurface(snapshot, root=case_root, run_id=spec.run_id)
     critic = (
         role_factories["critic"](mode) if role_factories.get("critic") else FakeCriticProvider()
@@ -745,6 +863,7 @@ def _run_one(
     if cycle.status != "frozen" or cycle.revision is None:
         row["fallback_reason"] = (cycle.fallback_marker or {}).get("reason") or cycle.status
         return row, extra
+    row["graph_frozen"] = True
     try:
         cycle.run.submit_draft(cycle.run.session_for("builder"), surface.get_graph())
     except AigContractError:
@@ -771,6 +890,22 @@ def _run_one(
     finally:
         _collect_role_audit(reader, "reader", spec.run_id, row, extra)
     row["budget_exhausted"] = navigation.budget_exhausted
+    row["reader_report"] = navigation.report.to_dict()
+    row["reader_report_hash"] = navigation.reader_report_hash
+    report_path = case_root / "reader-report.json"
+    write_exclusive(
+        report_path,
+        {
+            "run_id": spec.run_id,
+            "report": navigation.report.to_dict(),
+            "reader_report_hash": navigation.reader_report_hash,
+            "anchor_candidates": list(navigation.anchor_candidates),
+            "reads": list(navigation.reads),
+            "budget_exhausted": navigation.budget_exhausted,
+            "sidecar_path": str(cycle.sidecar_path),
+        },
+    )
+    row["reader_report_path"] = str(report_path)
     try:
         parse_reader_report(navigation.report.to_dict(), navigation.graph)
         row["reader_schema_ok"] = True
@@ -857,11 +992,28 @@ def _match_records(
 
 
 def _question_from_records(records: Sequence[AORecord]) -> str:
-    first = records[0]
-    text = first.action.get("text") if isinstance(first.action, Mapping) else None
-    if isinstance(text, str) and text.strip():
-        return text.strip()
-    return first.session_id
+    # Historical exports put the original channel message in a tool observation,
+    # while their first user action is merely an inbox notification.
+    for record in records:
+        observation = record.observation
+        text = observation.get("text") if isinstance(observation, Mapping) else None
+        if isinstance(text, str):
+            match = re.search(
+                r"(?ms)^\[target=[^\]]*\btype=human\]\s+[^:\n]+:\s*(.*?)(?=^\[target=|\Z)", text
+            )
+            if match and match[1].strip():
+                return match[1].strip()
+    for record in records:
+        text = record.action.get("text") if isinstance(record.action, Mapping) else None
+        if (
+            isinstance(text, str)
+            and text.strip()
+            and record.action.get("role", "user") == "user"
+            and not text.startswith("[CoForge inbox notice:")
+            and text.strip() not in {"Start.", "No work."}
+        ):
+            return text.strip()
+    return records[0].session_id
 
 
 def _safe_run_id(run_id: str) -> str:
@@ -877,27 +1029,33 @@ def _fake_builder(mode: str) -> ToolloopProvider:
 
 def _parallel_gemma_factory(
     model: str | None = None,
-    *, usage_path: Path | None = None,
+    *,
+    url: str | None = None,
+    usage_path: Path | None = None,
 ) -> Callable[[str], ToolloopProvider]:
     """One provider per material with a shared append-only HTTP usage ledger."""
 
     def factory(mode: str) -> ToolloopProvider:
-        return LenovoGemmaProvider(usage_path=usage_path, **_model_kwargs(model))
+        return LenovoGemmaProvider(usage_path=usage_path, **_model_kwargs(model, url))
 
     return factory
 
 
-def _model_kwargs(model: str | None) -> dict[str, str]:
-    return {"model": model} if model else {}
+def _model_kwargs(model: str | None, url: str | None = None) -> dict[str, str]:
+    return {k: v for k, v in {"model": model, "url": url}.items() if v}
 
 
 def _gemma_role_factory(
-    provider_type: type, model: str | None, *, usage_path: Path | None = None
+    provider_type: type,
+    model: str | None,
+    *,
+    url: str | None = None,
+    usage_path: Path | None = None,
 ) -> Callable[[str], Any]:
     """Fresh provider for every material/attempt, even with jobs=1."""
 
     def factory(mode: str) -> Any:
-        kwargs: dict[str, Any] = _model_kwargs(model)
+        kwargs: dict[str, Any] = _model_kwargs(model, url)
         if usage_path is not None:
             kwargs["usage_path"] = usage_path
         return provider_type(**kwargs)

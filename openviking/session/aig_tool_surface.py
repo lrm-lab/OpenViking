@@ -51,6 +51,7 @@ DRAFT_LOG_FILENAME = "draft.jsonl"
 SEARCH_MATCH_LIMIT = 20
 _SNIPPET_LIMIT = 120
 _READ_TRUNCATE_CHARS = 2000
+_READ_FULL_SEGMENT_MAX_CHARS = 20_000
 _READONLY_FILE = stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
 _READONLY_DIR = (
     stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
@@ -102,11 +103,13 @@ TOOL_CATALOG: tuple[tuple[str, str], ...] = (
     ),
     (
         "read_full_segment",
-        "Return every snapshot row of one segment joined as text, keeping global "
-        "row indexes. Argument segment (alias s) is the segment value listed by "
-        "get_overview; one call reads that segment completely. Each row's action "
-        "and observation are each capped at 2000 chars (marked when truncated); "
-        "use read_step for the untruncated row.",
+        "Return a prefix of one segment joined as text, keeping global row indexes. "
+        "Argument segment (alias s) is the segment value listed by get_overview. "
+        "Each row's action and observation are each capped at 2000 chars. "
+        "The entire response is capped at 20000 chars including its truncation notice, "
+        "and only complete AO rows are included. A truncated response identifies "
+        "the next AO index; continue with read_step_range or read_step. "
+        "Use read_step for a row without the per-field read cap.",
     ),
     ("read_step", "Return one snapshot row. Argument index (alias i) is the row handle."),
     (
@@ -159,9 +162,7 @@ TOOL_CATALOG: tuple[tuple[str, str], ...] = (
 )
 
 
-def _json_object(
-    properties: dict[str, Any], required: Sequence[str] = ()
-) -> dict[str, Any]:
+def _json_object(properties: dict[str, Any], required: Sequence[str] = ()) -> dict[str, Any]:
     return {
         "additionalProperties": False,
         "properties": properties,
@@ -234,8 +235,7 @@ TOOL_SCHEMAS: Mapping[str, dict[str, Any]] = {
         {
             "block_id": {
                 "description": (
-                    "Optional. Omit to let the server allocate an id and return it "
-                    "in the response."
+                    "Optional. Omit to let the server allocate an id and return it in the response."
                 ),
                 "type": "string",
             },
@@ -608,9 +608,7 @@ def _is_adjacent(blocks: Mapping[str, _Block], source_id: str, target_id: str) -
     return source_end + 1 == target_start
 
 
-def _skipped_rows(
-    blocks: Mapping[str, _Block], source_id: str, target_id: str
-) -> list[int]:
+def _skipped_rows(blocks: Mapping[str, _Block], source_id: str, target_id: str) -> list[int]:
     covered: set[int] = set()
     for block in blocks.values():
         start, end = _block_span(block)
@@ -705,9 +703,7 @@ def _validate_block_row_uniformity(block: _Block, records: Sequence[AORecord]) -
         )
 
 
-def _forward_link_detail(
-    blocks: Mapping[str, _Block], source: str, target: str
-) -> dict[str, Any]:
+def _forward_link_detail(blocks: Mapping[str, _Block], source: str, target: str) -> dict[str, Any]:
     def endpoint(block_id: str) -> dict[str, Any]:
         refs = blocks[block_id].fields["step_refs"]
         return {"block_id": block_id, "span": [refs[0], refs[-1]]}
@@ -1186,10 +1182,29 @@ class AigToolSurface:
         ]
         if not rows:
             available = sorted({_segment(record) for record in self._records})
-            raise ToolSurfaceError(
-                "unknown_segment", {"available_segments": available}
+            raise ToolSurfaceError("unknown_segment", {"available_segments": available})
+        chunks = [_step_text_capped(index, record) for index, record in rows]
+        complete = "\n\n".join(chunks)
+        if len(complete) <= _READ_FULL_SEGMENT_MAX_CHARS:
+            return complete
+
+        def notice(count: int) -> str:
+            return (
+                f"…[segment truncated: returned {count}/{len(rows)} AO rows; "
+                f"next AO index={rows[count][0]}; "
+                "use read_step_range or read_step to continue]"
             )
-        return "\n\n".join(_step_text_capped(index, record) for index, record in rows)
+
+        count = 0
+        size = 0
+        for chunk in chunks[:-1]:
+            candidate_size = size + len(chunk) + (2 if count else 0)
+            # Reserve the separator and notice before admitting the complete AO.
+            if candidate_size + 2 + len(notice(count + 1)) > _READ_FULL_SEGMENT_MAX_CHARS:
+                break
+            count += 1
+            size = candidate_size
+        return "\n\n".join([*chunks[:count], notice(count)])
 
     def _read_step(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         _require_verb_args("read_step", arguments)
@@ -1425,9 +1440,7 @@ class AigToolSurface:
     def _add_skip_attribution(self, arguments: Mapping[str, Any]) -> dict[str, str]:
         return self._add_note(arguments, "add_skip_attribution", _LINK_KIND_SKIP)
 
-    def _add_note(
-        self, arguments: Mapping[str, Any], verb: str, expected: str
-    ) -> dict[str, str]:
+    def _add_note(self, arguments: Mapping[str, Any], verb: str, expected: str) -> dict[str, str]:
         self._require_open()
         _require_verb_args(verb, arguments)
         stored = {
@@ -1523,9 +1536,7 @@ class AigToolSurface:
             raise ToolSurfaceError("unknown_block")
         staged = {key: value for key, value in blocks.items() if key != block_id}
         new_edges = [
-            edge
-            for edge in edges
-            if edge.source_id != block_id and edge.target_id != block_id
+            edge for edge in edges if edge.source_id != block_id and edge.target_id != block_id
         ]
         _validate(staged, new_edges, self._records)
         return staged, new_edges
@@ -1557,17 +1568,13 @@ class AigToolSurface:
         target = stored.get("to")
         if not isinstance(source, str) or not isinstance(target, str):
             raise ToolSurfaceError("stored_record_invalid")
-        matches = [
-            edge for edge in edges if edge.source_id == source and edge.target_id == target
-        ]
+        matches = [edge for edge in edges if edge.source_id == source and edge.target_id == target]
         if not matches:
             raise ToolSurfaceError("edge_missing")
         if matches[0].link_kind != expected:
             raise ToolSurfaceError("edge_kind_mismatch")
         new_edges = [
-            edge
-            for edge in edges
-            if not (edge.source_id == source and edge.target_id == target)
+            edge for edge in edges if not (edge.source_id == source and edge.target_id == target)
         ]
         copied = dict(blocks)
         _validate(copied, new_edges, self._records)

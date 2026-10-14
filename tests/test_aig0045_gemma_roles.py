@@ -13,13 +13,13 @@ from typing import Any
 import pytest
 
 from benchmark.causal_memory import aig0045_verdict_smoke as smoke
+from benchmark.causal_memory import lenovo_gemma_provider as lenovo
 from benchmark.causal_memory.aig0045_gemma_roles import (
     GemmaCriticProvider,
     GemmaReaderProvider,
     GemmaRefinerProvider,
     role_request_body,
 )
-from benchmark.causal_memory import lenovo_gemma_provider as lenovo
 from benchmark.causal_memory.lenovo_gemma_provider import (
     API_KEY_ENV,
     DEFAULT_MODEL,
@@ -195,7 +195,8 @@ def test_role_messages_catalog_mode_and_context(role: str, mode: str) -> None:
     assert state["catalog"] == [list(item) for item in current.tools]
     assert state["frozen_graph" if role == "reader" else "draft"] == graph()
     if role != "critic":
-        assert state["history"][0]["result"] == "AO evidence"
+        assert "history" not in state
+        assert json.dumps(body).count("AO evidence") == 1
         assert any(
             item["role"] == "tool" and "AO evidence" in item["content"] for item in body["messages"]
         )
@@ -431,11 +432,16 @@ def test_transport_failure_is_audited_and_bounded(provider_type: type, role: str
             current(turn(role))
     else:
         current(turn(role))
-    assert len(current.stats) == 3
-    # Four inherited HTTP attempts per completion (1 + MAX_NETWORK_RETRIES).
+    assert len(current.stats) == 1
+    # Transport owns its retry budget; output correction never repeats failures.
     attempts = 1 + lenovo.MAX_NETWORK_RETRIES
-    assert len(transport.bodies) == 3 * attempts
+    assert len(transport.bodies) == attempts
     assert all(item.status == "network_error" for item in current.stats)
+    assert all(
+        "Previous response rejected" not in json.dumps(message)
+        for body in transport.bodies
+        for message in body["messages"]
+    )
 
 
 @pytest.mark.parametrize("builder", ["fake", "gemma"])
@@ -494,7 +500,7 @@ def test_smoke_role_failures_preserve_audit_and_survive_batch(tmp_path: Path, jo
 
     def critic_factory(mode: str) -> Any:
         # Semantic violations force a refiner call; repeatedly invalid refiner
-        # output degrades to done. The critic then returns a clean audit.
+        # output degrades to done. No graph progress must stop before Reader.
         bad = [
             {
                 "object_id": "agent-1",
@@ -533,17 +539,16 @@ def test_smoke_role_failures_preserve_audit_and_survive_batch(tmp_path: Path, jo
         reader_factory=reader_factory,
     )
     triggered = [row for row in result["materials"] if row["triggered"]]
-    assert len(instances) == len(triggered) * 3
+    assert len(instances) == len(triggered) * 2
     assert len({id(item) for item in instances}) == len(instances)
-    assert all(row["submit"] and row["reader_schema_ok"] is False for row in triggered)
-    assert all(row["fallback_reason"] == "reader_failed:gemma_reader_failed" for row in triggered)
+    assert all(row["submit"] and row["reader_schema_ok"] is None for row in triggered)
+    assert all(row["fallback_reason"] == "no_progress" for row in triggered)
     assert all(
-        {item["role"] for item in row["provider_failures"]} == {"refiner", "reader"}
-        for row in triggered
+        {item["role"] for item in row["provider_failures"]} == {"refiner"} for row in triggered
     )
     audit = result["provider_audit"]
-    assert {item["role"] for item in audit} == {"critic", "refiner", "reader"}
-    assert len(audit) == len(triggered) * 8  # critic 2 + refiner 3 + reader 3
+    assert {item["role"] for item in audit} == {"critic", "refiner"}
+    assert len(audit) == len(triggered) * 4  # critic 1 + refiner 3; no Reader on uncorrected graph
     assert {item["run_id"] for item in audit} == {row["run_id"] for row in triggered}
     assert result["gates"]["reader_schema_and_refs"]["pass"] is False
 
@@ -742,6 +747,8 @@ def test_cli_four_gemma_roles_full_chain_fake_http(
                 "gemma",
                 "--reader",
                 "gemma",
+                "--url",
+                "http://127.0.0.1:18740/llm/v1/chat/completions",
                 "--jobs",
                 str(jobs),
                 "--attempts",
@@ -771,6 +778,10 @@ def test_cli_four_gemma_roles_full_chain_fake_http(
     assert usage["overall"]["usage_complete"] is False
     ledger = Path(result["model_usage_log"])
     assert ledger.is_file() and "unit-test-key" not in ledger.read_text()
+    for instances in created.values():
+        assert all(
+            item._url == "http://127.0.0.1:18740/llm/v1/chat/completions" for item in instances
+        )
     for role, instances in created.items():
         if jobs == 1 and role == "builder":
             assert len(instances) == 1 and instances[0].stats
@@ -814,3 +825,70 @@ def test_reader_rejects_invalid_tool_type_or_truncated_completion(bad_field: str
     with pytest.raises(ReaderError, match="gemma_reader_failed"):
         current(turn("reader"))
     assert current.stats[0].status == "invalid_provider_result"
+
+
+@pytest.mark.parametrize("status", [424, 401])
+def test_exhausted_transport_is_not_fed_back_as_model_output_error(status):
+    import io
+    import urllib.error
+
+    requests = []
+
+    def transport(request, **kwargs):
+        requests.append(json.loads(request.data))
+        raise urllib.error.HTTPError(
+            "http://pool/llm/v1/chat/completions", status, "failed", {}, io.BytesIO()
+        )
+
+    current = provider(GemmaCriticProvider, transport)
+    current(turn("critic"))
+    assert len(requests) == 1
+    assert current.failures[-1]["code"] == "http_error"
+    assert all(
+        "Previous response rejected" not in item["content"] for item in requests[0]["messages"]
+    )
+
+
+def test_reader_tool_evidence_is_not_duplicated_in_state_history() -> None:
+    evidence = "UNIQUE_READER_EVIDENCE"
+    turn = ReaderTurn(
+        reader_prompt_for_mode("fail"),
+        reader_catalog(),
+        graph(),
+        (
+            {
+                "verb": "read_step",
+                "arguments": {"index": 1},
+                "ok": True,
+                "result": {"index": 1, "record": {"observation": {"text": evidence}}},
+            },
+        ),
+    )
+    body = role_request_body(turn, role="reader", model=DEFAULT_MODEL)
+    assert json.dumps(body, ensure_ascii=False).count(evidence) == 1
+    state = json.loads(body["messages"][-1]["content"])
+    assert "history" not in state
+
+
+def test_refiner_keeps_non_tool_outcomes_without_duplicating_reads() -> None:
+    evidence = "UNIQUE_REFINER_EVIDENCE"
+    turn = RefinerTurn(
+        refiner_prompt_for_mode("fail"),
+        refiner_catalog(),
+        graph(),
+        (violation(),),
+        (
+            {
+                "verb": "read_step",
+                "arguments": {"index": 1},
+                "ok": True,
+                "result": {"record": {"observation": {"text": evidence}}},
+            },
+            {"action": "unresolvable", "violation_id": "v1", "ok": True},
+        ),
+    )
+    body = role_request_body(turn, role="refiner", model=DEFAULT_MODEL)
+    assert json.dumps(body, ensure_ascii=False).count(evidence) == 1
+    state = json.loads(body["messages"][-1]["content"])
+    assert state["history"] == [{"action": "unresolvable", "violation_id": "v1", "ok": True}]
+    assert state["edit_constraints"]["v1"]["allowed_verbs"] == ["modify_block"]

@@ -85,6 +85,32 @@ benchmark/causal_memory/out/aig0045_smoke_report.json
 模型侧 `.stats` 随 `ToolloopResult.audit` 一并进入报告的 `provider_audit`，
 并在 work root 落 `provider_audit.jsonl`（进程退出钩子也会 flush）。
 
+## 日志读取长度
+
+`read_full_segment` 的整段返回上限为 20,000 字符（包含截断提示）。
+单条 AO 的 action / observation 仍分别保留最多 2,000 字符并附截断标记。
+整段只在 AO 之间截断，保留完整 AO 前缀及原始快照索引，不切断最后一条 AO。
+截断提示给出已返回 / 总 AO 数和下一条 AO 索引；通过
+`read_step_range` 或 `read_step` 读取剩余部分。
+`read_step` 不应用读取层截断，但无法恢复素材导出时已经截掉的内容。
+
+## 四角色优化与审计
+
+- AO 在动作发生时分配索引，结果按 tool-call ID 回填；未知显式 ID 不猜测匹配。
+- 导出 verdict 保留 manifest 原题。旧素材可加 `--manifest <manifest.jsonl>`；
+  无 manifest 时从 AO 中的人类消息恢复，已被导出截掉的正文无法还原。
+- Builder 每轮携带当前图，仅保留最近六次构建操作；已归图的旧证据省略，
+  未归图证据和刚重新读取的证据保留。完整历史仍保存在审计中。
+- Reader / Refiner 的工具历史只传一份，非工具结果单独保留。
+- Refiner 拒绝无变化编辑；连续两次编辑失败或重复读取停止本轮。
+  修改后的图在退出前重新审计，保留实际修复成果。
+- Builder 连续六次未提供新信息且未改变图时以 `no_progress` 退出。
+- 每次完整 Reader 运行保存 `reader-report.json`，含报告、hash 和读取证据。
+- 结果区分 `builder_submitted` / `graph_frozen` / `reader_verified`，
+  `no-signal` 保留 `skipped_no_signal`，不伪装成提交失败。
+- 正式评测默认 `--attempt-policy fixed --attempts 3`；日常调试可用
+  `--attempt-policy until-verified --attempts 3`，首个完整校验通过后停止。
+
 ## 素材准备
 
 合成：驱动内置 6 条（code×3 + 文档×3），verdict 覆盖四域且覆盖

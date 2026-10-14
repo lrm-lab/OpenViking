@@ -223,9 +223,7 @@ def test_unresolvable_and_unknown_violation(tmp_path: Path) -> None:
         lambda: session.declare_unresolvable("missing", "no such row"),
         "unknown_violation",
     )
-    record = session.declare_unresolvable(
-        "critic:0:semantic:agent-1", "the row really says this"
-    )
+    record = session.declare_unresolvable("critic:0:semantic:agent-1", "the row really says this")
     assert record == {
         "action": "unresolvable",
         "reason": "the row really says this",
@@ -243,3 +241,27 @@ def test_unresolvable_and_unknown_violation(tmp_path: Path) -> None:
     refined = run_refiner_round(RefinerSession(surface, (_semantic(),)), provider)
     assert refined.edits == ()
     assert refined.unresolvable[0]["action"] == "unresolvable"
+
+
+@pytest.mark.parametrize("fields", [{"summary": "did the work"}, {}])
+def test_no_effect_edit_is_rejected_and_repeat_cannot_exhaust_round(
+    tmp_path: Path, fields: dict
+) -> None:
+    surface = _legal(tmp_path)
+    session = RefinerSession(surface, (_semantic(),))
+    action = RefinerAction(
+        "edit",
+        "modify_block",
+        {"block_id": "agent-1", "fields": fields},
+        "critic:0:semantic:agent-1",
+    )
+    _assert_code(
+        lambda: session.call(action.verb, action.arguments, violation_id=action.violation_id),
+        "no_effect_edit",
+    )
+    provider = FakeRefinerProvider([action] * 8)
+    result = run_refiner_round(session, provider)
+    assert len(provider.turns) <= 3
+    assert result.edits == ()
+    assert result.stop_reason == "no_progress"
+    assert result.unresolvable[0]["violation_id"] == action.violation_id
