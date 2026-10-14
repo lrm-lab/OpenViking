@@ -197,17 +197,17 @@ def test_retries_once_on_5xx_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> N
     assert invocation.verb == "get_overview"
     assert calls["n"] == 2
     assert len(sleeps) == 1
-    assert 0.25 <= sleeps[0] <= 0.5
+    assert 15 <= sleeps[0] <= 20
 
 
 def test_retry_backoff_delay_is_exponential_with_jitter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(provider_module.random, "uniform", lambda _a, b: b)
-    assert provider_module.retry_backoff_delay(0) == pytest.approx(0.5)
-    assert provider_module.retry_backoff_delay(1) == pytest.approx(0.75)
-    assert provider_module.retry_backoff_delay(2) == pytest.approx(1.25)
-    assert provider_module.retry_backoff_delay(-3) == pytest.approx(0.5)
+    assert provider_module.retry_backoff_delay(0) == pytest.approx(20)
+    assert provider_module.retry_backoff_delay(1) == pytest.approx(35)
+    assert provider_module.retry_backoff_delay(2) == pytest.approx(65)
+    assert provider_module.retry_backoff_delay(-3) == pytest.approx(20)
 
 
 def test_exhausts_retries_on_persistent_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -311,3 +311,14 @@ def test_transient_transport_failure_stays_inside_request_retry(failure):
     assert instance(_turn()).verb == "get_overview"
     assert len(calls) == 2 and len(instance.stats) == 1
     assert sleeps[0] >= (3 if isinstance(failure, int) else .25)
+
+
+def test_pooled_request_client_waits_longer_than_pool_budget(monkeypatch):
+    monkeypatch.setenv("LENOVO_GATEWAY_TIMEOUT_SECONDS", "960")
+    seen = []
+    def transport(request, *, timeout):
+        seen.append(timeout)
+        return _response({"choices": [{"message": {"tool_calls": [{"function": {"name": "get_overview", "arguments": "{}"}}]}}]})
+    instance = LenovoGemmaProvider(api_key="test-key", urlopen=transport)
+    assert instance(_turn()).verb == "get_overview"
+    assert seen == [960]

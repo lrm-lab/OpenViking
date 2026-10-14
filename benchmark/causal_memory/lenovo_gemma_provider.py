@@ -31,16 +31,16 @@ GATEWAY_URL = "https://modelfactory.lenovo.com/llm/v1/chat/completions"
 DEFAULT_MODEL = "gemma-4-31B-it"
 API_KEY_ENV = "LENOVO_GATEWAY_API_KEY"
 DEFAULT_TIMEOUT_SECONDS = 240.0
-RETRY_BACKOFF_SECONDS = 0.25
+RETRY_BACKOFF_SECONDS = 15.0
 MAX_NETWORK_RETRIES = 6
-MAX_RETRY_DELAY_SECONDS = 60.0
+MAX_RETRY_DELAY_SECONDS = 120.0
 RETRYABLE_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
 
 
 def retry_backoff_delay(attempt: int) -> float:
     """Exponential backoff with jitter: base * 2**attempt + U(0, base)."""
     base = RETRY_BACKOFF_SECONDS * (2 ** max(0, attempt))
-    return min(MAX_RETRY_DELAY_SECONDS, base + random.uniform(0.0, RETRY_BACKOFF_SECONDS))
+    return min(MAX_RETRY_DELAY_SECONDS, base + random.uniform(0.0, 5.0))
 
 
 class LenovoGemmaError(ToolloopError):
@@ -169,7 +169,7 @@ class LenovoGemmaProvider:
         api_key: str | None = None,
         model: str = DEFAULT_MODEL,
         url: str = GATEWAY_URL,
-        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        timeout_seconds: float | None = None,
         urlopen: Callable[..., Any] | None = None,
         sleep: Callable[[float], None] | None = None,
         clock: Callable[[], float] | None = None,
@@ -182,7 +182,7 @@ class LenovoGemmaProvider:
         self._api_key = key.strip()
         self._model = model
         self._url = url
-        self._timeout = float(timeout_seconds)
+        self._timeout = float(timeout_seconds if timeout_seconds is not None else os.environ.get("LENOVO_GATEWAY_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
         self._urlopen = urlopen or urllib.request.urlopen
         self._sleep = sleep or time.sleep
         self._clock = clock or time.monotonic
