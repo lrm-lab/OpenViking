@@ -9,6 +9,8 @@ read from ``LENOVO_GATEWAY_API_KEY`` and is never logged or stored on ``stats``.
 from __future__ import annotations
 
 import atexit
+import http.client
+import email.utils
 import json
 import os
 import random
@@ -30,13 +32,15 @@ DEFAULT_MODEL = "gemma-4-31B-it"
 API_KEY_ENV = "LENOVO_GATEWAY_API_KEY"
 DEFAULT_TIMEOUT_SECONDS = 240.0
 RETRY_BACKOFF_SECONDS = 0.25
-MAX_NETWORK_RETRIES = 3
+MAX_NETWORK_RETRIES = 6
+MAX_RETRY_DELAY_SECONDS = 60.0
+RETRYABLE_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
 
 
 def retry_backoff_delay(attempt: int) -> float:
     """Exponential backoff with jitter: base * 2**attempt + U(0, base)."""
     base = RETRY_BACKOFF_SECONDS * (2 ** max(0, attempt))
-    return base + random.uniform(0.0, RETRY_BACKOFF_SECONDS)
+    return min(MAX_RETRY_DELAY_SECONDS, base + random.uniform(0.0, RETRY_BACKOFF_SECONDS))
 
 
 class LenovoGemmaError(ToolloopError):
@@ -244,6 +248,7 @@ class LenovoGemmaProvider:
             request_status = "provider_error"
             http_status: int | None = None
             loaded: dict[str, Any] | None = None
+            retry_after = 0.0
             request = urllib.request.Request(
                 self._url,
                 data=raw,
@@ -251,6 +256,7 @@ class LenovoGemmaProvider:
                 headers={
                     "Authorization": f"Bearer {self._api_key}",
                     "Content-Type": "application/json",
+                    "X-Coforge-LLM-Client": os.environ.get("COFORGE_EVAL_LLM_CLIENT", "four_roles"),
                 },
             )
             try:
@@ -258,7 +264,7 @@ class LenovoGemmaProvider:
                     status = int(getattr(response, "status", 200) or 200)
                     http_status = status
                     blob = response.read()
-                if status >= 500:
+                if status in RETRYABLE_HTTP_STATUS:
                     request_status = "http_error"
                     raise _RetryableHttp(status)
                 if status >= 400:
@@ -280,14 +286,22 @@ class LenovoGemmaProvider:
             except urllib.error.HTTPError as exc:
                 request_status = "http_error"
                 http_status = exc.code
-                if exc.code >= 500:
+                if exc.code in RETRYABLE_HTTP_STATUS:
                     last_error = exc
+                    value = exc.headers.get("Retry-After", "") if exc.headers else ""
+                    try:
+                        retry_after = float(value)
+                    except ValueError:
+                        try:
+                            retry_after = email.utils.parsedate_to_datetime(value).timestamp() - time.time()
+                        except (ValueError, TypeError, OverflowError):
+                            pass
                 else:
                     raise LenovoGemmaError("http_error") from exc
             except urllib.error.URLError as exc:
                 request_status = "network_error"
                 last_error = exc
-            except TimeoutError as exc:
+            except (TimeoutError, ConnectionError, http.client.IncompleteRead, http.client.RemoteDisconnected) as exc:
                 request_status = "network_error"
                 last_error = exc
             finally:
@@ -297,7 +311,7 @@ class LenovoGemmaProvider:
                     http_status=http_status, payload=loaded,
                 )
             if attempt + 1 < attempts:
-                self._sleep(retry_backoff_delay(attempt))
+                self._sleep(min(MAX_RETRY_DELAY_SECONDS, max(retry_after, retry_backoff_delay(attempt))))
                 continue
             if last_error is not None:
                 raise LenovoGemmaError("network_error") from last_error

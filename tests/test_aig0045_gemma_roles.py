@@ -431,11 +431,13 @@ def test_transport_failure_is_audited_and_bounded(provider_type: type, role: str
             current(turn(role))
     else:
         current(turn(role))
-    assert len(current.stats) == 3
-    # Four inherited HTTP attempts per completion (1 + MAX_NETWORK_RETRIES).
+    assert len(current.stats) == 1
+    # Transport owns its retry budget; output correction never repeats failures.
     attempts = 1 + lenovo.MAX_NETWORK_RETRIES
-    assert len(transport.bodies) == 3 * attempts
+    assert len(transport.bodies) == attempts
     assert all(item.status == "network_error" for item in current.stats)
+    assert all("Previous response rejected" not in json.dumps(message)
+               for body in transport.bodies for message in body["messages"])
 
 
 @pytest.mark.parametrize("builder", ["fake", "gemma"])
@@ -742,6 +744,8 @@ def test_cli_four_gemma_roles_full_chain_fake_http(
                 "gemma",
                 "--reader",
                 "gemma",
+                "--url",
+                "http://127.0.0.1:18740/llm/v1/chat/completions",
                 "--jobs",
                 str(jobs),
                 "--attempts",
@@ -771,6 +775,8 @@ def test_cli_four_gemma_roles_full_chain_fake_http(
     assert usage["overall"]["usage_complete"] is False
     ledger = Path(result["model_usage_log"])
     assert ledger.is_file() and "unit-test-key" not in ledger.read_text()
+    for instances in created.values():
+        assert all(item._url == "http://127.0.0.1:18740/llm/v1/chat/completions" for item in instances)
     for role, instances in created.items():
         if jobs == 1 and role == "builder":
             assert len(instances) == 1 and instances[0].stats
@@ -814,3 +820,18 @@ def test_reader_rejects_invalid_tool_type_or_truncated_completion(bad_field: str
     with pytest.raises(ReaderError, match="gemma_reader_failed"):
         current(turn("reader"))
     assert current.stats[0].status == "invalid_provider_result"
+
+
+@pytest.mark.parametrize("status", [424, 401])
+def test_exhausted_transport_is_not_fed_back_as_model_output_error(status):
+    import io
+    import urllib.error
+    requests = []
+    def transport(request, **kwargs):
+        requests.append(json.loads(request.data))
+        raise urllib.error.HTTPError("http://pool/llm/v1/chat/completions", status, "failed", {}, io.BytesIO())
+    current = provider(GemmaCriticProvider, transport)
+    current(turn("critic"))
+    assert len(requests) == 1
+    assert current.failures[-1]["code"] == "http_error"
+    assert all("Previous response rejected" not in item["content"] for item in requests[0]["messages"])

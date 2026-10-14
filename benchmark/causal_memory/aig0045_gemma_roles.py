@@ -227,7 +227,7 @@ class _GemmaRoleProvider(LenovoGemmaProvider):
             except Exception as exc:  # Output/transport failures are local to this role call.
                 code = getattr(exc, "code", "invalid_provider_result")
                 self._record("", started, code)
-                if attempt == self._output_retries:
+                if code in {"network_error", "http_error", "missing_api_key"} or attempt == self._output_retries:
                     self._failures.append({"code": code, "fallback": self.fallback})
                     return None
                 body["messages"].append(

@@ -294,3 +294,20 @@ def test_flush_audit_writes_stats(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     lines = path.read_text(encoding="utf-8").splitlines()
     assert json.loads(lines[0])["verb"] == "submit"
     assert json.loads(lines[0])["status"] == "ok"
+
+
+@pytest.mark.parametrize("failure", [429, 408, ConnectionResetError(), __import__("http.client", fromlist=["IncompleteRead"]).IncompleteRead(b"partial")])
+def test_transient_transport_failure_stays_inside_request_retry(failure):
+    calls = []
+    sleeps = []
+    def transport(request, **kwargs):
+        calls.append(request)
+        if len(calls) == 1:
+            if isinstance(failure, int):
+                raise urllib.error.HTTPError(GATEWAY_URL, failure, "temporary", {"Retry-After": "3"}, io.BytesIO())
+            raise failure
+        return _response({"choices": [{"message": {"tool_calls": [{"function": {"name": "get_overview", "arguments": "{}"}}]}}]})
+    instance = LenovoGemmaProvider(api_key="test-key", urlopen=transport, sleep=sleeps.append)
+    assert instance(_turn()).verb == "get_overview"
+    assert len(calls) == 2 and len(instance.stats) == 1
+    assert sleeps[0] >= (3 if isinstance(failure, int) else .25)

@@ -522,6 +522,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Material-level parallelism. With gemma and jobs>1 each material "
         "gets its own provider instance; HTTP usage is appended to the work-root ledger.",
     )
+    parser.add_argument("--url", default=None, help="Chat completions endpoint, including a shared local LLM pool.")
     parser.add_argument(
         "--model",
         default=None,
@@ -566,17 +567,17 @@ def main(argv: list[str] | None = None) -> int:
         factory = _fake_builder
     elif args.jobs > 1:
         try:
-            LenovoGemmaProvider(**_model_kwargs(args.model))  # fail fast; instance discarded
+            LenovoGemmaProvider(**_model_kwargs(args.model, args.url))  # fail fast; instance discarded
         except LenovoGemmaError as exc:
             print(f"gemma provider failed ({exc.code}); export {API_KEY_ENV}", file=sys.stderr)
             return 2
-        factory = _parallel_gemma_factory(args.model, usage_path=work / "model-usage.jsonl")
+        factory = _parallel_gemma_factory(args.model, url=args.url, usage_path=work / "model-usage.jsonl")
     else:
         try:
             shared = LenovoGemmaProvider(
                 audit_path=work / "provider_audit.jsonl",
                 usage_path=work / "model-usage.jsonl",
-                **_model_kwargs(args.model),
+                **_model_kwargs(args.model, args.url),
             )
         except LenovoGemmaError as exc:
             print(f"gemma provider failed ({exc.code}); export {API_KEY_ENV}", file=sys.stderr)
@@ -591,7 +592,7 @@ def main(argv: list[str] | None = None) -> int:
             if getattr(args, role) == "gemma":
                 try:
                     provider_type(
-                        **_model_kwargs(args.model)
+                        **_model_kwargs(args.model, args.url)
                     )  # Validate credentials, zero requests.
                 except LenovoGemmaError as exc:
                     print(
@@ -600,7 +601,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     return 2
                 role_factories[role] = _gemma_role_factory(
-                    provider_type, args.model, usage_path=work / "model-usage.jsonl"
+                    provider_type, args.model, url=args.url, usage_path=work / "model-usage.jsonl"
                 )
     report = run_smoke(
         materials,
@@ -877,27 +878,27 @@ def _fake_builder(mode: str) -> ToolloopProvider:
 
 def _parallel_gemma_factory(
     model: str | None = None,
-    *, usage_path: Path | None = None,
+    *, url: str | None = None, usage_path: Path | None = None,
 ) -> Callable[[str], ToolloopProvider]:
     """One provider per material with a shared append-only HTTP usage ledger."""
 
     def factory(mode: str) -> ToolloopProvider:
-        return LenovoGemmaProvider(usage_path=usage_path, **_model_kwargs(model))
+        return LenovoGemmaProvider(usage_path=usage_path, **_model_kwargs(model, url))
 
     return factory
 
 
-def _model_kwargs(model: str | None) -> dict[str, str]:
-    return {"model": model} if model else {}
+def _model_kwargs(model: str | None, url: str | None = None) -> dict[str, str]:
+    return {k: v for k, v in {"model": model, "url": url}.items() if v}
 
 
 def _gemma_role_factory(
-    provider_type: type, model: str | None, *, usage_path: Path | None = None
+    provider_type: type, model: str | None, *, url: str | None = None, usage_path: Path | None = None
 ) -> Callable[[str], Any]:
     """Fresh provider for every material/attempt, even with jobs=1."""
 
     def factory(mode: str) -> Any:
-        kwargs: dict[str, Any] = _model_kwargs(model)
+        kwargs: dict[str, Any] = _model_kwargs(model, url)
         if usage_path is not None:
             kwargs["usage_path"] = usage_path
         return provider_type(**kwargs)
