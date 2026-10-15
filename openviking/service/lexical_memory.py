@@ -125,13 +125,25 @@ class LexicalMemoryIndex:
         expression = " OR ".join('"' + word.replace('"', '""') + '"' for word in words)
         prefix = target_uri.rstrip("/") + "/"
         with self._connection() as connection:
-            rows = connection.execute(
-                "SELECT documents.*,bm25(terms) AS rank FROM terms JOIN documents ON terms.rowid=documents.rowid "
+            # Keep ranking and materialization on one snapshot. Sorting full
+            # documents here copies gigabytes for broad queries before LIMIT.
+            connection.execute("BEGIN")
+            ranked = connection.execute(
+                "SELECT documents.rowid,documents.uri,bm25(terms) AS rank FROM terms JOIN documents ON terms.rowid=documents.rowid "
                 "WHERE terms MATCH ? AND (uri=? OR substr(uri,1,?)=?) "
                 "ORDER BY rank ASC,uri ASC LIMIT ? OFFSET ?",
                 (expression, target_uri, len(prefix), prefix, limit, offset),
             ).fetchall()
-        return [self._hit(row, query, -row["rank"]) for row in rows]
+            return [
+                self._hit(
+                    connection.execute(
+                        "SELECT * FROM documents WHERE rowid=?", (candidate["rowid"],)
+                    ).fetchone(),
+                    query,
+                    -candidate["rank"],
+                )
+                for candidate in ranked
+            ]
 
     @staticmethod
     def _hit(row: sqlite3.Row, query: str, score: float) -> dict[str, Any]:

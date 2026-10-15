@@ -401,3 +401,23 @@ def test_graph_identity_is_unambiguous_when_task_and_revision_ids_contain_colons
     )
     rows = causal_memory_projection(corpus, "user:alice")
     assert len(rows) == len({row[0] for row in rows}) == 6
+
+
+def test_bm25_ranking_preserves_scope_ties_pages_and_large_document_excerpts(tmp_path):
+    index = LexicalMemoryIndex(tmp_path, "account")
+    index.upsert("viking://resources/docs/z.md", "Observatory opening verified")
+    index.upsert("viking://resources/docs/a.md", "Observatory opening verified")
+    index.upsert("viking://resources/docs/large.md", "background " * 30000 + "observatory opening")
+    index.upsert("viking://resources/docs-private/hidden.md", "Observatory opening verified")
+    first = index.find("observatory opening", target_uri="viking://resources/docs", limit=1)
+    second = index.find(
+        "observatory opening", target_uri="viking://resources/docs", limit=1, offset=1
+    )
+    last = index.find(
+        "observatory opening", target_uri="viking://resources/docs", limit=1, offset=2
+    )
+    assert first[0]["uri"].endswith("/a.md")
+    assert second[0]["uri"].endswith("/z.md")
+    assert last[0]["uri"].endswith("/large.md")
+    assert first[0]["score"] == second[0]["score"] > last[0]["score"]
+    assert "observatory opening" in last[0]["excerpt"]
