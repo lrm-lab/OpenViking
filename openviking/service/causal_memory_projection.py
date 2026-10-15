@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Any
 
 from openviking.session.active_retrieval import ActiveRetrievalCorpus
@@ -26,9 +27,15 @@ def causal_memory_projection(
     def uri(ref: str) -> str:
         return (
             "viking://resources/causal/"
-            + hashlib.sha256((owner_label + "\0" + ref).encode()).hexdigest()
+            + hashlib.sha256(
+                json.dumps([owner_label, ref], separators=(",", ":")).encode()
+            ).hexdigest()
             + ".md"
         )
+
+    def revision_namespace(revision) -> str:
+        identity = [revision.session_id, revision.task_run_id, revision.revision_id]
+        return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
 
     def add(ref: str, kind: str, text: str, status: str):
         key = uri(ref)
@@ -46,7 +53,7 @@ def causal_memory_projection(
             continue
         revision = bound.revision
         revisions.setdefault(revision.revision_id, []).append(revision)
-        namespace = f"{revision.session_id}:{revision.task_run_id}:{revision.revision_id}"
+        namespace = revision_namespace(revision)
         for block in revision.blocks:
             ref = f"native-block:{namespace}:{block.block_id}"
             blocks[(namespace, block.block_id)] = add(
@@ -82,7 +89,7 @@ def causal_memory_projection(
         if len(matches) != 1:
             raise ValueError("ambiguous fork base revision across sessions")
         revision = matches[0]
-        namespace = f"{revision.session_id}:{revision.task_run_id}:{revision.revision_id}"
+        namespace = revision_namespace(revision)
         catalog = BaseRevisionCatalog(
             revision.revision_id,
             block_content_hash(revision.blocks),

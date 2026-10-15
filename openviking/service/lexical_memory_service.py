@@ -130,7 +130,17 @@ class LexicalMemoryService:
             async with semaphore:
                 await self.filesystem().write_file(row["uri"], row["text"], ctx=ctx)
 
-        await asyncio.gather(*(write(row) for row in resources))
+        tasks = [asyncio.create_task(write(row)) for row in resources]
+        try:
+            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
         hashes = await asyncio.to_thread(
             self.index(ctx).upsert_many,
             [(row["uri"], row["text"], {"kind": row["kind"]}) for row in resources],

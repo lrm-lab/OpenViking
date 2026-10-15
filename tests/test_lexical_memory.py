@@ -333,3 +333,71 @@ def test_graph_identity_includes_owner_and_session_even_for_same_revision_ids():
     assert len(rows) == len({row[0] for row in rows}) == 6
     bob = causal_memory_projection(corpus, "user:bob")
     assert {row[0] for row in rows}.isdisjoint(row[0] for row in bob)
+
+
+async def test_failed_batch_waits_for_other_writes_before_unlocking_account(tmp_path):
+    import asyncio
+
+    import pytest
+
+    from openviking.server.identity import RequestContext, Role
+    from openviking.service.lexical_memory_service import LexicalMemoryService
+    from openviking_cli.session.user_id import UserIdentifier
+
+    delayed_started, release_delayed = asyncio.Event(), asyncio.Event()
+
+    class Files:
+        async def write_file(self, uri, text, **kwargs):
+            if text == "fail":
+                raise OSError("injected write failure")
+            delayed_started.set()
+            await release_delayed.wait()
+
+    service = LexicalMemoryService(tmp_path, lambda: Files())
+    ctx = RequestContext(UserIdentifier("account", "alice"), Role.ADMIN)
+    batch = asyncio.create_task(
+        service.put_resources(
+            ctx,
+            [
+                {"uri": "viking://resources/fail.md", "text": "fail", "kind": "document"},
+                {"uri": "viking://resources/delay.md", "text": "delayed", "kind": "document"},
+            ],
+        )
+    )
+    await delayed_started.wait()
+    deletion = asyncio.create_task(service.delete_account("account"))
+    await asyncio.sleep(0)
+    assert not batch.done()
+    assert not deletion.done()
+    release_delayed.set()
+    with pytest.raises(OSError, match="injected"):
+        await batch
+    await deletion
+    assert not list(tmp_path.glob("*.sqlite3*"))
+
+
+def test_graph_identity_is_unambiguous_when_task_and_revision_ids_contain_colons():
+    from openviking.service.causal_memory_projection import causal_memory_projection
+    from openviking.session.active_retrieval import ActiveRetrievalCorpus, BoundNativeView
+    from openviking.session.extraction_write import freeze_native_edge_view
+    from tests.test_fork_node_overlay import _native_revision
+
+    template = _native_revision()
+    revisions = [
+        freeze_native_edge_view(
+            session_id=template.session_id,
+            task_run_id=task,
+            view_id=template.view_id,
+            revision_id=revision,
+            frozen_at=template.frozen_at,
+            blocks=template.blocks,
+            edges=template.edges,
+            coverage=template.coverage,
+        )
+        for task, revision in [("r:x", "y"), ("r", "x:y")]
+    ]
+    corpus = ActiveRetrievalCorpus(
+        native_views=tuple(BoundNativeView(revision, ("user:alice",)) for revision in revisions)
+    )
+    rows = causal_memory_projection(corpus, "user:alice")
+    assert len(rows) == len({row[0] for row in rows}) == 6
