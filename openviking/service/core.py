@@ -9,6 +9,7 @@ Main service class that composes all sub-services and manages infrastructure lif
 import asyncio
 import inspect
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from openviking.core.directories import DirectoryInitializer
@@ -21,6 +22,7 @@ from openviking.service.compile_service import CompileService
 from openviking.service.debug_service import DebugService
 from openviking.service.external_task_service import ExternalTaskService
 from openviking.service.fs_service import FSService
+from openviking.service.lexical_memory_service import LexicalMemoryService
 from openviking.service.mineru_preflight import wait_for_mineru_ready
 from openviking.service.pack_service import PackService
 from openviking.service.resource_memory_link_service import ResourceMemoryLinkService
@@ -94,6 +96,9 @@ class OpenVikingService:
         self._queue_manager: Optional[QueueManager] = None
         self._vikingdb_manager: Optional[VikingDBManager] = None
         self._viking_fs: Optional[VikingFS] = None
+        self.lexical = LexicalMemoryService(
+            Path(config.storage.workspace) / "lexical-memory", lambda: self._viking_fs
+        )
         self._embedder: Optional[Any] = None
         self._resource_processor: Optional[ResourceProcessor] = None
         self._skill_processor: Optional[SkillProcessor] = None
@@ -259,11 +264,7 @@ class OpenVikingService:
         if manager is None:
             return
         base_config = self._config.model_copy(
-            update={
-                "agent_evolution": self._agent_evolution_base_config.model_copy(
-                    deep=True
-                )
-            }
+            update={"agent_evolution": self._agent_evolution_base_config.model_copy(deep=True)}
         )
         await manager.replace_base_config(base_config)
 
@@ -285,11 +286,7 @@ class OpenVikingService:
         if self._agfs_client is None:
             raise RuntimeError("AGFS client not initialized")
         base_config = self._config.model_copy(
-            update={
-                "agent_evolution": self._agent_evolution_base_config.model_copy(
-                    deep=True
-                )
-            },
+            update={"agent_evolution": self._agent_evolution_base_config.model_copy(deep=True)},
         )
         manager = build_runtime_config_manager(
             AsyncAGFSClient(self._agfs_client),

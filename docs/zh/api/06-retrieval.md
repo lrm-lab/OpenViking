@@ -2,6 +2,19 @@
 
 OpenViking 提供多种检索方法，包括简单的向量相似度搜索、带会话上下文的智能检索、正则表达式匹配搜索和文件模式匹配。
 
+
+## HTTP 关键字检索
+
+`POST /api/v1/search/find` 可显式指定 `retrieval_mode: "bm25"`，仅检索已写入词法索引的资源；省略时保留原有 semantic 路径。BM25 不调用 embedding、查询扩展或 LLM。
+
+```json
+{"query":"Lumen Observatory","retrieval_mode":"bm25","target_uri":"viking://resources/docs","limit":5}
+```
+
+管理员通过 `POST /api/v1/search/index_lexical` 写入 `{"resources":[{"uri":"viking://resources/docs/lumen.md","text":"Lumen opened in 2041.","kind":"document"}]}`，每批最多 100 条，kind 支持 document/experience。返回原文哈希；GET 同一路径返回已索引数量。检索使用账户隔离的持久化 SQLite FTS5 BM25，英文词和中文字符分词，多个关键词取并集后排序，并逐条检查文件读取权限及当前内容哈希。
+
+会话所有者管理员可通过 `POST /api/v1/search/publish_causal`、body `{"session_id":"session-a"}` 发布该会话冻结的 native AIG 和授权 Fork 摘要。普通写入接口不能伪造图节点。检索结果给出 `chain_ref` 与可用关系；`POST /api/v1/search/expand` 接受 `operation_id`、`chain_ref`、已返回的 `uri`、`relation` 和 `limit`。链绑定用户，最多 4 跳、30 个节点、存活 600 秒；每跳再次检查权限和快照。Fork 保持反事实标记。
+
 ## find 与 search 对比
 
 | 方面 | find | search |
