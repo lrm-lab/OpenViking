@@ -24,7 +24,11 @@ def causal_memory_projection(
     blocks = {}
 
     def uri(ref: str) -> str:
-        return "viking://resources/causal/" + hashlib.sha256(ref.encode()).hexdigest() + ".md"
+        return (
+            "viking://resources/causal/"
+            + hashlib.sha256((owner_label + "\0" + ref).encode()).hexdigest()
+            + ".md"
+        )
 
     def add(ref: str, kind: str, text: str, status: str):
         key = uri(ref)
@@ -41,22 +45,23 @@ def causal_memory_projection(
         if owner_label not in bound.acl_labels or not bound.revision.frozen_at:
             continue
         revision = bound.revision
-        revisions[revision.revision_id] = revision
+        revisions.setdefault(revision.revision_id, []).append(revision)
+        namespace = f"{revision.session_id}:{revision.task_run_id}:{revision.revision_id}"
         for block in revision.blocks:
-            ref = f"native-block:{revision.revision_id}:{block.block_id}"
-            blocks[(revision.revision_id, block.block_id)] = add(
+            ref = f"native-block:{namespace}:{block.block_id}"
+            blocks[(namespace, block.block_id)] = add(
                 ref, "native_block", block.summary, "recorded"
             )
         for edge in revision.edges:
-            ref = f"native-edge:{revision.revision_id}:{edge.edge_id}"
+            ref = f"native-edge:{namespace}:{edge.edge_id}"
             key = add(
                 ref,
                 "native_edge",
                 f"Recorded AIG relation: {edge.relation_type}.\n{edge.mechanism}\nThis recorded explanation is not independent proof of causality.",
                 "recorded",
             )
-            source = blocks[(revision.revision_id, edge.source_block_id)]
-            target = blocks[(revision.revision_id, edge.target_block_id)]
+            source = blocks[(namespace, edge.source_block_id)]
+            target = blocks[(namespace, edge.target_block_id)]
             link(key, "source", source)
             link(key, "target", target)
             link(source, "outgoing", key)
@@ -71,19 +76,23 @@ def causal_memory_projection(
     for stored in overlays:
         guard_v2_fork_consumer(stored, "v2_retrieval")
         overlay = stored.overlay
-        revision = revisions.get(overlay.base_revision_id)
-        if revision is None:
+        matches = revisions.get(overlay.base_revision_id, [])
+        if not matches:
             continue
+        if len(matches) != 1:
+            raise ValueError("ambiguous fork base revision across sessions")
+        revision = matches[0]
+        namespace = f"{revision.session_id}:{revision.task_run_id}:{revision.revision_id}"
         catalog = BaseRevisionCatalog(
             revision.revision_id,
             block_content_hash(revision.blocks),
             tuple(b.block_id for b in revision.blocks),
         )
         validate_v2_fork_grounding(overlay, catalog)
-        anchor = blocks[(revision.revision_id, overlay.anchor_block_id)]
+        anchor = blocks[(namespace, overlay.anchor_block_id)]
         summary = next(b.summary for b in revision.blocks if b.block_id == overlay.anchor_block_id)
         fork = add(
-            f"fork-overlay:{overlay.fork_node_id}",
+            f"fork-overlay:{namespace}:{overlay.fork_node_id}",
             "fork_overlay",
             f"Alternative branch anchored at: {summary}.\nCounterfactual branch; its steps are not observed execution.",
             "counterfactual",
@@ -94,14 +103,14 @@ def causal_memory_projection(
         for index, step in enumerate(overlay.branch_steps):
             label = step.block_id or step.imagined_node_id
             key = add(
-                f"fork-step:{overlay.fork_node_id}:{index}",
+                f"fork-step:{namespace}:{overlay.fork_node_id}:{index}",
                 "fork_step",
                 f"Branch step {index}: {step.step_kind} {label}.\nMembership in a Fork is not evidence that the step executed.",
                 "counterfactual",
             )
             link(fork, "branch_steps", key)
             if step.block_id:
-                link(key, "observed_block", blocks[(revision.revision_id, step.block_id)])
+                link(key, "observed_block", blocks[(namespace, step.block_id)])
             if previous:
                 link(previous, "next", key)
                 link(key, "previous", previous)

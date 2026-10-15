@@ -21,6 +21,17 @@ class LexicalMemoryService:
         self.root = root
         self.filesystem = filesystem
         self._retrievals: dict[str, LexicalMemoryRetrieval] = {}
+        self._write_locks: dict[str, asyncio.Lock] = {}
+
+    def _write_lock(self, account_id: str) -> asyncio.Lock:
+        return self._write_locks.setdefault(account_id, asyncio.Lock())
+
+    async def delete_account(self, account_id: str) -> None:
+        async with self._write_lock(account_id):
+            self._retrievals.pop(account_id, None)
+            path = self.root / (hashlib.sha256(account_id.encode()).hexdigest() + ".sqlite3")
+            for suffix in ("", "-wal", "-shm"):
+                await asyncio.to_thread(Path(str(path) + suffix).unlink, missing_ok=True)
 
     def index(self, ctx: RequestContext) -> LexicalMemoryIndex:
         return self._retrieval(ctx).index
@@ -96,6 +107,12 @@ class LexicalMemoryService:
     async def put_resources(
         self, ctx: RequestContext, resources: list[dict[str, str]]
     ) -> list[dict[str, Any]]:
+        async with self._write_lock(ctx.account_id):
+            return await self._put_resources(ctx, resources)
+
+    async def _put_resources(
+        self, ctx: RequestContext, resources: list[dict[str, str]]
+    ) -> list[dict[str, Any]]:
         seen = set()
         for row in resources:
             if not row["uri"].startswith("viking://resources/") or not row["text"].strip():
@@ -127,7 +144,8 @@ class LexicalMemoryService:
         from openviking.service.causal_memory_projection import causal_memory_projection
 
         rows = causal_memory_projection(corpus, owner_label)
-        for uri, text, _metadata in rows:
-            await self.filesystem().write_file(uri, text, ctx=ctx)
-        await asyncio.to_thread(self.index(ctx).upsert_many, rows)
+        async with self._write_lock(ctx.account_id):
+            for uri, text, _metadata in rows:
+                await self.filesystem().write_file(uri, text, ctx=ctx)
+            await asyncio.to_thread(self.index(ctx).upsert_many, rows)
         return {"resources": len(rows), "retrieval_mode": "bm25"}

@@ -225,3 +225,111 @@ async def test_frozen_native_fork_publication_can_be_searched_and_traversed(tmp_
     from openviking.service.causal_memory_projection import causal_memory_projection
 
     assert causal_memory_projection(corpus, "user:bob") == []
+
+
+async def test_account_deletion_removes_lexical_text_and_chain_state(tmp_path):
+    import pytest
+
+    from openviking.server.identity import RequestContext, Role
+    from openviking.service.lexical_memory_service import LexicalMemoryService
+    from openviking_cli.session.user_id import UserIdentifier
+
+    service = LexicalMemoryService(tmp_path, lambda: None)
+    ctx = RequestContext(UserIdentifier("account", "alice"), Role.ADMIN)
+    retrieval = service._retrieval(ctx)
+    retrieval.index.upsert("viking://resources/a.md", "Private observatory")
+    initial = await retrieval.find("observatory", principal="account:alice", can_read=_allow)
+    await service.delete_account("account")
+    assert not list(tmp_path.glob("*.sqlite3*"))
+    assert service.index(ctx).counts() == {}
+    with pytest.raises(ValueError, match="chain_unavailable"):
+        await service.expand(
+            ctx,
+            chain_ref=initial["chain_ref"],
+            uri="viking://resources/a.md",
+            relation="outgoing",
+            operation_id="old",
+        )
+
+
+async def test_concurrent_imports_keep_file_and_index_at_the_same_version(tmp_path):
+    import asyncio
+
+    from openviking.server.identity import RequestContext, Role
+    from openviking.service.lexical_memory_service import LexicalMemoryService
+    from openviking_cli.session.user_id import UserIdentifier
+
+    first_written, release_first = asyncio.Event(), asyncio.Event()
+
+    class Files:
+        text = ""
+
+        async def write_file(self, uri, text, **kwargs):
+            self.text = text
+            if text == "Observatory first":
+                first_written.set()
+                await release_first.wait()
+
+        async def stat(self, uri, **kwargs):
+            return {"isDir": False}
+
+        async def read_file(self, uri, **kwargs):
+            return self.text
+
+    files = Files()
+    service = LexicalMemoryService(tmp_path, lambda: files)
+    ctx = RequestContext(UserIdentifier("account", "alice"), Role.ADMIN)
+    uri = "viking://resources/a.md"
+    first = asyncio.create_task(
+        service.put_resource(ctx, uri=uri, text="Observatory first", kind="document")
+    )
+    await first_written.wait()
+    second = asyncio.create_task(
+        service.put_resource(ctx, uri=uri, text="Observatory second", kind="document")
+    )
+    await asyncio.sleep(0)
+    release_first.set()
+    await asyncio.gather(first, second)
+    assert files.text == "Observatory second"
+    assert (await service.find("second", ctx))["resources"][0]["uri"] == uri
+
+
+def test_graph_identity_includes_owner_and_session_even_for_same_revision_ids():
+    from dataclasses import replace
+
+    from openviking.service.causal_memory_projection import causal_memory_projection
+    from openviking.session.active_retrieval import ActiveRetrievalCorpus, BoundNativeView
+    from openviking.session.extraction_write import freeze_native_edge_view
+    from tests.test_fork_node_overlay import _coverage, _native_revision
+
+    first = _native_revision()
+    blocks = tuple(
+        replace(
+            block,
+            segment_ref=replace(block.segment_ref, session_id="another-session"),
+            source_refs=tuple(
+                replace(ref, session_id="another-session") for ref in block.source_refs
+            ),
+        )
+        for block in first.blocks
+    )
+    second = freeze_native_edge_view(
+        session_id="another-session",
+        task_run_id=first.task_run_id,
+        view_id=first.view_id,
+        revision_id=first.revision_id,
+        frozen_at=first.frozen_at,
+        blocks=blocks,
+        edges=first.edges,
+        coverage=_coverage(blocks),
+    )
+    corpus = ActiveRetrievalCorpus(
+        native_views=(
+            BoundNativeView(first, ("user:alice", "user:bob")),
+            BoundNativeView(second, ("user:alice",)),
+        )
+    )
+    rows = causal_memory_projection(corpus, "user:alice")
+    assert len(rows) == len({row[0] for row in rows}) == 6
+    bob = causal_memory_projection(corpus, "user:bob")
+    assert {row[0] for row in rows}.isdisjoint(row[0] for row in bob)

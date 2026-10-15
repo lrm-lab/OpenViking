@@ -332,6 +332,9 @@ class DeletionService:
                     )
                 )
             if user_id is None:
+                lexical = getattr(self._service, "lexical", None)
+                if lexical is not None:
+                    await run_to_completion(lambda: lexical.delete_account(account_id))
                 await run_to_completion(
                     lambda: self._service.release_account_vector_resources(account_id)
                 )
