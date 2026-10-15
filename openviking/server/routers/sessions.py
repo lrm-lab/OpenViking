@@ -25,6 +25,70 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 logger = get_logger(__name__)
 
 
+class ExplicitDiagnosisRequest(BaseModel):
+    request_id: str = Field(min_length=1, max_length=128)
+    question: str = Field(min_length=1, max_length=8192)
+
+    model_config = {"extra": "forbid"}
+
+
+async def _diagnosis_session(session_id: str, ctx: RequestContext):
+    from openviking.session.aig_native_protocol import is_safe_id
+    from openviking.session.session_acl import session_stored_owner_label
+    from openviking_cli.exceptions import OpenVikingError
+
+    if not is_safe_id(session_id) or len(session_id) > 128:
+        raise HTTPException(status_code=400, detail="invalid_diagnosis_session_id")
+    session = get_service().sessions.session(ctx, session_id)
+    await session.load()
+    try:
+        owner = session_stored_owner_label(session)
+    except ValueError:
+        owner = None
+    if owner != f"user:{ctx.user.user_id}":
+        raise OpenVikingError("target session is not visible", code="PERMISSION_DENIED")
+    return session
+
+
+@router.get("/{session_id}/diagnosis/{request_id}")
+async def explicit_session_diagnosis_status(
+    session_id: str,
+    request_id: str,
+    ctx: RequestContext = Depends(get_session_request_context),
+):
+    from openviking.session.explicit_diagnosis import read_diagnosis
+
+    session = await _diagnosis_session(session_id, ctx)
+    try:
+        result = read_diagnosis(session, request_id)
+    except ValueError as exc:
+        from openviking_cli.exceptions import InvalidArgumentError
+
+        raise InvalidArgumentError(str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="diagnosis_not_found")
+    return Response(status="ok", result=result).model_dump(exclude_none=True)
+
+
+@router.post("/{session_id}/diagnosis")
+async def explicit_session_diagnosis(
+    session_id: str,
+    body: ExplicitDiagnosisRequest,
+    ctx: RequestContext = Depends(get_session_request_context),
+):
+    """Start or poll a bounded four-role diagnosis of this caller's session."""
+    from openviking.session.explicit_diagnosis import request_diagnosis
+
+    session = await _diagnosis_session(session_id, ctx)
+    try:
+        result = await request_diagnosis(session, body.request_id, body.question)
+    except ValueError as exc:
+        from openviking_cli.exceptions import InvalidArgumentError
+
+        raise InvalidArgumentError(str(exc)) from exc
+    return Response(status="ok", result=result).model_dump(exclude_none=True)
+
+
 class TextPartRequest(BaseModel):
     """Text part request model."""
 
@@ -368,8 +432,8 @@ async def get_session(
     result["pending_tokens"] = int(session.meta.pending_tokens or 0)
     result["auto_commit_policy"] = service.sessions.effective_auto_commit_policy(session)
     result.pop("event_search_tags", None)
-    result["memory_extraction_config"] = (
-        service.sessions.effective_memory_extraction_config(session)
+    result["memory_extraction_config"] = service.sessions.effective_memory_extraction_config(
+        session
     )
     return Response(status="ok", result=result)
 
@@ -402,9 +466,7 @@ async def update_session_config(
     from openviking_cli.exceptions import NotFoundError
 
     service = get_service()
-    event_tags = _event_tags_from_extraction_config(
-        request.memory_extraction_config
-    )
+    event_tags = _event_tags_from_extraction_config(request.memory_extraction_config)
     update_auto_commit_policy = "auto_commit_policy" in request.model_fields_set
     auto_commit_policy = (
         request.auto_commit_policy.model_dump(exclude_none=True)
@@ -436,9 +498,9 @@ async def update_session_config(
         )
     except NotFoundError:
         return error_response("NOT_FOUND", f"Session {session_id} not found")
-    return Response(
-        status="ok", result=execution.result, telemetry=execution.telemetry
-    ).model_dump(exclude_none=True)
+    return Response(status="ok", result=execution.result, telemetry=execution.telemetry).model_dump(
+        exclude_none=True
+    )
 
 
 @router.get("/{session_id}/tool-results")
@@ -537,9 +599,7 @@ async def get_session_archive(
     try:
         result = await session.get_session_archive(archive_id)
     except NotFoundError:
-        return error_response(
-            code="NOT_FOUND", message=f"Archive {archive_id} not found"
-        )
+        return error_response(code="NOT_FOUND", message=f"Archive {archive_id} not found")
     return Response(status="ok", result=_to_jsonable(result))
 
 
