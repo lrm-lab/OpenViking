@@ -171,3 +171,18 @@ uv run --no-sync python scripts/export_ao_records.py \
 `fallback_reason=not_triggered`。
 
 合成 + Fake 预填：①–④ pass，⑤ rate=0。真 gemma 冒烟以人工报告为准。
+
+## Reader evidence policy
+
+CLI defaults to `--reader-policy guarded`. Guarded Reader
+keeps each identical successful read body once, preserves the first-read handle
+and actual AO coverage, warns with three budget slots left, and reserves the last
+slot for a final report. Three consecutive duplicate/error reads request a final
+report; refusing it freezes an unresolved `no_progress` result. Reports citing AO
+that were not actually read are rejected. An empty attribution with nonempty
+`unresolved_areas` is allowed but does not pass complete Reader verification.
+Explicit `--reader-policy legacy` reproduces the old loop for diagnostics.
+
+Reader receives the complete frozen graph with read-only AO tools. Reports are
+validated against that graph and actual AO reads; original evidence and read
+audit remain available for review.

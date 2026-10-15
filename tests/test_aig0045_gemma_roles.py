@@ -892,3 +892,14 @@ def test_refiner_keeps_non_tool_outcomes_without_duplicating_reads() -> None:
     state = json.loads(body["messages"][-1]["content"])
     assert state["history"] == [{"action": "unresolvable", "violation_id": "v1", "ok": True}]
     assert state["edit_constraints"]["v1"]["allowed_verbs"] == ["modify_block"]
+
+
+def test_reader_near_budget_disables_tools_and_keeps_progress_index() -> None:
+    from dataclasses import replace
+
+    current = replace(turn("reader"), remaining_calls=1, read_ao_refs=(1,), final_only=True)
+    body = role_request_body(current, role="reader", model=DEFAULT_MODEL)
+    assert body["tool_choice"] == "none"
+    assert "Reading budget nearly exhausted" in body["messages"][0]["content"]
+    state = json.loads(body["messages"][-1]["content"])
+    assert state["reader_progress"]["read_ao_refs"] == [1]

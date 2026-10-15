@@ -134,7 +134,10 @@ def _tool(payload: Mapping[str, Any], catalog: tuple[tuple[str, str], ...]) -> T
 
 
 def role_request_body(
-    turn: CriticTurn | RefinerTurn | ReaderTurn, *, role: str, model: str
+    turn: CriticTurn | RefinerTurn | ReaderTurn,
+    *,
+    role: str,
+    model: str,
 ) -> dict[str, Any]:
     """Mode prompt, closed role catalog, current graph and completed history."""
     catalogs = {"critic": critic_catalog, "refiner": refiner_catalog, "reader": reader_catalog}
@@ -176,6 +179,17 @@ def role_request_body(
     state = {"catalog": catalog}
     if role == "reader":
         state["frozen_graph"] = turn.graph
+        if turn.remaining_calls is not None:
+            state["reader_progress"] = {
+                "read_ao_refs": list(turn.read_ao_refs),
+                "remaining_calls": turn.remaining_calls,
+                "stop_reason": turn.stop_reason,
+            }
+            prompt += "\nDecisive AO refs must have been read through read_step/read_step_range."
+            if turn.remaining_calls <= 3 or turn.final_only:
+                prompt += "\nReading budget nearly exhausted. Form a report from verified evidence now; list uncertainty in unresolved_areas. Do not guess unread evidence."
+            if turn.final_only:
+                prompt += '\nNo more tools. Return the final report now. If evidence is insufficient, return {"responsible_agent":"","decisive_ao_refs":[],"reason":"insufficient verified evidence","critical_block_id":"","unresolved_areas":["describe the missing verification"]}.'
     else:
         state["draft"] = turn.draft
         state["structural_violations" if role == "critic" else "violations"] = (
@@ -215,13 +229,23 @@ def role_request_body(
             for item in turn.violations
         }
     messages.append({"role": "user", "content": _dump(state)})
-    return {"model": model, "messages": messages, "tools": tools, "tool_choice": "auto"}
+    return {
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "tool_choice": "none" if role == "reader" and turn.final_only else "auto",
+    }
 
 
 class _GemmaRoleProvider(LenovoGemmaProvider):
     fallback: str
 
-    def __init__(self, *, output_retries: int = DEFAULT_OUTPUT_RETRIES, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        output_retries: int = DEFAULT_OUTPUT_RETRIES,
+        **kwargs: Any,
+    ) -> None:
         if (
             isinstance(output_retries, bool)
             or not isinstance(output_retries, int)
@@ -285,7 +309,11 @@ class GemmaCriticProvider(_GemmaRoleProvider):
         self._view = view
 
     def __call__(self, turn: CriticTurn) -> Mapping[str, Any] | str:
-        body = role_request_body(turn, role="critic", model=self._model)
+        body = role_request_body(
+            turn,
+            role="critic",
+            model=self._model,
+        )
         if self._view is not None:
             row_count = self._view.call("get_overview")["row_count"]
         else:
@@ -369,7 +397,11 @@ class GemmaRefinerProvider(_GemmaRoleProvider):
     fallback = "done"
 
     def __call__(self, turn: RefinerTurn) -> RefinerAction:
-        body = role_request_body(turn, role="refiner", model=self._model)
+        body = role_request_body(
+            turn,
+            role="refiner",
+            model=self._model,
+        )
         by_id = {item["violation_id"]: item for item in turn.violations}
 
         def parse(payload: Mapping[str, Any]) -> tuple[RefinerAction, str]:
@@ -451,7 +483,15 @@ class GemmaReaderProvider(_GemmaRoleProvider):
                     "tool", invocation.verb, invocation.arguments
                 ), invocation.verb
             loaded = _strict_json(message.get("content"))
-            report = parse_reader_report(loaded, turn.graph)
+            report = parse_reader_report(
+                loaded,
+                turn.graph,
+                allow_unresolved=turn.remaining_calls is not None,
+            )
+            if turn.remaining_calls is not None and not set(report.decisive_ao_refs) <= set(
+                turn.read_ao_refs
+            ):
+                raise ReaderError("unread_decisive_refs")
             return ReaderInvocation("report", report=report.to_dict()), "report"
 
         result = self._validated(body, parse)

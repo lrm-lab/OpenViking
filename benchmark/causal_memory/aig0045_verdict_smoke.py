@@ -308,6 +308,7 @@ def run_smoke(
     jobs: int = 1,
     attempts: int = 1,
     attempt_policy: str = "fixed",
+    reader_policy: str = "guarded",
 ) -> dict[str, Any]:
     """Run every material. Role factories receive the attribution mode.
 
@@ -341,6 +342,7 @@ def run_smoke(
         "dry_run": dry_run,
         "builder": builder,
         "builder_factory": builder_factory,
+        "reader_policy": reader_policy,
         "role_factories": {
             "critic": critic_factory,
             "refiner": refiner_factory,
@@ -429,6 +431,7 @@ def run_smoke(
         "settings": {
             "attempts": attempts,
             "attempt_policy": attempt_policy,
+            "reader_policy": reader_policy,
             "dry_run": dry_run,
             "jobs": jobs,
             "max_calls": max_calls,
@@ -460,6 +463,7 @@ def _run_all(
     builder_factory: Callable[[str], ToolloopProvider] | None,
     role_factories: Mapping[str, Callable[[str], Any] | None],
     jobs: int,
+    reader_policy: str = "guarded",
 ) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
     if jobs <= 1 or len(materials) <= 1:
         return [
@@ -472,6 +476,7 @@ def _run_all(
                 builder=builder,
                 builder_factory=builder_factory,
                 role_factories=role_factories,
+                reader_policy=reader_policy,
             )
             for spec in materials
         ]
@@ -487,6 +492,7 @@ def _run_all(
                 builder=builder,
                 builder_factory=builder_factory,
                 role_factories=role_factories,
+                reader_policy=reader_policy,
             )
             for spec in materials
         ]
@@ -622,6 +628,7 @@ def main(argv: list[str] | None = None) -> int:
         default="fixed",
         help="Fixed N-run evaluation, or debug mode stopping at first complete verification.",
     )
+    parser.add_argument("--reader-policy", choices=("legacy", "guarded"), default="guarded")
     parser.add_argument("--max-calls", type=int, default=DEFAULT_MAX_CALLS)
     parser.add_argument("--max-seconds", type=float, default=DEFAULT_MAX_SECONDS)
     parser.add_argument(
@@ -716,7 +723,10 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     return 2
                 role_factories[role] = _gemma_role_factory(
-                    provider_type, args.model, url=args.url, usage_path=work / "model-usage.jsonl"
+                    provider_type,
+                    args.model,
+                    url=args.url,
+                    usage_path=work / "model-usage.jsonl",
                 )
     report = run_smoke(
         materials,
@@ -732,6 +742,7 @@ def main(argv: list[str] | None = None) -> int:
         jobs=max(1, args.jobs),
         attempts=max(1, args.attempts),
         attempt_policy=args.attempt_policy,
+        reader_policy=args.reader_policy,
     )
     report["settings"].update(
         {
@@ -762,6 +773,7 @@ def _run_one(
     builder: ToolloopProvider | None,
     builder_factory: Callable[[str], ToolloopProvider] | None,
     role_factories: Mapping[str, Callable[[str], Any] | None],
+    reader_policy: str = "guarded",
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     outcome = normalize_verdict(
         spec.domain_kind,
@@ -882,6 +894,7 @@ def _run_one(
             construction_run=cycle.run,
             sidecar_path=cycle.sidecar_path,
             mode=mode,
+            reader_policy=reader_policy,
         )
     except Exception as exc:
         row["reader_schema_ok"] = False
@@ -901,6 +914,8 @@ def _run_one(
             "reader_report_hash": navigation.reader_report_hash,
             "anchor_candidates": list(navigation.anchor_candidates),
             "reads": list(navigation.reads),
+            "read_ao_refs": list(navigation.read_ao_refs),
+            "stop_reason": navigation.stop_reason,
             "budget_exhausted": navigation.budget_exhausted,
             "sidecar_path": str(cycle.sidecar_path),
         },

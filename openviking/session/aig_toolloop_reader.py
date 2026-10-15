@@ -72,13 +72,12 @@ READER_SUCCESS_PROMPT = (
     "unresolved_areas: [..]}。图是冻结的，你没有任何编辑工具。"
 )
 
-READER_NEUTRAL_PROMPT = READER_SUCCESS_PROMPT.replace(
-    "寻找关键贡献节点", "寻找可由日志核验的关键节点"
-).replace(
-    "下游成功贡献", "下游影响"
-).replace(
-    "归因对象", "相关对象"
-) + "\n任务结果尚未判定；报告不能声称成功或失败。"
+READER_NEUTRAL_PROMPT = (
+    READER_SUCCESS_PROMPT.replace("寻找关键贡献节点", "寻找可由日志核验的关键节点")
+    .replace("下游成功贡献", "下游影响")
+    .replace("归因对象", "相关对象")
+    + "\n任务结果尚未判定；报告不能声称成功或失败。"
+)
 
 READER_OUTPUT_SCHEMA = (
     "{responsible_agent, decisive_ao_refs, reason, critical_block_id, unresolved_areas: [..]}"
@@ -176,6 +175,10 @@ class ReaderTurn:
     tools: tuple[tuple[str, str], ...]
     graph: dict[str, Any]
     history: tuple[dict[str, Any], ...]
+    read_ao_refs: tuple[int, ...] = ()
+    remaining_calls: int | None = None
+    final_only: bool = False
+    stop_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -189,6 +192,8 @@ class ReaderNavigationResult:
     budget_exhausted: bool
     graph: dict[str, Any]
     reads: tuple[dict[str, Any], ...] = ()
+    read_ao_refs: tuple[int, ...] = ()
+    stop_reason: str | None = None
 
 
 class ReaderProvider(Protocol):
@@ -314,7 +319,10 @@ def anchor_candidates(
 
 
 def parse_reader_report(
-    payload: Mapping[str, Any] | str | None, graph: Mapping[str, Any]
+    payload: Mapping[str, Any] | str | None,
+    graph: Mapping[str, Any],
+    *,
+    allow_unresolved: bool = False,
 ) -> ReaderReport:
     """Parse the strict JSON object and bind it to one frozen block."""
     loaded = _load_report(payload)
@@ -325,6 +333,15 @@ def parse_reader_report(
     reason = loaded.get("reason")
     refs = loaded.get("decisive_ao_refs")
     areas = loaded.get("unresolved_areas")
+    if allow_unresolved and critical == "" and agent == "" and refs == []:
+        if (
+            isinstance(reason, str)
+            and reason.strip()
+            and isinstance(areas, list)
+            and areas
+            and all(isinstance(a, str) and a.strip() for a in areas)
+        ):
+            return ReaderReport("", (), reason, "", tuple(areas))
     blocks = _block_map(graph)
     if not isinstance(critical, str) or critical not in blocks:
         raise ReaderError("invalid_reader_output")
@@ -361,7 +378,12 @@ class ReaderView:
     """Frozen graph plus the snapshot's ``T_log`` subset."""
 
     def __init__(
-        self, snapshot: AoSnapshot, graph: Mapping[str, Any], *, root: Path, run_id: str
+        self,
+        snapshot: AoSnapshot,
+        graph: Mapping[str, Any],
+        *,
+        root: Path,
+        run_id: str,
     ) -> None:
         if not isinstance(snapshot, AoSnapshot) or not is_safe_id(run_id):
             raise ReaderError("invalid_snapshot")
@@ -381,7 +403,7 @@ class ReaderView:
             raise ReaderError("unknown_verb")
         if verb in TOOLLOOP_BUILD_VERBS:
             raise ReaderError("build_verb_forbidden")
-        if verb not in READER_VERBS:
+        if verb not in {name for name, _ in self.catalog()}:
             raise ReaderError("verb_not_in_role")
         args = {} if arguments is None else arguments
         if not isinstance(args, Mapping):
@@ -430,6 +452,7 @@ def run_reader(
     session_id: str | None = None,
     max_calls: int = DEFAULT_READER_CALLS,
     mode: str = "fail",
+    reader_policy: str = "guarded",
 ) -> ReaderNavigationResult:
     """Navigate, then freeze the report on the existing reader chain.
 
@@ -442,18 +465,29 @@ def run_reader(
         raise ReaderError("invalid_provider")
     if isinstance(max_calls, bool) or not isinstance(max_calls, int) or max_calls < 1:
         raise ReaderError("invalid_budget")
+    if reader_policy not in {"legacy", "guarded"}:
+        raise ReaderError("invalid_reader_policy")
     graph = load_frozen_paper_graph(revision, snapshot, sidecar_path=sidecar_path)
     view = ReaderView(snapshot, graph, root=root, run_id=run_id)
     history: list[dict[str, Any]] = []
     tool_calls = 0
     report: ReaderReport | None = None
     exhausted = False
+    read_refs: set[int] = set()
+    seen_results: dict[str, int] = {}
+    stalled = 0
+    stop_reason = None
     while tool_calls < max_calls:
         turn = ReaderTurn(
             system_prompt=reader_prompt_for_mode(mode),
             tools=reader_catalog(),
             graph=graph,
             history=tuple(history),
+            read_ao_refs=tuple(sorted(read_refs)),
+            remaining_calls=max_calls - tool_calls if reader_policy == "guarded" else None,
+            final_only=reader_policy == "guarded"
+            and (stalled >= 3 or (max_calls > 1 and max_calls - tool_calls <= 1)),
+            stop_reason="no_progress" if stalled >= 3 else None,
         )
         try:
             invocation = provider(turn)
@@ -464,16 +498,25 @@ def run_reader(
         if not isinstance(invocation, ReaderInvocation):
             raise ReaderError("invalid_provider_result")
         if invocation.kind == "report":
-            report = parse_reader_report(invocation.report, graph)
+            report = parse_reader_report(
+                invocation.report, graph, allow_unresolved=reader_policy == "guarded"
+            )
+            if reader_policy == "guarded" and not set(report.decisive_ao_refs) <= read_refs:
+                raise ReaderError("unread_decisive_refs")
             break
         if invocation.verb in TOOLLOOP_BUILD_VERBS:
             raise ReaderError("build_verb_forbidden")
-        if invocation.verb not in READER_VERBS:
+        if invocation.verb not in {name for name, _ in view.catalog()}:
             raise ReaderError("verb_not_in_role")
+        if turn.final_only:
+            stop_reason = turn.stop_reason or "budget_exhausted"
+            exhausted = True
+            break
         tool_calls += 1
         try:
             result = view.call(invocation.verb, invocation.arguments)
         except ReaderError as exc:
+            stalled += 1
             history.append(
                 {
                     "arguments": dict(invocation.arguments),
@@ -483,6 +526,15 @@ def run_reader(
                 }
             )
             continue
+        refs = _read_refs(invocation.verb, result)
+        read_refs.update(refs)
+        key = canonical_dumps({"verb": invocation.verb, "result": result})
+        duplicate = key in seen_results
+        stalled = stalled + 1 if duplicate else 0
+        if reader_policy == "guarded" and duplicate:
+            result = {"duplicate_of": seen_results[key], "read_ao_refs": sorted(refs)}
+        else:
+            seen_results[key] = len(history)
         history.append(
             {
                 "arguments": dict(invocation.arguments),
@@ -499,9 +551,9 @@ def run_reader(
         report = ReaderReport(
             responsible_agent="",
             decisive_ao_refs=(),
-            reason="budget_exhausted",
+            reason=stop_reason or "budget_exhausted",
             critical_block_id="",
-            unresolved_areas=("budget_exhausted",),
+            unresolved_areas=(stop_reason or "budget_exhausted",),
         )
     session = construction_run.session_for("reader") if session_id is None else session_id
     body = report.to_dict()
@@ -520,6 +572,8 @@ def run_reader(
         budget_exhausted=exhausted,
         graph=graph,
         reads=tuple(history),
+        read_ao_refs=tuple(sorted(read_refs)),
+        stop_reason=stop_reason or ("budget_exhausted" if exhausted else None),
     )
 
 
@@ -707,3 +761,17 @@ def _verify_sidecar(path: Path, expected: str) -> None:
         or sidecar_digest(body) != expected
     ):
         raise ReaderError("sidecar_mismatch")
+
+
+def _read_refs(verb: str, result: Any) -> set[int]:
+    """Only actual raw AO reads establish evidence coverage; graph/search do not."""
+    rows = [result] if verb == "read_step" else result if verb == "read_step_range" else []
+    if not isinstance(rows, list):
+        return set()
+    return {
+        row["index"]
+        for row in rows
+        if isinstance(row, Mapping)
+        and type(row.get("index")) is int
+        and isinstance(row.get("record"), Mapping)
+    }
