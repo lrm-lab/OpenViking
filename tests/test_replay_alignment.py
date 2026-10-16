@@ -47,8 +47,8 @@ from openviking.session.extraction_write import (
 from openviking.session.fork_node_overlay import ForkNodeOverlayStore, LegacyForkGrounding
 from openviking.session.fork_precedent import ForkPrecedentError
 from openviking.session.influence_view import (
-    AORange,
     AigNativeEdge,
+    AORange,
     CoverageManifest,
     InfluenceBlock,
     SegmentRef,
@@ -260,9 +260,7 @@ def test_derive_replay_eligibility_is_server_side_and_closed() -> None:
 
 
 def test_direct_admission_consumes_audited_alignment_fields() -> None:
-    covered = (
-        GuidanceStepAlignment("img-retry", "equivalent", "rb-1"),
-    )
+    covered = (GuidanceStepAlignment("img-retry", "equivalent", "rb-1"),)
     admitted = judge_direct_admission(
         alignment="functionally_equivalent",
         depth="full_branch",
@@ -425,9 +423,7 @@ def test_replay_contract_golden_fixtures_fail_closed() -> None:
     assert result.step_alignments == (
         GuidanceStepAlignment("img-narrow-retry", "equivalent", "blk-replay-action"),
     )
-    identity = {
-        key: value for key, value in request_payload["body"].items() if key != "request_id"
-    }
+    identity = {key: value for key, value in request_payload["body"].items() if key != "request_id"}
     assert request.request_id == _spec_hash(OBJECT_KIND_REPLAY_REQUEST_IDENTITY, identity)
 
     unknown = copy.deepcopy(request_payload)
@@ -449,9 +445,7 @@ def test_replay_contract_golden_fixtures_fail_closed() -> None:
 
     missing_steps = copy.deepcopy(result_payload)
     del missing_steps["body"]["step_alignments"]
-    missing_steps["content_hash"] = _spec_hash(
-        OBJECT_KIND_REPLAY_RESULT, missing_steps["body"]
-    )
+    missing_steps["content_hash"] = _spec_hash(OBJECT_KIND_REPLAY_RESULT, missing_steps["body"])
     with pytest.raises(ProtocolContractError, match="step_alignments"):
         read_replay_result(missing_steps)
 
@@ -468,9 +462,12 @@ def test_replay_contract_golden_fixtures_fail_closed() -> None:
         read_protocol_document(
             _document(OBJECT_KIND_REPLAY_REQUEST_IDENTITY, {"replay_run_id": "run-1"})
         )
-    assert OBJECT_KIND_REPLAY_REQUEST not in json.loads(
-        (FIXTURE_DIR / "v2_fixture_set.json").read_text(encoding="utf-8")
-    )["body"]["documents"]
+    assert (
+        OBJECT_KIND_REPLAY_REQUEST
+        not in json.loads((FIXTURE_DIR / "v2_fixture_set.json").read_text(encoding="utf-8"))[
+            "body"
+        ]["documents"]
+    )
 
 
 def test_eligibility_reassessment_appends_and_routes_non_replayable(tmp_path: Path) -> None:
@@ -520,20 +517,24 @@ def test_eligibility_reassessment_appends_and_routes_non_replayable(tmp_path: Pa
     )
     assert model_only.evidence_tier == "model-only"
     for tier in ("replay-direct", "production-direct", "observational"):
-        assert _code(
-            lambda tier=tier: service.append_analogical_route(
-                world.commit.stored,
-                world.patterns,
-                evaluation_id=f"eval-{tier}",
-                subject_kind="imagined_node",
-                subject_id="img-retry",
-                evidence_ref=f"evidence:{tier}",
-                evidence_tier=tier,
+        assert (
+            _code(
+                lambda tier=tier: service.append_analogical_route(
+                    world.commit.stored,
+                    world.patterns,
+                    evaluation_id=f"eval-{tier}",
+                    subject_kind="imagined_node",
+                    subject_id="img-retry",
+                    evidence_ref=f"evidence:{tier}",
+                    evidence_tier=tier,
+                )
             )
-        ) == "analogical_route_required"
-    assert _code(
-        lambda: service.build_replay_request(first, replay_run_id=_RUN)
-    ) == "analogical_route_required"
+            == "analogical_route_required"
+        )
+    assert (
+        _code(lambda: service.build_replay_request(first, replay_run_id=_RUN))
+        == "analogical_route_required"
+    )
 
     opened = service.assess(
         world.commit.stored,
@@ -669,9 +670,12 @@ def test_scripted_replay_chain_keeps_production_aig_clean(tmp_path: Path) -> Non
     assert "evidence:analog" not in {item.evidence_ref for item in outcome.evaluations}
     assert analogical_path.read_bytes() == analogical_bytes
     assert json.loads(analogical_bytes)["body"]["evidence_tier"] == "analogical"
-    assert read_protocol_document(
-        json.loads((FIXTURE_DIR / "replay_request.json").read_text(encoding="utf-8"))
-    ).object_kind == OBJECT_KIND_REPLAY_REQUEST
+    assert (
+        read_protocol_document(
+            json.loads((FIXTURE_DIR / "replay_request.json").read_text(encoding="utf-8"))
+        ).object_kind
+        == OBJECT_KIND_REPLAY_REQUEST
+    )
 
 
 def test_first_action_match_does_not_verify_branch_outcome(tmp_path: Path) -> None:
@@ -695,9 +699,7 @@ def test_first_action_match_does_not_verify_branch_outcome(tmp_path: Path) -> No
             equivalence_explanation=None,
         ),
     )
-    before = {
-        item.evaluation_id for item in world.patterns.audit_evaluations()
-    }
+    before = {item.evaluation_id for item in world.patterns.audit_evaluations()}
     outcome = service.apply_scripted_replay(
         world.commit.stored,
         request,
@@ -716,9 +718,7 @@ def test_first_action_match_does_not_verify_branch_outcome(tmp_path: Path) -> No
     assert [item.subject_kind for item in outcome.evaluations] == ["imagined_node"]
     assert outcome.evaluations[0].evidence_tier == "replay-direct"
     added = [
-        item
-        for item in world.patterns.audit_evaluations()
-        if item.evaluation_id not in before
+        item for item in world.patterns.audit_evaluations() if item.evaluation_id not in before
     ]
     assert [item.subject_kind for item in added] == ["imagined_node"]
     assert world.pattern.pattern_id not in {item.subject_id for item in added}
@@ -841,9 +841,7 @@ def test_prefix_claim_without_step_alignment_does_not_write_outcome(tmp_path: Pa
         )
     assert unverified.value.code == "outcome_alignment_unverified"
     added = [
-        item
-        for item in world.patterns.audit_evaluations()
-        if item.evaluation_id not in before
+        item for item in world.patterns.audit_evaluations() if item.evaluation_id not in before
     ]
     assert [item.subject_kind for item in added] == ["imagined_node"]
     assert world.pattern.pattern_id not in {item.subject_id for item in added}
@@ -900,9 +898,7 @@ def test_full_branch_requires_every_imagined_step(tmp_path: Path) -> None:
             pattern_id=None,
         )
     assert unverified.value.code == "outcome_alignment_unverified"
-    added = [
-        item for item in patterns.audit_evaluations() if item.evaluation_id not in before
-    ]
+    added = [item for item in patterns.audit_evaluations() if item.evaluation_id not in before]
     assert [item.subject_kind for item in added] == ["imagined_node"]
     assert added[0].subject_id == "img-first"
 

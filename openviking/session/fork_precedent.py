@@ -241,9 +241,7 @@ class ForkPrecedentService:
         _require_session(session_id)
         _require_recorded_at(recorded_at)
         _require_stores(overlay_store, pattern_store)
-        stored = overlay_store.read_overlay_by_id(
-            fork_node_id, principal_labels=principal_labels
-        )
+        stored = overlay_store.read_overlay_by_id(fork_node_id, principal_labels=principal_labels)
         if stored is None:
             raise ForkPrecedentError("source_unknown")
         imagined, pattern_ids = _subjects(stored.overlay, pattern_store)
@@ -434,9 +432,7 @@ class ForkPrecedentService:
                 raise ForkPrecedentError("stored_record_invalid")
             return
         body = _retrieval_body(record)
-        digest = protocol_content_hash(
-            SCHEMA_VERSION_AIG_NATIVE_V2, RECORD_RETRIEVAL, body
-        )
+        digest = protocol_content_hash(SCHEMA_VERSION_AIG_NATIVE_V2, RECORD_RETRIEVAL, body)
         if digest != record.retrieval_id:
             raise ForkPrecedentError("stored_record_invalid")
         self._write_new(
@@ -462,9 +458,7 @@ class ForkPrecedentService:
         if path is None:
             raise ForkPrecedentError("stored_record_invalid")
         body = _disposition_body(record)
-        digest = protocol_content_hash(
-            SCHEMA_VERSION_AIG_NATIVE_V2, RECORD_DISPOSITION, body
-        )
+        digest = protocol_content_hash(SCHEMA_VERSION_AIG_NATIVE_V2, RECORD_DISPOSITION, body)
         self._write_new(
             path,
             {
@@ -534,9 +528,7 @@ class ForkPrecedentService:
             or not isinstance(body, dict)
         ):
             raise ForkPrecedentError("retrieval_tampered")
-        digest = protocol_content_hash(
-            SCHEMA_VERSION_AIG_NATIVE_V2, RECORD_RETRIEVAL, body
-        )
+        digest = protocol_content_hash(SCHEMA_VERSION_AIG_NATIVE_V2, RECORD_RETRIEVAL, body)
         if payload.get("content_hash") != digest or retrieval_id != digest:
             raise ForkPrecedentError("retrieval_tampered")
         return _record_from_body(retrieval_id, body)
@@ -549,9 +541,7 @@ class ForkPrecedentService:
         body = payload.get("body")
         if not isinstance(body, dict):
             raise ForkPrecedentError("stored_record_invalid")
-        digest = protocol_content_hash(
-            SCHEMA_VERSION_AIG_NATIVE_V2, RECORD_DISPOSITION, body
-        )
+        digest = protocol_content_hash(SCHEMA_VERSION_AIG_NATIVE_V2, RECORD_DISPOSITION, body)
         if payload.get("content_hash") != digest:
             raise ForkPrecedentError("stored_record_invalid")
         return _disposition_from_body(body)
@@ -746,9 +736,7 @@ def _assemble(
         "session_id": session_id,
         "temporal_cutoff": temporal_cutoff,
     }
-    retrieval_id = protocol_content_hash(
-        SCHEMA_VERSION_AIG_NATIVE_V2, RECORD_RETRIEVAL, body
-    )
+    retrieval_id = protocol_content_hash(SCHEMA_VERSION_AIG_NATIVE_V2, RECORD_RETRIEVAL, body)
     return PrecedentRetrievalRecord(
         retrieval_id=retrieval_id,
         session_id=session_id,
@@ -901,7 +889,9 @@ def _imagined_ids(overlay: Any) -> frozenset[str]:
     )
 
 
-def _subjects(overlay: Any, pattern_store: StrategyPatternStore) -> tuple[frozenset[str], frozenset[str]]:
+def _subjects(
+    overlay: Any, pattern_store: StrategyPatternStore
+) -> tuple[frozenset[str], frozenset[str]]:
     imagined = _imagined_ids(overlay)
     pattern_ids = {
         pattern.pattern_id
@@ -914,9 +904,7 @@ def _subjects(overlay: Any, pattern_store: StrategyPatternStore) -> tuple[frozen
     return imagined, frozenset(pattern_ids)
 
 
-def _belongs(
-    item: BranchEvaluation, imagined: frozenset[str], pattern_ids: frozenset[str]
-) -> bool:
+def _belongs(item: BranchEvaluation, imagined: frozenset[str], pattern_ids: frozenset[str]) -> bool:
     if item.subject_kind == "imagined_node":
         return item.subject_id in imagined
     if item.subject_kind == SUBJECT_PATTERN:
@@ -935,9 +923,7 @@ def _read_proposal(
     revision_id = body.get("base_revision_id") if isinstance(body, Mapping) else None
     if not isinstance(revision_id, str) or not revision_id:
         raise ForkOverlayError("base_revision_missing")
-    catalog = overlay_store.registered_catalog(
-        revision_id, principal_labels=principal_labels
-    )
+    catalog = overlay_store.registered_catalog(revision_id, principal_labels=principal_labels)
     return read_fork_proposal(payload, catalog)
 
 
@@ -949,15 +935,9 @@ def _parse_dispositions(
         raise ForkPrecedentError("disposition_invalid")
     known = {
         hit.precedent_id
-        for hit in (
-            record.high_confidence + record.exploratory + record.negative_retired
-        )
+        for hit in (record.high_confidence + record.exploratory + record.negative_retired)
     }
-    required = {
-        hit.precedent_id
-        for hit in record.candidates
-        if hit.disposition_required
-    }
+    required = {hit.precedent_id for hit in record.candidates if hit.disposition_required}
     found: dict[str, PrecedentDisposition] = {}
     for item in dispositions:
         if not isinstance(item, Mapping) or set(item) != _DISPOSITION_KEYS:

@@ -135,9 +135,7 @@ def migrate_legacy_fork_to_overlay(
         overlay=commit.stored,
     )
     write_new_json(path, _document(migration), LegacyMigrationError)
-    return LegacyForkMigrationCommit(
-        migration=migration, overlay=commit.stored, deduplicated=False
-    )
+    return LegacyForkMigrationCommit(migration=migration, overlay=commit.stored, deduplicated=False)
 
 
 def _reason(value: Any) -> str:

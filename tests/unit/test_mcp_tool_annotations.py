@@ -9,6 +9,10 @@ import openviking.server.mcp_endpoint as mcp_endpoint
 async def test_mcp_tools_advertise_behavior_annotations():
     tools = {tool.name: tool for tool in await mcp_endpoint.mcp.list_tools()}
     expected = {
+        "list_users": (True, False, True, False),
+        "list_groups": (True, False, True, False),
+        "get_acl": (True, False, True, False),
+        "set_acl": (False, True, True, False),
         "find": (True, False, True, False),
         # Context mode can persist and prune the per-session recall ledger.
         "search": (False, True, False, False),
@@ -38,4 +42,4 @@ async def test_mcp_tools_advertise_behavior_annotations():
         observed[name] = tuple(annotations[field] for field in fields)
 
     assert observed == expected
-    assert len(tools) == 18
+    assert len(tools) == 22

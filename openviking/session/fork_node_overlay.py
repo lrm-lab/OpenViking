@@ -73,9 +73,7 @@ from openviking.session.influence_view import (
 ForkWriteAuthorizer = Callable[[str], str]
 
 FORK_NODE_OVERLAY_DIRNAME = "fork-node-overlays"
-_V2_CONSUMERS = frozenset(
-    {"pattern", "replay", "guided_branch", "v2_writer", "v2_retrieval"}
-)
+_V2_CONSUMERS = frozenset({"pattern", "replay", "guided_branch", "v2_writer", "v2_retrieval"})
 _HEX_ID = re.compile(r"^[0-9a-f]{64}$")
 _STABLE_KIND = "fork_node_stable"
 _REVISION_KIND = "fork_node_revision"
@@ -299,9 +297,7 @@ def dual_read_fork(
         raise ForkOverlayError("store_required")
     if not isinstance(legacy_store, CausalExperiencesStore):
         raise ForkOverlayError("store_required")
-    overlay = overlay_store.read_overlay_by_id(
-        fork_node_id, principal_labels=principal_labels
-    )
+    overlay = overlay_store.read_overlay_by_id(fork_node_id, principal_labels=principal_labels)
     if overlay is not None:
         return ForkDualRead(kind="overlay", overlay=overlay, legacy=None)
     legacy = read_legacy_fork_grounding(
@@ -489,9 +485,7 @@ class ForkNodeOverlayStore:
                 raise ForkOverlayError("acl_denied")
             return catalog
 
-    def visible_overlays(
-        self, *, principal_labels: Sequence[str]
-    ) -> tuple[StoredForkOverlay, ...]:
+    def visible_overlays(self, *, principal_labels: Sequence[str]) -> tuple[StoredForkOverlay, ...]:
         """Overlays whose registered base-revision ACL intersects the principal.
 
         A revision the principal cannot see is omitted. An empty or malformed
@@ -749,9 +743,7 @@ def _bound_id(
     return hashlib.sha256(canonical_dumps(payload).encode("utf-8")).hexdigest()
 
 
-def _require_context(
-    base_revision_id: str, anchor_block_id: str, block_content_hash: str
-) -> None:
+def _require_context(base_revision_id: str, anchor_block_id: str, block_content_hash: str) -> None:
     for value in (base_revision_id, anchor_block_id, block_content_hash):
         if not isinstance(value, str) or not value:
             raise ForkOverlayError("revision_required")

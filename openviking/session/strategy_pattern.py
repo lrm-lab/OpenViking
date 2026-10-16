@@ -787,10 +787,7 @@ def _admission_matches(
             and bool(admission.actual_block_id)
         )
     if evaluation.subject_kind == "imagined_node":
-        return (
-            admission.first_action_direct
-            and admission.imagined_node_id == evaluation.subject_id
-        )
+        return admission.first_action_direct and admission.imagined_node_id == evaluation.subject_id
     if evaluation.subject_kind == "strategy_pattern":
         return admission.outcome_direct
     return False

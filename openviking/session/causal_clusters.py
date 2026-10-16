@@ -206,9 +206,7 @@ class SimilarityJudgment:
             self, "criteria_per_dimension", _validate_criteria(self.criteria_per_dimension)
         )
         if self.verdict not in VERDICTS:
-            raise ValueError(
-                f"verdict must be one of {sorted(VERDICTS)}, got {self.verdict!r}"
-            )
+            raise ValueError(f"verdict must be one of {sorted(VERDICTS)}, got {self.verdict!r}")
         object.__setattr__(self, "confidence", _require_confidence(self.confidence, "confidence"))
         object.__setattr__(self, "rationale", _require_str(self.rationale, "rationale"))
         object.__setattr__(
@@ -381,9 +379,7 @@ class CausalCluster:
             "split_from_cluster_id",
             _require_optional_str(self.split_from_cluster_id, "split_from_cluster_id"),
         )
-        object.__setattr__(
-            self, "closed_at", _require_optional_str(self.closed_at, "closed_at")
-        )
+        object.__setattr__(self, "closed_at", _require_optional_str(self.closed_at, "closed_at"))
         object.__setattr__(self, "version", _require_int(self.version, "version"))
         if self.version < 1:
             raise ValueError("version must be >= 1")
@@ -504,9 +500,7 @@ class CausalClusterStore:
     def _read_clusters_index(self) -> list[dict[str, Any]]:
         return _read_jsonl(self._clusters_index_path)
 
-    def _find_positive_pair(
-        self, pair_key: str, judgment_hash: str
-    ) -> dict[str, Any] | None:
+    def _find_positive_pair(self, pair_key: str, judgment_hash: str) -> dict[str, Any] | None:
         for row in self._read_edges_index():
             if row.get("canonical_pair") != pair_key:
                 continue
@@ -519,9 +513,7 @@ class CausalClusterStore:
             return True
         pair = frozenset((fork_a, fork_b))
         for row in self._read_edges_index():
-            ends = frozenset(
-                (str(row.get("fork_a") or ""), str(row.get("fork_b") or ""))
-            )
+            ends = frozenset((str(row.get("fork_a") or ""), str(row.get("fork_b") or "")))
             if ends == pair:
                 return True
         return False
@@ -807,9 +799,7 @@ class CausalClusterStore:
                 requested = _require_str_list(member_fork_node_ids, "member_fork_node_ids")
                 for member in requested:
                     if member not in seen:
-                        raise ValueError(
-                            f"member {member!r} is not in any predecessor cluster"
-                        )
+                        raise ValueError(f"member {member!r} is not in any predecessor cluster")
                 members = requested
             else:
                 members = union
@@ -873,9 +863,7 @@ class CausalClusterStore:
                 members = _normalize_members(center, members)
                 for member in members:
                     if member not in allowed:
-                        raise ValueError(
-                            f"split member {member!r} is not in predecessor cluster"
-                        )
+                        raise ValueError(f"split member {member!r} is not in predecessor cluster")
                 created.append(
                     CausalCluster(
                         cluster_id=str(uuid.uuid4()),
@@ -976,9 +964,7 @@ class CausalClusterStore:
         found: list[dict[str, Any]] = []
         seen: set[str] = set()
         for row in self._read_edges_index():
-            ends = frozenset(
-                (str(row.get("fork_a") or ""), str(row.get("fork_b") or ""))
-            )
+            ends = frozenset((str(row.get("fork_a") or ""), str(row.get("fork_b") or "")))
             if ends != wanted:
                 continue
             edge = self._load_edge(str(row.get("edge_id") or ""))
@@ -994,9 +980,7 @@ class CausalClusterStore:
                 edge = VerifiedSimilarityEdge.from_dict(payload)
                 if edge.edge_id in seen:
                     continue
-                ends = frozenset(
-                    (edge.endpoint_a["fork_node_id"], edge.endpoint_b["fork_node_id"])
-                )
+                ends = frozenset((edge.endpoint_a["fork_node_id"], edge.endpoint_b["fork_node_id"]))
                 if ends != wanted:
                     continue
                 found.append(edge.to_dict())

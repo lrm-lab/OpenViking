@@ -9,6 +9,7 @@ import threading
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import wraps
 from typing import Any, AsyncIterator, Awaitable, Callable, Container, Dict, List, Mapping, Optional
 
@@ -41,13 +42,20 @@ from openviking.storage.vectordb.collection.collection import Collection
 from openviking.storage.vectordb.collection.result import UpdateResult
 from openviking.storage.vectordb.utils.logging_init import init_cpp_logging
 from openviking.storage.vectordb_adapters import create_collection_adapter
-from openviking.utils.tags import merge_search_tags
+from openviking.utils.tags import merge_search_tags, preserve_memory_type_tag
+from openviking.utils.time_decay import parse_duration_ms
 from openviking.utils.time_utils import get_current_timestamp
 from openviking_cli.exceptions import InvalidArgumentError
 from openviking_cli.utils import get_logger
 from openviking_cli.utils.config.vectordb_config import DEFAULT_INDEX_NAME, VectorDBBackendConfig
 
 logger = get_logger(__name__)
+
+_LOCAL_PURE_DENSE_SCORE_SCALES = {
+    "cosine": "cosine_affine_0_1",
+    "ip": "inner_product",
+    "l2": "one_minus_squared_l2",
+}
 
 RETRIEVAL_OUTPUT_FIELDS = [
     "uri",
@@ -223,14 +231,21 @@ class _AsyncVectorAdapter:
                 self._closed = True
                 self._adapter.close()
 
-    async def collection_meta(self, index_name: str) -> Dict[str, Any]:
+    async def collection_meta(
+        self, index_name: str, *, raise_on_error: bool = False
+    ) -> Dict[str, Any]:
         def _get() -> Dict[str, Any]:
             collection = self._adapter.get_collection()
-            meta = collection.get_meta_data() or {}
+            meta = (
+                collection.get_meta_data(raise_on_error=True)
+                if raise_on_error
+                else collection.get_meta_data()
+            ) or {}
             if self._adapter.mode in {"local", "cuvs"}:
                 index_meta = collection.get_index_meta_data(index_name) or {}
-                if "ScalarIndex" in index_meta:
-                    meta["ScalarIndex"] = index_meta["ScalarIndex"]
+                for key in ("VectorIndex", "ScalarIndex"):
+                    if key in index_meta:
+                        meta[key] = index_meta[key]
             return meta
 
         return await self.run(_get)
@@ -502,19 +517,52 @@ class _SingleAccountBackend:
     async def get_collection_info(self) -> Optional[Dict[str, Any]]:
         if not await self.collection_exists():
             return None
-        config = self._collection_config
+        meta = (
+            await self._async_adapter.collection_meta(self._index_name)
+            if self._mode in {"local", "cuvs"}
+            else {}
+        )
+        vector_index = meta.get("VectorIndex") or {}
+        distance_metric = vector_index.get("Distance")
+        if not isinstance(distance_metric, str):
+            distance_metric = None
+        vector_dim = (
+            vector_index.get("Dimension")
+            or self._collection_config.get("vector_dim")
+            or next(
+                (
+                    field.get("Dim")
+                    for field in meta.get("Fields", [])
+                    if field.get("FieldType") == "vector"
+                ),
+                None,
+            )
+        )
         return {
             "name": self._collection_name,
-            "vector_dim": config.get("vector_dim"),
+            "backend": self._mode,
+            "index_name": self._index_name,
+            "vector_dim": vector_dim,
             "count": await self.count(),
             "status": "active",
+            "distance_metric": distance_metric,
+            "pure_dense_score_scale": (
+                _LOCAL_PURE_DENSE_SCORE_SCALES.get(distance_metric, "backend_defined")
+                if self._mode == "local" and distance_metric is not None
+                else "backend_defined"
+            ),
         }
 
     @_backend_operation
-    async def get_collection_meta(self) -> Optional[Dict[str, Any]]:
+    async def get_collection_meta(
+        self, *, raise_on_error: bool = False
+    ) -> Optional[Dict[str, Any]]:
         if not await self.collection_exists():
             return None
-        return await self._async_adapter.collection_meta(self._index_name)
+        return await self._async_adapter.collection_meta(
+            self._index_name,
+            raise_on_error=raise_on_error,
+        )
 
     @_backend_operation
     async def update_collection_description(self, description: str) -> bool:
@@ -805,6 +853,7 @@ class _SingleAccountBackend:
         output_fields: Optional[List[str]] = None,
         order_by: Optional[str] = None,
         order_desc: bool = False,
+        advance: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         self._validate_vector_dimension(query_vector)
         try:
@@ -833,6 +882,7 @@ class _SingleAccountBackend:
                 output_fields=output_fields,
                 order_by=order_by,
                 order_desc=order_desc,
+                advance=advance,
             )
         except Exception as e:
             logger.error("Error querying collection: %s", e, exc_info=True)
@@ -869,6 +919,7 @@ class _SingleAccountBackend:
         limit: int = 10,
         offset: int = 0,
         output_fields: Optional[List[str]] = None,
+        advance: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         return await self.query(
             query_vector=query_vector,
@@ -877,6 +928,7 @@ class _SingleAccountBackend:
             limit=limit,
             offset=offset,
             output_fields=output_fields,
+            advance=advance,
         )
 
     @_backend_operation
@@ -1004,6 +1056,8 @@ class _SingleAccountBackend:
         offset: int = 0,
         filter: Optional[Dict[str, Any] | FilterExpr] = None,
         output_fields: Optional[List[str]] = None,
+        mode: Optional[str] = None,
+        fields: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         try:
             if self._bound_account_id:
@@ -1019,6 +1073,8 @@ class _SingleAccountBackend:
                 self._adapter.search_by_keywords,
                 keywords=keywords,
                 query=query,
+                mode=mode,
+                fields=fields,
                 limit=limit,
                 offset=offset,
                 filter=filter,
@@ -1096,7 +1152,6 @@ class VikingVectorIndexBackend:
         self._collection_name = config.name or "context"
         self._index_name = config.index_name or DEFAULT_INDEX_NAME
         self.acl_manager: Optional[AclManager] = None
-
         self._account_backends: Dict[str, _SingleAccountBackend] = {}
         self._vector_config_resolver = None
         self._account_backend_locks = KeyedAsyncLockPool[str]()
@@ -1245,12 +1300,13 @@ class VikingVectorIndexBackend:
         self,
         *,
         ctx: Optional[RequestContext] = None,
+        raise_on_error: bool = False,
     ) -> Optional[Dict[str, Any]]:
         if ctx:
             backend = await self._get_backend_for_context(ctx)
         else:
             backend = self._get_default_backend()
-        return await backend.get_collection_meta()
+        return await backend.get_collection_meta(raise_on_error=raise_on_error)
 
     async def update_collection_description(self, description: str) -> bool:
         return await self._get_default_backend().update_collection_description(description)
@@ -1478,6 +1534,11 @@ class VikingVectorIndexBackend:
                     )
                 else:
                     updated_record["search_tags"] = list(tags)
+                if updated_record.get("context_type") == "memory":
+                    updated_record["search_tags"] = preserve_memory_type_tag(
+                        full_records[0].get("search_tags"),
+                        updated_record["search_tags"],
+                    )
             except Exception as exc:
                 logger.warning(
                     "update_search_tags failed to merge exact record tags uri=%s "
@@ -1533,6 +1594,11 @@ class VikingVectorIndexBackend:
                     )
                 else:
                     updated_record["search_tags"] = list(tags)
+                if updated_record.get("context_type") == "memory":
+                    updated_record["search_tags"] = preserve_memory_type_tag(
+                        full_record.get("search_tags"),
+                        updated_record["search_tags"],
+                    )
             except Exception as exc:
                 logger.warning(
                     "update_search_tags failed to merge leveled record tags uri=%s "
@@ -1559,6 +1625,7 @@ class VikingVectorIndexBackend:
         output_fields: Optional[List[str]] = None,
         order_by: Optional[str] = None,
         order_desc: bool = False,
+        advance: Optional[Dict[str, Any]] = None,
         *,
         ctx: RequestContext,
     ) -> List[Dict[str, Any]]:
@@ -1572,6 +1639,7 @@ class VikingVectorIndexBackend:
             output_fields=output_fields,
             order_by=order_by,
             order_desc=order_desc,
+            advance=advance,
         )
 
     async def search_by_random(
@@ -1606,6 +1674,7 @@ class VikingVectorIndexBackend:
         limit: int = 10,
         offset: int = 0,
         output_fields: Optional[List[str]] = None,
+        advance: Optional[Dict[str, Any]] = None,
         *,
         ctx: RequestContext,
     ) -> List[Dict[str, Any]]:
@@ -1616,6 +1685,7 @@ class VikingVectorIndexBackend:
             limit=limit,
             offset=offset,
             output_fields=output_fields,
+            advance=advance,
             ctx=ctx,
         )
 
@@ -1654,6 +1724,11 @@ class VikingVectorIndexBackend:
         ctx: RequestContext,
     ) -> tuple[List[Dict[str, Any]], Optional[str]]:
         backend = await self._get_backend_for_context(ctx)
+        acl_enabled = await self._acl_enabled(ctx)
+        filter = self._merge_filters(
+            filter,
+            self._tenant_filter(ctx, acl_enabled=acl_enabled),
+        )
         return await backend.scroll(
             filter=filter,
             limit=limit,
@@ -1754,6 +1829,11 @@ class VikingVectorIndexBackend:
     ) -> int:
         if ctx:
             backend = await self._get_backend_for_context(ctx)
+            acl_enabled = await self._acl_enabled(ctx)
+            filter = self._merge_filters(
+                filter,
+                self._tenant_filter(ctx, acl_enabled=acl_enabled),
+            )
         else:
             backend = self._get_default_backend()
         return await backend.count(filter=filter)
@@ -1768,6 +1848,8 @@ class VikingVectorIndexBackend:
         output_fields: Optional[List[str]] = None,
         *,
         ctx: Optional[RequestContext] = None,
+        mode: Optional[str] = None,
+        fields: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         if ctx:
             backend = await self._get_backend_for_context(ctx)
@@ -1781,6 +1863,8 @@ class VikingVectorIndexBackend:
         return await backend.search_by_keywords(
             keywords=keywords,
             query=query,
+            mode=mode,
+            fields=fields,
             limit=limit,
             offset=offset,
             filter=filter,
@@ -1869,6 +1953,8 @@ class VikingVectorIndexBackend:
         level: Optional[List[int]] = None,
         limit: int = 10,
         offset: int = 0,
+        events_time_decay_protection: Optional[str] = None,
+        request_now: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
         acl_enabled = await self._acl_enabled(ctx)
         scope_filter = self._build_scope_filter(
@@ -1879,14 +1965,60 @@ class VikingVectorIndexBackend:
             level=level,
             acl_enabled=acl_enabled,
         )
-        return await self.search(
+        if events_time_decay_protection is None:
+            return await self.search(
+                query_vector=query_vector,
+                sparse_query_vector=sparse_query_vector,
+                filter=scope_filter,
+                limit=limit,
+                offset=offset,
+                output_fields=RETRIEVAL_OUTPUT_FIELDS,
+                ctx=ctx,
+            )
+
+        parse_duration_ms(
+            events_time_decay_protection, parameter_name="events_time_decay_protection"
+        )
+        return await self._search_with_event_time_decay(
+            ctx=ctx,
             query_vector=query_vector,
             sparse_query_vector=sparse_query_vector,
+            scope_filter=scope_filter,
+            limit=limit,
+            offset=offset,
+            events_time_decay_protection=events_time_decay_protection,
+            request_now=request_now,
+        )
+
+    async def search_by_keywords_in_tenant(
+        self,
+        ctx: RequestContext,
+        query: str,
+        context_type: Optional[str] = None,
+        target_directories: Optional[List[str]] = None,
+        extra_filter: Optional[FilterExpr | Dict[str, Any]] = None,
+        level: Optional[List[int]] = None,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        acl_enabled = await self._acl_enabled(ctx)
+        scope_filter = self._build_scope_filter(
+            ctx=ctx,
+            context_type=context_type,
+            target_directories=target_directories,
+            extra_filter=extra_filter,
+            level=level,
+            acl_enabled=acl_enabled,
+        )
+        backend = await self._get_backend_for_context(ctx)
+        return await backend.search_by_keywords(
+            query=query,
+            mode="bm25",
+            fields=["content"],
             filter=scope_filter,
             limit=limit,
             offset=offset,
             output_fields=RETRIEVAL_OUTPUT_FIELDS,
-            ctx=ctx,
         )
 
     async def filter_in_tenant(
@@ -1928,52 +2060,48 @@ class VikingVectorIndexBackend:
             ctx=ctx,
         )
 
-    async def search_children_in_tenant(
+    async def _search_with_event_time_decay(
         self,
+        *,
         ctx: RequestContext,
-        parent_uri: str,
         query_vector: Optional[List[float]],
-        sparse_query_vector: Optional[Dict[str, float]] = None,
-        context_type: Optional[str] = None,
-        target_directories: Optional[List[str]] = None,
-        extra_filter: Optional[FilterExpr | Dict[str, Any]] = None,
-        limit: int = 10,
+        sparse_query_vector: Optional[Dict[str, float]],
+        scope_filter: Optional[FilterExpr],
+        limit: int,
+        offset: int,
+        events_time_decay_protection: str,
+        request_now: Optional[datetime],
     ) -> List[Dict[str, Any]]:
-        # TODO：Better Alternative to Current Temporary Fix
-
-        # If parent_uri is already under the requested target_directories,
-        # adding a redundant scope prefix filter can slow down the backend.
-        # Keep tenant/context filters but skip target_directories in that case.
-        effective_target_directories = target_directories
-        if target_directories:
-            parent_norm = parent_uri.rstrip("/")
-            for target_dir in target_directories:
-                if not target_dir:
-                    continue
-                target_norm = target_dir.rstrip("/")
-                if parent_norm == target_norm or parent_norm.startswith(target_norm + "/"):
-                    effective_target_directories = None
-                    break
-
-        acl_enabled = await self._acl_enabled(ctx)
-        merged_filter = self._merge_filters(
-            PathScope("uri", parent_uri, depth=1),
-            self._build_scope_filter(
-                ctx=ctx,
-                context_type=context_type,
-                target_directories=effective_target_directories,
-                extra_filter=extra_filter,
-                acl_enabled=acl_enabled,
-            ),
+        request_now = request_now or datetime.now(timezone.utc)
+        final_window = limit + offset
+        event_filter = self._merge_filters(scope_filter, Eq("search_tags", "memory_type=events"))
+        non_event_filter = self._merge_filters(
+            scope_filter,
+            RawDSL({"op": "must_not", "field": "search_tags", "conds": ["memory_type=events"]}),
         )
-        return await self.search(
-            query_vector=query_vector,
-            sparse_query_vector=sparse_query_vector,
-            filter=merged_filter,
-            limit=limit,
-            output_fields=RETRIEVAL_OUTPUT_FIELDS,
-            ctx=ctx,
+        # The adapter owns backend parameters and the engine owns amplification.
+        advance = {
+            "time_decay": {
+                "protection": events_time_decay_protection,
+                "origin": request_now.isoformat(),
+            }
+        }
+        search_kwargs: Dict[str, Any] = {
+            "ctx": ctx,
+            "query_vector": query_vector,
+            "sparse_query_vector": sparse_query_vector,
+            "limit": final_window,
+            "offset": 0,
+            "output_fields": RETRIEVAL_OUTPUT_FIELDS,
+        }
+        remaining_results, event_results = await asyncio.gather(
+            self.search(filter=non_event_filter, **search_kwargs),
+            self.search(filter=event_filter, advance=advance, **search_kwargs),
         )
+
+        results = remaining_results + event_results
+        results.sort(key=lambda item: item.get("_score", 0.0), reverse=True)
+        return results[offset : offset + limit]
 
     async def get_context_by_uri(
         self,
@@ -2132,8 +2260,10 @@ class VikingVectorIndexBackend:
         ctx: RequestContext,
         batch_size: int = 100,
         output_fields: Optional[List[str]] = None,
+        recursive: bool = True,
+        include_direct_children: bool = False,
     ) -> Dict[str, Dict[str, Any]]:
-        """Strictly load lightweight L0/L1/L2 metadata below a resource root."""
+        """Strictly load lightweight L0/L1/L2 metadata in a URI scope."""
         projection = list(
             dict.fromkeys(
                 [
@@ -2146,7 +2276,11 @@ class VikingVectorIndexBackend:
         scope = And(
             [
                 Eq("account_id", ctx.account_id),
-                PathScope("uri", canonical_uri, depth=-1),
+                PathScope(
+                    "uri",
+                    canonical_uri,
+                    depth=-1 if recursive else 1 if include_direct_children else 0,
+                ),
                 In("level", [0, 1, 2]),
             ]
         )
@@ -2214,6 +2348,93 @@ class VikingVectorIndexBackend:
                 )
         assert last_error is not None
         raise last_error
+
+    async def get_incremental_inventory_by_uris(
+        self,
+        uris: List[str],
+        *,
+        ctx: RequestContext,
+        batch_size: int = 100,
+        output_fields: Optional[List[str]] = None,
+    ) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """Read lightweight inventory with one exact scalar query per URI chunk.
+
+        Unlike :meth:`get_incremental_inventory_under_uri`, this never uses a
+        path scope: every returned record must belong to one of ``uris``.  The
+        result remains keyed by the caller's URI spelling and then by record ID
+        so file-scoped RNFV snapshots can consume a pre-hydrated V subset
+        without one vector query per file.  Canonical V has at most one record
+        per L0/L1/L2 level at each URI; request one extra result so an abnormal
+        duplicate set fails explicitly rather than being silently truncated.
+        """
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+
+        requested_by_canonical: Dict[str, str] = {}
+        for uri in uris:
+            requested_by_canonical.setdefault(resolve_uri(uri).uri, uri)
+        canonical_uris = list(requested_by_canonical)
+        if not canonical_uris:
+            return {}
+
+        projection = list(
+            dict.fromkeys(
+                [
+                    *INCREMENTAL_INVENTORY_OUTPUT_FIELDS,
+                    *(output_fields or []),
+                ]
+            )
+        )
+        records_by_uri: Dict[str, Dict[str, Dict[str, Any]]] = {uri: {} for uri in canonical_uris}
+        for start in range(0, len(canonical_uris), batch_size):
+            chunk = canonical_uris[start : start + batch_size]
+            scope = And(
+                [
+                    Eq("account_id", ctx.account_id),
+                    In("uri", chunk),
+                    In("level", [0, 1, 2]),
+                ]
+            )
+            what = f"Incremental inventory for {len(chunk)} exact URI(s)"
+            result_limit = len(chunk) * 3 + 1
+            page = await self.filter(
+                filter=scope,
+                limit=result_limit,
+                output_fields=projection,
+                ctx=ctx,
+            )
+            if len(page) >= result_limit:
+                raise RuntimeError(
+                    f"{what} exceeded its canonical L0/L1/L2 record limit; "
+                    "run reindex or prune the duplicate records before retrying"
+                )
+            for record in page:
+                record_id = str(record.get("id") or "")
+                record_uri = str(record.get("uri") or "")
+                try:
+                    level = int(record.get("level"))
+                except (TypeError, ValueError):
+                    level = -1
+                if not record_id or record_uri not in records_by_uri or level not in {0, 1, 2}:
+                    raise RuntimeError(
+                        f"{what} returned an invalid record: id={record_id or '<missing>'} "
+                        f"uri={record_uri or '<missing>'} level={level}"
+                    )
+                if record_id in records_by_uri[record_uri]:
+                    raise RuntimeError(f"{what} returned duplicate record id: {record_id}")
+                records_by_uri[record_uri][record_id] = {
+                    field: record[field] for field in projection if field in record
+                }
+                records_by_uri[record_uri][record_id].update(
+                    {
+                        "id": record_id,
+                        "uri": record_uri,
+                        "level": level,
+                        "md5": str(record.get("md5") or ""),
+                    }
+                )
+
+        return {requested_by_canonical[uri]: records for uri, records in records_by_uri.items()}
 
     async def hydrate_incremental_records(
         self,
@@ -2849,7 +3070,9 @@ class VikingVectorIndexBackend:
             filters.append(tenant_filter)
 
         if targets:
-            uri_conds = [PathScope("uri", target_dir, depth=-1) for target_dir in targets]
+            uri_conds: List[FilterExpr] = [
+                PathScope("uri", target_dir, depth=-1) for target_dir in targets
+            ]
             if uri_conds:
                 filters.append(Or(uri_conds))
 
@@ -2948,7 +3171,7 @@ class VikingVectorIndexBackend:
         return self.acl_manager is not None and await self.acl_manager.is_enabled(ctx.account_id)
 
     @staticmethod
-    def _merge_filters(*filters: Optional[FilterExpr]) -> Optional[FilterExpr]:
+    def _merge_filters(*filters: Optional[FilterExpr | Dict[str, Any]]) -> Optional[FilterExpr]:
         non_empty: List[FilterExpr] = []
         for item in filters:
             if not item:

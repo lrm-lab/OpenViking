@@ -57,8 +57,7 @@ def session_acl_callback(session: Any) -> SessionAcl:
     def _labels(queried_session_id: str) -> tuple[str, ...]:
         if queried_session_id != session_id:
             raise ValueError(
-                f"session ACL callback is bound to {session_id!r}, "
-                f"refusing {queried_session_id!r}"
+                f"session ACL callback is bound to {session_id!r}, refusing {queried_session_id!r}"
             )
         return (label,)
 

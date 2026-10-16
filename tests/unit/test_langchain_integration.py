@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -796,10 +797,11 @@ def test_session_context_assembler_uses_archive_active_messages_and_recall():
     )
     client.add_message("assembler-session", "user", content="Earlier user turn")
     client.add_message("assembler-session", "assistant", content="Earlier assistant turn")
-    client.commit_session("assembler-session")
+    client.commit_session("assembler-session", enable_working_memory=True)
     client.add_message("assembler-session", "user", content="Active turn")
 
     assembler = OpenVikingSessionContextAssembler(
+        include_session_context=True,
         client=client,
         target_uri="viking://resources",
     )
@@ -850,6 +852,7 @@ def test_session_context_assembler_creates_only_after_not_found():
 
     client = RecordingClient()
     assembler = OpenVikingSessionContextAssembler(
+        include_session_context=True,
         client=client,
         include_recall=False,
     )
@@ -1222,6 +1225,24 @@ def test_langgraph_store_round_trip_and_semantic_search():
     assert semantic[0].value["color"] == "azure"
 
     assert store.list_namespaces(prefix=("users",)) == [("users", "ada")]
+
+
+@pytest.mark.parametrize("use_batch", [False, True])
+def test_langgraph_store_accepts_mapping_values(use_batch):
+    store = OpenVikingStore(client=InMemoryOpenVikingClient())
+    original = {"color": "azure", "nested": {"rank": 3}}
+    value = MappingProxyType(original)
+
+    if use_batch:
+        store.batch([PutOp(namespace=("users", "ada"), key="preferences", value=value)])
+    else:
+        store.put(("users", "ada"), "preferences", value)
+
+    item = store.get(("users", "ada"), "preferences")
+    assert item.value == original
+    assert isinstance(item.value, dict)
+    assert store.search(("users",), query="azure")[0].value == original
+    assert original == {"color": "azure", "nested": {"rank": 3}}
 
 
 def test_langgraph_store_semantic_search_keeps_peer_id_out_of_retrieval():

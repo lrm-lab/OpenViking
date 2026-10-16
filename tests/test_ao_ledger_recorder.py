@@ -14,11 +14,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from openviking.message import Message, TextPart, ToolPart
-from openviking.session.ao_ledger import AOLedger, AORecord, LEDGER_FILENAME
+from openviking.message import Message, ToolPart
+from openviking.session.ao_ledger import LEDGER_FILENAME, AOLedger, AORecord
 from openviking.session.ao_ledger_recorder import (
-    AOLedgerRecorder,
     ATTRIBUTION_FILENAME,
+    AOLedgerRecorder,
     collect_attributed_ao_ids,
     maybe_record_session_tool_exchanges,
     maybe_write_session_archive_attribution,
@@ -272,9 +272,7 @@ def test_legacy_hooks_are_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         ],
     )
     maybe_record_session_tool_exchanges(session, [tool_msg])
-    maybe_write_session_archive_attribution(
-        session, f"{session_uri}/history/archive_001"
-    )
+    maybe_write_session_archive_attribution(session, f"{session_uri}/history/archive_001")
     assert not (tmp_path / LEDGER_FILENAME).exists()
     assert not (tmp_path / "history" / "archive_001" / ATTRIBUTION_FILENAME).exists()
     assert getattr(session, "_ao_ledger_recorder", None) is None

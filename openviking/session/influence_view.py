@@ -88,9 +88,7 @@ _NATIVE_EDGE_RELATIONS = frozenset((RELATION_INFLUENCE, RELATION_SKIP))
 BlockRole = Literal["task", "orchestrator", "agent_action", "conclusion"]
 Purpose = Literal["post_run_index", "failure_diagnosis"]
 ClaimStatus = Literal["hypothesis", "supported", "contradicted", "insufficient"]
-ConstructionMode = Literal[
-    "native_single_pass_aig", "adaptive", "fallback", "adaptive_agentic_aig"
-]
+ConstructionMode = Literal["native_single_pass_aig", "adaptive", "fallback", "adaptive_agentic_aig"]
 Severity = Literal["high", "low"]
 
 
@@ -269,9 +267,7 @@ class SourceRef:
         return cls(
             ao_id=_require_str(payload.get("ao_id"), "source_ref.ao_id"),
             sequence=_require_int(payload.get("sequence"), "source_ref.sequence"),
-            participant_id=_require_str(
-                payload.get("participant_id"), "source_ref.participant_id"
-            ),
+            participant_id=_require_str(payload.get("participant_id"), "source_ref.participant_id"),
             segment_id=_require_str(payload.get("segment_id"), "source_ref.segment_id"),
             session_id=_require_str(payload.get("session_id"), "source_ref.session_id"),
             content_hash=_require_str(payload.get("content_hash"), "source_ref.content_hash"),
@@ -298,9 +294,7 @@ class InfluenceEvidenceRef:
         if self.source_archive_id is not None:
             _require_str(self.source_archive_id, "evidence_ref.source_archive_id")
         if self.archive_commit_watermark is not None:
-            _require_str(
-                self.archive_commit_watermark, "evidence_ref.archive_commit_watermark"
-            )
+            _require_str(self.archive_commit_watermark, "evidence_ref.archive_commit_watermark")
         _require_int(self.source_sequence, "evidence_ref.source_sequence")
         _require_str(
             self.source_read_snapshot_watermark,
@@ -354,7 +348,9 @@ class InfluenceEvidenceRef:
             evidence_content_hash=_require_str(
                 payload.get("evidence_content_hash"), "evidence_ref.evidence_content_hash"
             ),
-            captured_state=_require_str(payload.get("captured_state"), "evidence_ref.captured_state"),
+            captured_state=_require_str(
+                payload.get("captured_state"), "evidence_ref.captured_state"
+            ),
         )
 
 
@@ -388,7 +384,9 @@ class AORange:
         return cls(
             start_seq=_require_int(payload.get("start_seq"), "ao_range.start_seq"),
             end_seq=_require_int(payload.get("end_seq"), "ao_range.end_seq"),
-            segment_id=None if segment_id is None else _require_str(segment_id, "ao_range.segment_id"),
+            segment_id=None
+            if segment_id is None
+            else _require_str(segment_id, "ao_range.segment_id"),
         )
 
     def overlaps(self, start_seq: int, end_seq: int) -> bool:
@@ -647,7 +645,9 @@ class InfluenceClaim:
             status=_require_choice(  # type: ignore[arg-type]
                 payload.get("status", CLAIM_STATUS_HYPOTHESIS), "status", CLAIM_STATUSES
             ),
-            critic_verdict=None if verdict is None else _require_str(verdict, "critic_verdict", allow_empty=True),
+            critic_verdict=None
+            if verdict is None
+            else _require_str(verdict, "critic_verdict", allow_empty=True),
         )
 
 
@@ -763,9 +763,7 @@ class HighSeverityViolation(ValueError):
                 raise ValueError("HighSeverityViolation requires high-severity Violation values")
         self.violations = items
         codes = ", ".join(item.code for item in items)
-        super().__init__(
-            f"freeze refused: {len(items)} high-severity violation(s): {codes}"
-        )
+        super().__init__(f"freeze refused: {len(items)} high-severity violation(s): {codes}")
 
 
 @dataclass(frozen=True)
@@ -939,9 +937,7 @@ class InfluenceViewDraft:
 
     def _ensure_editable(self) -> None:
         if self.critic_rounds >= MAX_CRITIC_ROUNDS:
-            raise ValueError(
-                f"critic_rounds limit is {MAX_CRITIC_ROUNDS}; refusing further edits"
-            )
+            raise ValueError(f"critic_rounds limit is {MAX_CRITIC_ROUNDS}; refusing further edits")
 
     def _append_block(self, block: InfluenceBlock) -> None:
         if not isinstance(block, InfluenceBlock):
@@ -1053,7 +1049,9 @@ class InfluenceViewDraft:
         caller should switch to ``build_minimal_fallback_view``.
         """
         mode = _require_choice(construction_mode, "construction_mode", CONSTRUCTION_MODES)
-        stamp = _format_dt(self._clock()) if frozen_at is None else _require_str(frozen_at, "frozen_at")
+        stamp = (
+            _format_dt(self._clock()) if frozen_at is None else _require_str(frozen_at, "frozen_at")
+        )
         identity = revision_id or uuid.uuid4().hex
         if not isinstance(enforce_checks, bool):
             raise ValueError("enforce_checks must be a bool")
@@ -1076,9 +1074,7 @@ class InfluenceViewDraft:
             critic_rounds=self.critic_rounds,
             patch_provenance=tuple(self.patch_provenance),
             construction_mode=mode,  # type: ignore[arg-type]
-            content_hash=compute_content_hash(
-                blocks, claims, self.coverage, retrieval_subgraphs
-            ),
+            content_hash=compute_content_hash(blocks, claims, self.coverage, retrieval_subgraphs),
             frozen_at=stamp,
             retrieval_subgraphs=retrieval_subgraphs,
         )
@@ -1307,13 +1303,17 @@ def _normalize_known_violations(value: Any) -> tuple[dict[str, Any], ...]:
     for index, item in enumerate(value):
         if not isinstance(item, Mapping):
             raise ValueError(f"known_violations[{index}] must be a dict")
-        unexpected = [key for key in item if key not in _AUDIT_REQUIRED and key not in _AUDIT_OPTIONAL]
+        unexpected = [
+            key for key in item if key not in _AUDIT_REQUIRED and key not in _AUDIT_OPTIONAL
+        ]
         if unexpected:
             raise ValueError(f"known_violations[{index}] unexpected field {unexpected[0]!r}")
         missing = [key for key in _AUDIT_REQUIRED if key not in item]
         if missing:
             raise ValueError(f"known_violations[{index}] missing field {missing[0]!r}")
-        violation_id = _require_str(item.get("violation_id"), f"known_violations[{index}].violation_id")
+        violation_id = _require_str(
+            item.get("violation_id"), f"known_violations[{index}].violation_id"
+        )
         if violation_id in seen:
             raise ValueError(f"duplicate known violation {violation_id}")
         seen.add(violation_id)
@@ -1324,7 +1324,9 @@ def _normalize_known_violations(value: Any) -> tuple[dict[str, Any], ...]:
         record = {
             "evidence": _require_str(item.get("evidence"), f"known_violations[{index}].evidence"),
             "kind": kind,
-            "object_id": _require_str(item.get("object_id"), f"known_violations[{index}].object_id"),
+            "object_id": _require_str(
+                item.get("object_id"), f"known_violations[{index}].object_id"
+            ),
             "severity": severity,
             "violation_id": violation_id,
         }
@@ -1342,7 +1344,9 @@ def _normalize_known_violations(value: Any) -> tuple[dict[str, Any], ...]:
             if numbers:
                 record["evidence_ao_refs"] = numbers
         if "note" in item:
-            note = _require_str(item.get("note"), f"known_violations[{index}].note", allow_empty=True)
+            note = _require_str(
+                item.get("note"), f"known_violations[{index}].note", allow_empty=True
+            )
             if note:
                 record["note"] = note
         items.append(record)
@@ -1379,9 +1383,7 @@ def _reject_claim_fields_on_native(payload: Mapping[str, Any]) -> None:
 def _native_blocks(value: Any) -> tuple[InfluenceBlock, ...]:
     if isinstance(value, (str, bytes)) or not isinstance(value, list):
         raise ValueError("blocks must be a list")
-    return tuple(
-        InfluenceBlock.from_dict(_require_mapping(item, "block")) for item in value
-    )
+    return tuple(InfluenceBlock.from_dict(_require_mapping(item, "block")) for item in value)
 
 
 def _native_edges(value: Any) -> tuple[AigNativeEdge, ...]:
@@ -1539,7 +1541,9 @@ class AigNativeViewDraft:
             purpose=_require_choice(payload.get("purpose"), "purpose", PURPOSES),  # type: ignore[arg-type]
             session_id=_require_str(payload.get("session_id"), "session_id"),
             task_run_id=_require_str(payload.get("task_run_id"), "task_run_id"),
-            coverage=CoverageManifest.from_dict(_require_mapping(payload.get("coverage"), "coverage")),
+            coverage=CoverageManifest.from_dict(
+                _require_mapping(payload.get("coverage"), "coverage")
+            ),
             blocks=_native_blocks(payload.get("blocks")),
             edges=_native_edges(payload.get("edges")),
         )
@@ -1734,7 +1738,7 @@ def _temporal_and_cycle_violations(
         nodes.add(claim.target_block_id)
 
     white, gray, black = 0, 1, 2
-    color = {node: white for node in nodes}
+    color = dict.fromkeys(nodes, white)
 
     def walk(node: str) -> None:
         color[node] = gray
@@ -2047,7 +2051,7 @@ def _native_temporal_and_cycle_violations(
         nodes.add(edge.target_block_id)
 
     white, gray, black = 0, 1, 2
-    color = {node: white for node in nodes}
+    color = dict.fromkeys(nodes, white)
 
     def walk(node: str) -> None:
         color[node] = gray
@@ -2382,9 +2386,7 @@ def build_minimal_fallback_view(
     payload = _require_mapping(dict(session), "session")
     session_id = _require_str(payload.get("session_id"), "session_id")
     task_run_id = _require_str(payload.get("task_run_id"), "task_run_id")
-    purpose = _require_choice(
-        payload.get("purpose", PURPOSE_POST_RUN_INDEX), "purpose", PURPOSES
-    )
+    purpose = _require_choice(payload.get("purpose", PURPOSE_POST_RUN_INDEX), "purpose", PURPOSES)
     raw_records = payload.get("ao_records")
     if not isinstance(raw_records, list) or not raw_records:
         raise ValueError("ao_records must be a non-empty list")
@@ -2396,7 +2398,10 @@ def build_minimal_fallback_view(
     for ref in records:
         grouped.setdefault(ref.segment_id, []).append(ref)
 
-    segment_ids = sorted(grouped, key=lambda segment_id: (min(ref.sequence for ref in grouped[segment_id]), segment_id))
+    segment_ids = sorted(
+        grouped,
+        key=lambda segment_id: (min(ref.sequence for ref in grouped[segment_id]), segment_id),
+    )
     blocks: list[InfluenceBlock] = []
     included: list[AORange] = []
     for segment_id in segment_ids:
@@ -2431,7 +2436,9 @@ def build_minimal_fallback_view(
         )
         included.append(AORange(start_seq=start, end_seq=end, segment_id=segment_id))
 
-    included_sorted = tuple(sorted(included, key=lambda item: (item.start_seq, item.segment_id or "")))
+    included_sorted = tuple(
+        sorted(included, key=lambda item: (item.start_seq, item.segment_id or ""))
+    )
     omitted: list[OmittedRange] = []
     cursor = included_sorted[0].start_seq
     for item in included_sorted:

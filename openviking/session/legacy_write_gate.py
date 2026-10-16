@@ -15,9 +15,7 @@ class LegacyWriteRefused(ValueError):
     code = "legacy_write_refused"
 
     def __init__(self) -> None:
-        super().__init__(
-            "legacy Claim/Cut write is refused unless legacy_audit_opt_in=True"
-        )
+        super().__init__("legacy Claim/Cut write is refused unless legacy_audit_opt_in=True")
 
 
 def require_legacy_audit_opt_in(opt_in: bool) -> None:

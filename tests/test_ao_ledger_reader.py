@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 
 from openviking.session.ao_ledger import AOAttribution, AOLedger
-from openviking.session.ao_ledger_recorder import ATTRIBUTION_FILENAME
 from openviking.session.ao_ledger_reader import (
     MAX_PAGE_LIMIT,
     LedgerSnapshot,
@@ -20,6 +19,7 @@ from openviking.session.ao_ledger_reader import (
     list_ao_ledger,
     register_session_acl,
 )
+from openviking.session.ao_ledger_recorder import ATTRIBUTION_FILENAME
 
 
 class _AllowSessionAcl:

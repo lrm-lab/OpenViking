@@ -28,16 +28,16 @@ from openviking.session.aig_native_protocol import (
     protocol_content_hash,
 )
 from openviking.session.aig_tool_surface import AoSnapshot
-from openviking.session.append_only import write_exclusive
 from openviking.session.ao_ledger import AORecord
+from openviking.session.append_only import write_exclusive
 from openviking.session.extraction_write import freeze_native_edge_view
 from openviking.session.influence_view import (
     CONSTRUCTION_MODE_ADAPTIVE_AGENTIC,
     RELATION_INFLUENCE,
     RELATION_SKIP,
-    AORange,
     AigNativeEdge,
     AigNativeViewRevision,
+    AORange,
     CoverageManifest,
     HighSeverityViolation,
     InfluenceBlock,
@@ -137,9 +137,7 @@ def compile_paper_graph(
         "run_id": run_id,
         "validator_profile": VALIDATOR_PROFILE,
     }
-    sidecar_hash = protocol_content_hash(
-        SCHEMA_VERSION_AIG_NATIVE_V2, SIDECAR_KIND, sidecar_body
-    )
+    sidecar_hash = protocol_content_hash(SCHEMA_VERSION_AIG_NATIVE_V2, SIDECAR_KIND, sidecar_body)
     sidecar_path = _sidecar_path(root, run_id, revision_id)
     document = {
         "body": sidecar_body,
@@ -246,7 +244,7 @@ def _native_graph(
         native_blocks.append(block)
         spans.append((block.ao_start_seq, block.ao_end_seq))
     spans.sort()
-    for index, (start, end) in enumerate(spans):
+    for index, (start, _end) in enumerate(spans):
         if index and start <= spans[index - 1][1]:
             raise PaperCompileError("step_refs_overlap")
     native_edges: list[AigNativeEdge] = []

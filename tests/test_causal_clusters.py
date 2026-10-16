@@ -273,7 +273,9 @@ def test_create_cluster_requires_positive_edge_and_indexes_fork(tmp_path: Path) 
     assert cluster.center_fork_node_id == _FORK_A
     assert cluster.member_fork_node_ids == [_FORK_A, _FORK_B]
     assert cluster.version == 1
-    assert (tmp_path / NAMESPACE_DIRNAME / CLUSTERS_DIRNAME / f"{cluster.cluster_id}.json").is_file()
+    assert (
+        tmp_path / NAMESPACE_DIRNAME / CLUSTERS_DIRNAME / f"{cluster.cluster_id}.json"
+    ).is_file()
 
     hits_a = store.clusters_for_fork(_FORK_A)
     hits_b = store.clusters_for_fork(_FORK_B)
@@ -301,12 +303,7 @@ def test_add_member_rejects_unlinked_and_retains_history(tmp_path: Path) -> None
     assert loaded["latest"]["member_fork_node_ids"] == [_FORK_A, _FORK_B, _FORK_C]
     assert [item["version"] for item in loaded["versions"]] == [1, 2]
     assert loaded["versions"][0]["member_fork_node_ids"] == [_FORK_A, _FORK_B]
-    hist = (
-        tmp_path
-        / NAMESPACE_DIRNAME
-        / CLUSTERS_DIRNAME
-        / f"{cluster.cluster_id}.v1.json"
-    )
+    hist = tmp_path / NAMESPACE_DIRNAME / CLUSTERS_DIRNAME / f"{cluster.cluster_id}.v1.json"
     assert hist.is_file()
     historical = json.loads(hist.read_text(encoding="utf-8"))
     assert historical["version"] == 1
@@ -343,7 +340,9 @@ def test_legacy_mode_submit_denied(tmp_path: Path) -> None:
 def test_merge_clusters_supersedes_predecessors(tmp_path: Path) -> None:
     store = _store(tmp_path)
     edge_ab = _submit_positive(store, fork_a=_FORK_A, fork_b=_FORK_B, key="pos-ab")
-    edge_ac = _submit_positive(store, fork_a=_FORK_C, fork_b=_FORK_A, key="pos-ca", verdict="analogous")
+    edge_ac = _submit_positive(
+        store, fork_a=_FORK_C, fork_b=_FORK_A, key="pos-ca", verdict="analogous"
+    )
     left = store.create_cluster(_FORK_A, [_FORK_A, _FORK_B], edge_ab["edge_id"])
     right = store.create_cluster(_FORK_C, [_FORK_C, _FORK_A], edge_ac["edge_id"])
 
@@ -361,7 +360,9 @@ def test_merge_clusters_supersedes_predecessors(tmp_path: Path) -> None:
     assert old_right["latest"]["status"] == "superseded"
     assert old_left["latest"]["closed_at"]
     assert [item["version"] for item in old_left["versions"]] == [1, 2]
-    assert (tmp_path / NAMESPACE_DIRNAME / CLUSTERS_DIRNAME / f"{left.cluster_id}.v1.json").is_file()
+    assert (
+        tmp_path / NAMESPACE_DIRNAME / CLUSTERS_DIRNAME / f"{left.cluster_id}.v1.json"
+    ).is_file()
 
     active_ids = {item["cluster_id"] for item in store.clusters_for_fork(_FORK_A)}
     assert active_ids == {merged.cluster_id}

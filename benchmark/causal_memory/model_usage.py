@@ -13,7 +13,11 @@ from pathlib import Path
 from typing import Any
 
 TOKEN_FIELDS = (
-    "input_tokens", "output_tokens", "total_tokens", "cached_input_tokens", "reasoning_tokens"
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "cached_input_tokens",
+    "reasoning_tokens",
 )
 
 
@@ -82,18 +86,31 @@ class ModelUsageRecorder:
         request_id = uuid.uuid4().hex
         started = time.monotonic()
         self.append(
-            "request_started", request_id=request_id, model=model,
+            "request_started",
+            request_id=request_id,
+            model=model,
             network_attempt=network_attempt,
         )
         return request_id, started
 
     def completed(
-        self, *, request_id: str, started: float, model: str, network_attempt: int,
-        status: str, http_status: int | None, payload: Mapping[str, Any] | None,
+        self,
+        *,
+        request_id: str,
+        started: float,
+        model: str,
+        network_attempt: int,
+        status: str,
+        http_status: int | None,
+        payload: Mapping[str, Any] | None,
     ) -> None:
         self.append(
-            "request_completed", request_id=request_id, model=model,
-            network_attempt=network_attempt, status=status, http_status=http_status,
+            "request_completed",
+            request_id=request_id,
+            model=model,
+            network_attempt=network_attempt,
+            status=status,
+            http_status=http_status,
             elapsed_ms=max(0, round((time.monotonic() - started) * 1000)),
             usage=normalized_usage(payload),
         )
@@ -104,43 +121,53 @@ def summarize_usage(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
 
     def aggregate(group: list[Mapping[str, Any]]) -> dict[str, Any]:
         started = {r["request_id"] for r in group if r.get("event") == "request_started"}
-        finished = {
-            r["request_id"]: r for r in group if r.get("event") == "request_completed"
-        }
+        finished = {r["request_id"]: r for r in group if r.get("event") == "request_completed"}
         done = list(finished.values())
         missing = sum(
-            any((r.get("usage") or {}).get(k) is None for k in TOKEN_FIELDS[:3])
-            for r in done
+            any((r.get("usage") or {}).get(k) is None for k in TOKEN_FIELDS[:3]) for r in done
         )
         return {
             "http_attempts_started": len(started),
             "http_attempts_completed": len(done),
             "incomplete_http_attempts": len(started - finished.keys()),
-            "logical_completions": len({r.get("completion_id") for r in group
-                                        if r.get("event") == "request_started"}),
-            "network_retry_attempts": sum(r.get("network_attempt", 0) > 0 for r in group
-                                          if r.get("event") == "request_started"),
+            "logical_completions": len(
+                {r.get("completion_id") for r in group if r.get("event") == "request_started"}
+            ),
+            "network_retry_attempts": sum(
+                r.get("network_attempt", 0) > 0
+                for r in group
+                if r.get("event") == "request_started"
+            ),
             "http_status_counts": dict(Counter(str(r.get("http_status")) for r in done)),
             "request_status_counts": dict(Counter(r.get("status") for r in done)),
-            "validation_status_counts": dict(Counter(r.get("status") for r in group
-                                                      if r.get("event") == "completion_validated")),
+            "validation_status_counts": dict(
+                Counter(r.get("status") for r in group if r.get("event") == "completion_validated")
+            ),
             "completed_attempts_without_full_usage": missing,
             "usage_complete": not missing and not (started - finished.keys()),
-            **{"known_" + k: sum((r.get("usage") or {}).get(k) or 0 for r in done)
-               for k in TOKEN_FIELDS},
+            **{
+                "known_" + k: sum((r.get("usage") or {}).get(k) or 0 for r in done)
+                for k in TOKEN_FIELDS
+            },
         }
 
     roles = sorted({r.get("role", "") for r in rows})
     runs = sorted({r.get("run_id", "") for r in rows})
     return {
         "overall": aggregate(rows),
-        "by_role": {role: aggregate([r for r in rows if r.get("role") == role])
-                    for role in roles},
-        "by_run": {run: {
-            "overall": aggregate([r for r in rows if r.get("run_id") == run]),
-            "by_role": {role: aggregate([r for r in rows if r.get("run_id") == run
-                                         and r.get("role") == role]) for role in roles},
-        } for run in runs},
+        "by_role": {role: aggregate([r for r in rows if r.get("role") == role]) for role in roles},
+        "by_run": {
+            run: {
+                "overall": aggregate([r for r in rows if r.get("run_id") == run]),
+                "by_role": {
+                    role: aggregate(
+                        [r for r in rows if r.get("run_id") == run and r.get("role") == role]
+                    )
+                    for role in roles
+                },
+            }
+            for run in runs
+        },
     }
 
 

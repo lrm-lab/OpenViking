@@ -182,9 +182,7 @@ def test_promotion_requires_direct_evidence_and_switches_kind(tmp_path: Path) ->
         store.promote_to_evidence(bridge.bridge_id, [evidence], "supports", {})
     assert not hasattr(store, "promote_by_citation_count")
 
-    promoted = store.promote_to_evidence(
-        bridge.bridge_id, [evidence], "supports", check
-    )
+    promoted = store.promote_to_evidence(bridge.bridge_id, [evidence], "supports", check)
     assert promoted.kind == "evidence"
     assert promoted.relation_semantics == "supports"
     assert promoted.evidence_refs[0].to_dict() == evidence
@@ -276,7 +274,9 @@ def test_persistence_roundtrip_is_lossless(tmp_path: Path) -> None:
     assert BridgeRecord.from_dict(restored.to_dict()) == restored
     judgment = store.judgments_for(restored.bridge_id)[0]
     assert HypothesisJudgment.from_dict(judgment.to_dict()) == judgment
-    assert reloaded.traversable_edges(_SOURCE, _PRINCIPAL) == store.traversable_edges(_SOURCE, _PRINCIPAL)
+    assert reloaded.traversable_edges(_SOURCE, _PRINCIPAL) == store.traversable_edges(
+        _SOURCE, _PRINCIPAL
+    )
 
 
 def _events_path(root: Path) -> Path:
@@ -472,9 +472,7 @@ def test_injected_clock_stamps_persisted_judgment_and_reactivation(tmp_path: Pat
     )
     assert clock_judgment["judgment"]["timestamp"] == expected
     clock_bridge = next(
-        bridge
-        for bridge in clock_judgment["bridges"]
-        if bridge["bridge_id"] == dormant.bridge_id
+        bridge for bridge in clock_judgment["bridges"] if bridge["bridge_id"] == dormant.bridge_id
     )
     assert clock_bridge["created_at"] == expected
 
@@ -518,9 +516,13 @@ def test_failing_endpoint_prunes_path_and_records_reason() -> None:
         endpoint_applicability=checker,
     )
 
-    assert batch.evaluation_order == PATH_EVALUATION_ORDER == (
-        "path_budget",
-        "endpoint_applicability",
+    assert (
+        batch.evaluation_order
+        == PATH_EVALUATION_ORDER
+        == (
+            "path_budget",
+            "endpoint_applicability",
+        )
     )
     assert batch.endpoint_applicability == "checked"
     assert len(batch.pruned) == 1
@@ -624,7 +626,9 @@ def test_passing_endpoints_preserve_path_budget() -> None:
     assert batch.pruned == ()
     assert batch.unchecked == ()
     assert len(batch.retained) == 1
-    assert batch.retained[0].budget_violations == tuple(check_path_budget(clean_entities, clean_bridges))
+    assert batch.retained[0].budget_violations == tuple(
+        check_path_budget(clean_entities, clean_bridges)
+    )
     assert list(batch.retained[0].budget_violations) == []
 
 

@@ -167,7 +167,9 @@ class WorkspacePolicy:
             raise ValueError("max_builds_per_window must be an int")
         if self.max_builds_per_window < 0:
             raise ValueError("max_builds_per_window must be >= 0")
-        if isinstance(self.window_seconds, bool) or not isinstance(self.window_seconds, (int, float)):
+        if isinstance(self.window_seconds, bool) or not isinstance(
+            self.window_seconds, (int, float)
+        ):
             raise ValueError("window_seconds must be a number")
         window = float(self.window_seconds)
         if not math.isfinite(window) or window <= 0:
@@ -294,7 +296,9 @@ class TrajectoryIndexService:
     ) -> None:
         if not isinstance(supersede_index, ViewSupersedeIndex):
             raise ValueError("supersede_index must be a ViewSupersedeIndex")
-        if projection_registry is not None and not isinstance(projection_registry, ProjectionRegistry):
+        if projection_registry is not None and not isinstance(
+            projection_registry, ProjectionRegistry
+        ):
             raise ValueError("projection_registry must be a ProjectionRegistry")
         self.path = Path(path)
         self._supersede = supersede_index
@@ -505,7 +509,9 @@ class TrajectoryIndexService:
             return False
         now = _as_utc(self._clock())
         cutoff = now - timedelta(seconds=policy.window_seconds)
-        recent = sum(1 for stamp in self._build_timestamps if _parse_iso(stamp, "build_timestamp") > cutoff)
+        recent = sum(
+            1 for stamp in self._build_timestamps if _parse_iso(stamp, "build_timestamp") > cutoff
+        )
         return recent < policy.max_builds_per_window
 
     def _build_locked(self, job: IndexJob) -> InfluenceViewRevision:
@@ -551,7 +557,10 @@ class TrajectoryIndexService:
             if active is not None and active.job_id == job.job_id:
                 continue
             bucket = deferred.setdefault(job.session_id, [])
-            if any(item_job.job_id == job.job_id or item_job.priority == job.priority for item_job in bucket):
+            if any(
+                item_job.job_id == job.job_id or item_job.priority == job.priority
+                for item_job in bucket
+            ):
                 bucket[:] = [
                     item_job
                     for item_job in bucket

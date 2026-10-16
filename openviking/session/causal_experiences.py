@@ -29,9 +29,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-logger = logging.getLogger(__name__)
-
 from openviking_cli.utils.config.memory_config import is_causal_mode_enabled
+
+logger = logging.getLogger(__name__)
 
 NAMESPACE_DIRNAME = "causal-experiences"
 FORKS_DIRNAME = "forks"
@@ -45,9 +45,7 @@ FORK_CANDIDATE_ROLE = "ForkCandidate"
 ANCHOR_KIND_AO = "ao"
 ANCHOR_KIND_SESSION_STATE = "session_state"
 ANCHOR_KIND_INTERACTION_EDGE = "interaction_edge"
-ANCHOR_KINDS = frozenset(
-    (ANCHOR_KIND_AO, ANCHOR_KIND_SESSION_STATE, ANCHOR_KIND_INTERACTION_EDGE)
-)
+ANCHOR_KINDS = frozenset((ANCHOR_KIND_AO, ANCHOR_KIND_SESSION_STATE, ANCHOR_KIND_INTERACTION_EDGE))
 
 SEVEN_SECTION_KEYS = (
     "session_title",
@@ -68,16 +66,12 @@ EVIDENCE_ROLES = frozenset(
     )
 )
 CAPTURED_STATES = frozenset(("committed", "live"))
-BRANCH_EVIDENCE_STATUSES = frozenset(
-    ("real", "imagined_synthetic", "imagined_unverified")
-)
+BRANCH_EVIDENCE_STATUSES = frozenset(("real", "imagined_synthetic", "imagined_unverified"))
 
 POSITION_KIND_BLOCK = "block"
 POSITION_KIND_EDGE = "edge"
 POSITION_KIND_CUT = "cut"
-POSITION_KINDS = frozenset(
-    (POSITION_KIND_BLOCK, POSITION_KIND_EDGE, POSITION_KIND_CUT)
-)
+POSITION_KINDS = frozenset((POSITION_KIND_BLOCK, POSITION_KIND_EDGE, POSITION_KIND_CUT))
 PositionKind = Literal["block", "edge", "cut"]
 
 INDEPENDENT_CONTROL_REF_KIND = "independent_control"
@@ -237,9 +231,7 @@ def validate_anchor(anchor: dict[str, Any]) -> dict[str, Any]:
     payload = _require_mapping(anchor, "anchor")
     kind = payload.get("anchor_kind")
     if kind not in ANCHOR_KINDS:
-        raise ValueError(
-            f"anchor_kind must be one of {sorted(ANCHOR_KINDS)}, got {kind!r}"
-        )
+        raise ValueError(f"anchor_kind must be one of {sorted(ANCHOR_KINDS)}, got {kind!r}")
     if kind == ANCHOR_KIND_AO:
         return {
             "anchor_kind": ANCHOR_KIND_AO,
@@ -270,9 +262,7 @@ def validate_anchor(anchor: dict[str, Any]) -> dict[str, Any]:
         "interaction_event_id": _require_str(
             payload.get("interaction_event_id"), "anchor.interaction_event_id"
         ),
-        "from_segment_id": _require_str(
-            payload.get("from_segment_id"), "anchor.from_segment_id"
-        ),
+        "from_segment_id": _require_str(payload.get("from_segment_id"), "anchor.from_segment_id"),
         "to_segment_id": _require_str(payload.get("to_segment_id"), "anchor.to_segment_id"),
         "dag_snapshot_watermark": _require_str(
             payload.get("dag_snapshot_watermark"), "anchor.dag_snapshot_watermark"
@@ -318,9 +308,7 @@ def validate_evidence_ref(ref: dict[str, Any] | EvidenceRef) -> EvidenceRef:
     payload = _require_mapping(ref, "evidence_ref")
     role = payload.get("evidence_role")
     if role not in EVIDENCE_ROLES:
-        raise ValueError(
-            f"evidence_role must be one of {sorted(EVIDENCE_ROLES)}, got {role!r}"
-        )
+        raise ValueError(f"evidence_role must be one of {sorted(EVIDENCE_ROLES)}, got {role!r}")
     captured = payload.get("captured_state")
     if captured not in CAPTURED_STATES:
         raise ValueError(
@@ -414,9 +402,7 @@ def _validate_branches(items: Any) -> list[dict[str, Any]]:
             raise ValueError(f"branches[{index}].guidance must be a dict or None")
         out.append(
             {
-                "branch_id": _require_str(
-                    entry.get("branch_id"), f"branches[{index}].branch_id"
-                ),
+                "branch_id": _require_str(entry.get("branch_id"), f"branches[{index}].branch_id"),
                 "evidence_status": status,
                 "ao_sequence": list(sequence),
                 "guidance": dict(guidance) if guidance is not None else None,
@@ -448,9 +434,7 @@ class InfluenceGrounding:
         )
         kind = self.position_kind
         if kind not in POSITION_KINDS:
-            raise ValueError(
-                f"position_kind must be one of {sorted(POSITION_KINDS)}, got {kind!r}"
-            )
+            raise ValueError(f"position_kind must be one of {sorted(POSITION_KINDS)}, got {kind!r}")
         object.__setattr__(self, "position_kind", kind)
         object.__setattr__(self, "position_ref", _require_str(self.position_ref, "position_ref"))
         object.__setattr__(
@@ -487,9 +471,7 @@ class InfluenceGrounding:
 def influence_position_key(grounding: InfluenceGrounding | dict[str, Any]) -> str:
     """Stable key for one grounded position inside a view revision."""
     if not isinstance(grounding, InfluenceGrounding):
-        grounding = InfluenceGrounding.from_dict(
-            _require_mapping(grounding, "influence_grounding")
-        )
+        grounding = InfluenceGrounding.from_dict(_require_mapping(grounding, "influence_grounding"))
     return _canonical_dumps(
         {"position_kind": grounding.position_kind, "position_ref": grounding.position_ref}
     )
@@ -592,9 +574,7 @@ class ForkNodeRevision:
             self, "diagnosis_run_id", _require_str(self.diagnosis_run_id, "diagnosis_run_id")
         )
         object.__setattr__(self, "created_at", _require_str(self.created_at, "created_at"))
-        object.__setattr__(
-            self, "model_version", _require_str(self.model_version, "model_version")
-        )
+        object.__setattr__(self, "model_version", _require_str(self.model_version, "model_version"))
         object.__setattr__(self, "anchor", validate_anchor(self.anchor))
         object.__setattr__(self, "seven_sections", _validate_seven_sections(self.seven_sections))
         object.__setattr__(
@@ -657,9 +637,7 @@ class ForkNodeRevision:
             model_version=self.model_version,
             status=self.status,
             influence_grounding=(
-                None
-                if self.influence_grounding is None
-                else self.influence_grounding.to_dict()
+                None if self.influence_grounding is None else self.influence_grounding.to_dict()
             ),
             validation_evidence=self.validation_evidence,
         )
@@ -689,9 +667,7 @@ class ForkNodeRevision:
             "model_version": self.model_version,
             "status": self.status,
             "influence_grounding": (
-                None
-                if self.influence_grounding is None
-                else self.influence_grounding.to_dict()
+                None if self.influence_grounding is None else self.influence_grounding.to_dict()
             ),
             "validation_evidence": self.validation_evidence,
         }
@@ -792,9 +768,7 @@ def _require_ref_list(items: Any, field: str) -> list[Any]:
 
 def _normalize_validated_evidence(evidence: Any) -> dict[str, Any]:
     payload = _require_mapping(evidence, "evidence")
-    observed_in = _require_ref_list(
-        payload.get("observed_branch_refs"), "observed branch ref"
-    )
+    observed_in = _require_ref_list(payload.get("observed_branch_refs"), "observed branch ref")
     observed: list[dict[str, Any]] = []
     for index, item in enumerate(observed_in):
         entry = _require_mapping(item, f"observed_branch_refs[{index}]")
@@ -806,7 +780,9 @@ def _normalize_validated_evidence(evidence: Any) -> dict[str, Any]:
                     entry.get("branch_id"), f"observed_branch_refs[{index}].branch_id"
                 ),
                 "evidence_status": OBSERVED_BRANCH_EVIDENCE_STATUS,
-                "ref": _require_optional_str(entry.get("ref"), f"observed_branch_refs[{index}].ref"),
+                "ref": _require_optional_str(
+                    entry.get("ref"), f"observed_branch_refs[{index}].ref"
+                ),
             }
         )
     if not observed:
@@ -961,9 +937,7 @@ class ValidationEvidence:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "observed_branch_refs", tuple(self.observed_branch_refs))
-        object.__setattr__(
-            self, "independent_control_refs", tuple(self.independent_control_refs)
-        )
+        object.__setattr__(self, "independent_control_refs", tuple(self.independent_control_refs))
         if not isinstance(self.anchor_valid, AnchorValidity):
             raise ValueError("anchor_valid must be an AnchorValidity")
         if not isinstance(self.applicability_check, ApplicabilityCheck):
@@ -1208,9 +1182,7 @@ def _assess_validation_gates(evidence: dict[str, Any]) -> tuple[dict[str, Any], 
     return normalized, missing
 
 
-def _validation_evidence_dict(
-    core: dict[str, Any], gates: dict[str, Any]
-) -> dict[str, Any]:
+def _validation_evidence_dict(core: dict[str, Any], gates: dict[str, Any]) -> dict[str, Any]:
     evidence = ValidationEvidence(
         observed_branch_refs=tuple(core["observed_branch_refs"]),
         independent_control_refs=tuple(core["independent_control_refs"]),
@@ -1558,9 +1530,7 @@ class CausalExperiencesStore:
         never reports ``duplicate revision_id``.
         """
         path = self._revision_path(fork_node_id, revision.revision_id)
-        stored = ForkNodeRevision.from_dict(
-            json.loads(path.read_text(encoding="utf-8"))
-        )
+        stored = ForkNodeRevision.from_dict(json.loads(path.read_text(encoding="utf-8")))
         if stored.content_hash != revision.content_hash:
             raise ValueError(
                 "idempotency key conflict: revision already stored with different content "
@@ -1756,9 +1726,7 @@ class CausalExperiencesStore:
         """Append an invalidated superseding revision. Does not overwrite history."""
         self._require_causal_write()
         normalized = _normalize_counter_evidence(counter_evidence)
-        return self._append_status_revision(
-            fork_node_id, ForkStatus.INVALIDATED, normalized
-        )
+        return self._append_status_revision(fork_node_id, ForkStatus.INVALIDATED, normalized)
 
     def query_intervention_history(
         self,

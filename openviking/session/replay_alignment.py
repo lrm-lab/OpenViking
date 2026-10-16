@@ -347,9 +347,8 @@ class ReplayAlignmentService:
         revision_ids = tuple(block.block_id for block in replay_aig.revision.blocks)
         if revision_ids != block_ids:
             raise ReplayAlignmentError("observed_blocks_mismatch")
-        if (
-            alignment.actual_block_id is not None
-            and alignment.actual_block_id not in set(revision_ids)
+        if alignment.actual_block_id is not None and alignment.actual_block_id not in set(
+            revision_ids
         ):
             raise ReplayAlignmentError("actual_block_not_in_replay_aig")
         admission, admission_document = self._store_admission(
@@ -385,13 +384,9 @@ class ReplayAlignmentService:
                     suffix="outcome",
                 )
             )
-        elif (
-            alignment.depth in OUTCOME_ALIGNMENT_DEPTHS and admission.first_action_direct
-        ):
+        elif alignment.depth in OUTCOME_ALIGNMENT_DEPTHS and admission.first_action_direct:
             raise ReplayAlignmentError("outcome_alignment_unverified")
-        return ScriptedReplayOutcome(
-            request, result, replay_aig, admission, tuple(evaluations)
-        )
+        return ScriptedReplayOutcome(request, result, replay_aig, admission, tuple(evaluations))
 
     def read_replay(self, revision_id: str) -> ReplayAigDocument:
         """Return one stored Replay AIG. This is not a production query."""

@@ -19,8 +19,8 @@ from openviking.session.extraction_write import (
     freeze_extracted_view,
 )
 from openviking.session.influence_view import (
-    CONSTRUCTION_MODE_NATIVE_SINGLE_PASS,
     CONSTRUCTION_MODE_FALLBACK,
+    CONSTRUCTION_MODE_NATIVE_SINGLE_PASS,
     DETERMINISTIC_FALLBACK_REASON,
     PURPOSE_POST_RUN_INDEX,
     AORange,
@@ -256,9 +256,7 @@ def _service(root: Path, provider) -> TrajectoryIndexService:
     return TrajectoryIndexService(
         root / "trajectory-index.json",
         ViewSupersedeIndex(root / VIEWS_FILENAME),
-        builder=extraction_index_builder(
-            provider, frozen_at=FROZEN, legacy_audit_opt_in=True
-        ),
+        builder=extraction_index_builder(provider, frozen_at=FROZEN, legacy_audit_opt_in=True),
     )
 
 

@@ -26,14 +26,12 @@ from pathlib import Path
 from typing import Any
 
 from openviking.message.message import Message
-from openviking.session.ao_ledger import AORecord, LEDGER_FILENAME
-from openviking.session.ao_ledger_recorder import AOLedgerRecorder, HISTORY_DIRNAME
+from openviking.session.ao_ledger import LEDGER_FILENAME, AORecord
+from openviking.session.ao_ledger_recorder import HISTORY_DIRNAME, AOLedgerRecorder
 
 DERIVED_STATE = "derived_from_archive"
 DEFAULT_EXPORT_PATH = Path("benchmark/causal_memory/out/ao_records.jsonl")
-PROBED_SESSIONS_ROOT = (
-    "/data/viking/evol-389e96deae16/user/eval-admin/sessions"
-)
+PROBED_SESSIONS_ROOT = "/data/viking/evol-389e96deae16/user/eval-admin/sessions"
 
 
 def iter_session_dirs(root: Path) -> Iterator[Path]:
@@ -209,7 +207,9 @@ def _records_from_text_turns(session_id: str, messages: list[Message]) -> list[A
         created = message.created_at or ""
         if not isinstance(created, str):
             created = str(created)
-        ao_id = hashlib.sha256(f"{session_id}:{index}:{message.id}".encode("utf-8")).hexdigest()[:32]
+        ao_id = hashlib.sha256(f"{session_id}:{index}:{message.id}".encode("utf-8")).hexdigest()[
+            :32
+        ]
         records.append(
             AORecord(
                 ao_id=ao_id,

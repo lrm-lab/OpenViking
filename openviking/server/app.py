@@ -37,12 +37,12 @@ from openviking.server.routers import (
     bot_studio_router,
     compile_router,
     console_router,
-    coordinator_router,
     content_router,
+    coordinator_router,
     debug_router,
     filesystem_router,
-    metrics_router,
     lexical_memory_router,
+    metrics_router,
     observer_router,
     openviking_assets_router,
     pack_router,
@@ -59,6 +59,7 @@ from openviking.server.routers import (
     watches_router,
     webdav_router,
 )
+from openviking.server.routers.gateway import router as gateway_router
 from openviking.server.timing_middleware import RequestTimingMiddleware
 from openviking.service.core import OpenVikingService
 from openviking.service.task_tracker import get_task_tracker
@@ -249,6 +250,7 @@ def create_app(
     config: Optional[ServerConfig] = None,
     service: Optional[OpenVikingService] = None,
     config_path: Optional[str] = None,
+    server_overrides: Optional[dict] = None,
 ) -> FastAPI:
     """Create FastAPI application.
 
@@ -256,6 +258,7 @@ def create_app(
         config: Server configuration. If None, loads from default location.
         service: Pre-initialized OpenVikingService (optional).
         config_path: Resolved ov.conf path used for startup configuration.
+        server_overrides: CLI arguments reapplied when loading the startup file.
 
     Returns:
         FastAPI application instance
@@ -434,6 +437,10 @@ def create_app(
     )
 
     app.state.config = config
+    app.state.server_config_overrides = server_overrides or {}
+    from openviking.server.restart import RestartController
+
+    app.state.restart_controller = RestartController()
     app.state.api_key_manager = None
     app.state.deletion_service = None
     set_server_config(config)
@@ -597,6 +604,7 @@ def create_app(
     app.include_router(system_router)
     app.include_router(acl_router)
     app.include_router(admin_router)
+    app.include_router(gateway_router)
     app.include_router(agent_evolution_router)
     app.include_router(compile_router)
     app.include_router(coordinator_router)
@@ -665,14 +673,11 @@ def create_app(
                 or "http://127.0.0.1:1933"
             )
 
-            # Late-binding role resolver: app.state.api_key_manager is wired
-            # during lifespan, after the provider is constructed. Lambda
-            # closes over `app` and looks up at call time.
-            def _current_role(account_id: str, user_id: str) -> Role:
-                mgr = getattr(app.state, "api_key_manager", None)
-                if mgr is None or not hasattr(mgr, "get_user_role"):
+            async def _current_role(account_id: str, user_id: str) -> Role:
+                manager = getattr(app.state, "api_key_manager", None)
+                if manager is None:
                     return Role.USER
-                return mgr.get_user_role(account_id, user_id)
+                return await manager.get_registered_user_role(account_id, user_id) or Role.USER
 
             _route_provider = OpenVikingOAuthProvider(
                 store=_route_store,

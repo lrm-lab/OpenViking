@@ -64,9 +64,7 @@ async def coordinator_diagnose(
     except FailureGateError as exc:
         raise InvalidArgumentError(exc.code, details={"code": exc.code}) from exc
     except ProtocolContractError as exc:
-        raise InvalidArgumentError(
-            str(exc), details={"code": _contract_code(str(exc))}
-        ) from exc
+        raise InvalidArgumentError(str(exc), details={"code": _contract_code(str(exc))}) from exc
     event = result.coordinator_event
     if not isinstance(event, Mapping):
         raise InvalidArgumentError(
@@ -101,14 +99,10 @@ def _read_diagnose_request(payload: Any) -> CoordinatorDiagnoseRequest:
             str(exc), details={"code": "unsupported_schema_version"}
         ) from exc
     except ProtocolContractError as exc:
-        raise InvalidArgumentError(
-            str(exc), details={"code": _contract_code(str(exc))}
-        ) from exc
+        raise InvalidArgumentError(str(exc), details={"code": _contract_code(str(exc))}) from exc
 
 
-def _require_caller_labels(
-    ctx: RequestContext, request: CoordinatorDiagnoseRequest
-) -> None:
+def _require_caller_labels(ctx: RequestContext, request: CoordinatorDiagnoseRequest) -> None:
     try:
         caller = coordinator_boundary_labels((f"user:{ctx.user.user_id}",))
         document = coordinator_boundary_labels(request.principal_labels)
@@ -145,9 +139,7 @@ def _require_session_visible(ctx: RequestContext, session: Any) -> None:
         )
 
 
-def _load_target_session(
-    ctx: RequestContext, request: CoordinatorDiagnoseRequest
-) -> Any:
+def _load_target_session(ctx: RequestContext, request: CoordinatorDiagnoseRequest) -> Any:
     labels = coordinator_boundary_labels(request.principal_labels)
     users = sorted(item for item in labels if item.startswith("user:"))
     if len(users) != 1:
@@ -157,9 +149,7 @@ def _load_target_session(
         )
     user_id = users[0].split(":", 1)[1]
     session_uri = f"viking://user/{user_id}/sessions/{request.session_id}"
-    return get_service().sessions.session(
-        ctx, request.session_id, session_uri=session_uri
-    )
+    return get_service().sessions.session(ctx, request.session_id, session_uri=session_uri)
 
 
 def _contract_code(message: str) -> str:

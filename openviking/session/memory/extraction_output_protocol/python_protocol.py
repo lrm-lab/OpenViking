@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
 import keyword
 import re
+import tokenize
 from dataclasses import dataclass, field
 from typing import Any, get_args, get_origin
 
@@ -33,7 +35,7 @@ from openviking.session.memory.utils.line_numbers import (
     strip_line_numbers,
 )
 
-_PYTHON_FENCE_RE = re.compile(r"```python[ \t]*\r?\n(?P<code>[\s\S]*?)```", re.IGNORECASE)
+_PYTHON_FENCE_RE = re.compile(r"```python[ \t]*\r?\n(?P<code>[\s\S]*)```", re.IGNORECASE)
 _PYTHON_FENCE_START_RE = re.compile(r"```python[ \t]*\r?\n", re.IGNORECASE)
 _HIDDEN_MEMORY_FIELDS = {
     "source_extraction_id",
@@ -81,13 +83,13 @@ _CONTRACT_PREAMBLE = (
     "To change an existing string field, edit it through the object's field attribute. Use the "
     "real field name (e.g. content), NOT the literal word 'field':",
     "  - obj.content.update(new_value): replace the whole field with a complete new string.",
-    "  - obj.content.edit(search=..., replace=...): replace one exact snippet in place.",
-    "  - obj.content.drop(text=...): delete one exact snippet in place.",
+    "  - obj.content.edit(search=..., replace=...): replace one exact snippet in an editable string (merge_op=patch).",
+    "  - obj.content.drop(text=...): delete one exact snippet in an editable string (merge_op=patch).",
     "edit()/drop() may be chained, e.g. obj.content.edit(search='a', replace='b').drop(text='c'); do not mix them with .update() in one chain.",
     "A field attribute is a write handle only; you cannot read it as a string or call str methods on it.",
     "Each search= (and drop text=) MUST be copied verbatim from the current field value shown in the object's sdk.existing(...) binding, and must occur exactly once. If the snippet appears more than once, include an adjacent unique line just before or after it so the match is unique. Never use text from the conversation or the new facts you intend to add as a search anchor; that text is not in the current content and the edit will fail.",
-    "edit()/drop() only work on an existing memory's string field; new memories from create/set must be given complete field values.",
-    "For existing memories, prefer the smallest unique edit()/drop(). Do not rewrite the entire field just to add or change a few facts; large full-content rewrites are more likely to be truncated or malformed. Use obj.content.update() only when most of the content changes.",
+    "edit()/drop() only work on an existing memory's editable string field (merge_op=patch); new memories from create/set must be given complete field values.",
+    "For existing editable strings (merge_op=patch), prefer the smallest unique edit()/drop(). Do not rewrite the entire field just to add or change a few facts; large full-content rewrites are more likely to be truncated or malformed. Use obj.content.update() only when most of such an editable string changes. For string fields marked [replace], always pass the complete new value to obj.content.update(), even for a small change; edit()/drop() are unavailable.",
     'ALWAYS use a triple-quoted string ("""...""") for EVERY natural-language argument '
     "(content, summary, goal, and every search=/replace=/text= snippet), even one-liners. "
     "Prose frequently contains apostrophes (e.g. Evan's), quotes, colons, or dates that break "
@@ -1132,7 +1134,16 @@ class _PythonProgramCompiler:
         if field_schema is None or not (
             field_schema.merge_op == MergeOp.PATCH and field_schema.field_type == FieldType.STRING
         ):
-            self._error(node, f"field {name!r} does not support edit()/drop()")
+            guidance = "edit()/drop() require an editable string (merge_op=patch)"
+            if field_schema is not None and (
+                field_schema.merge_op == MergeOp.REPLACE
+                and field_schema.field_type == FieldType.STRING
+            ):
+                guidance = (
+                    "merge_op=replace requires the complete new value, including unchanged text; "
+                    f'use `{owner.name}.{_identifier_alias(name)}.update("""complete new value""")`'
+                )
+            self._error(node, f"field {name!r} does not support edit()/drop(): {guidance}")
         # Do NOT apply here. Store the edits as a StrPatch so python mode flows through
         # the same resolve_operations -> _validate_patch_operations -> patch-repair path
         # as json mode: a failed snippet is isolated to its own operation and gets the
@@ -1444,20 +1455,54 @@ class _PythonProgramCompiler:
 
 def _extract_python_code(content: str) -> str:
     stripped = str(content or "").strip()
-    matches = list(_PYTHON_FENCE_RE.finditer(stripped))
-    if len(matches) == 1:
-        match = matches[0]
+    if "```" not in stripped:
+        return stripped
+    # A bare program may contain Markdown fences inside its string literals.
+    try:
+        ast.parse(stripped, mode="exec")
+    except SyntaxError:
+        pass
+    else:
+        return stripped
+    match = _PYTHON_FENCE_RE.search(stripped)
+    if match:
+        if _fence_is_python_content(stripped, match.start()):
+            return stripped
         surrounding_text = stripped[: match.start()] + stripped[match.end() :]
         if "```" not in surrounding_text:
-            return match.group("code").rstrip()
+            code = match.group("code").rstrip()
+            if "```" not in code:
+                return code
+            # Match through content fences, but reject separate output blocks.
+            try:
+                ast.parse(code, mode="exec")
+            except SyntaxError:
+                pass
+            else:
+                return code
     starts = list(_PYTHON_FENCE_START_RE.finditer(stripped))
     if len(starts) == 1 and stripped.count("```") == 1:
         return stripped[starts[0].end() :].strip()
-    if "```" in stripped:
-        raise ExtractionOutputProtocolError(
-            "Python output may contain only one complete ```python code fence"
-        )
-    return stripped
+    raise ExtractionOutputProtocolError(
+        "Python output may contain only one complete ```python code fence"
+    )
+
+
+def _fence_is_python_content(source: str, offset: int) -> bool:
+    """Recognize a fence in a string/comment even when later Python is invalid."""
+    position = (source.count("\n", 0, offset) + 1, offset - source.rfind("\n", 0, offset) - 1)
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            if token.start <= position < token.end:
+                # Standalone backticks are individual tokens; strings, f-string
+                # text and comments contain the marker within a larger token.
+                return token.string != "`"
+            if token.start > position:
+                break
+    except (tokenize.TokenError, SyntaxError):
+        # Surrounding explanation is not required to be valid Python.
+        pass
+    return False
 
 
 def _is_string_literal_syntax_error(error: str) -> bool:

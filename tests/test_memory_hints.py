@@ -64,7 +64,9 @@ def _hint(
             "applicability": "same task shape",
             "confidence_status": "provisional",
             "provenance": provenance,
-            "ttl_expires_at": (ttl or (moment + timedelta(hours=1))).isoformat().replace("+00:00", "Z"),
+            "ttl_expires_at": (ttl or (moment + timedelta(hours=1)))
+            .isoformat()
+            .replace("+00:00", "Z"),
             "created_at": moment.isoformat().replace("+00:00", "Z"),
         }
     )
@@ -88,7 +90,9 @@ def _service(
 
 
 def _exposures(ledger: CitationLedger) -> list:
-    return [event for event in ledger.events(require_admin=True) if event.kind == KIND_HINT_EXPOSURE]
+    return [
+        event for event in ledger.events(require_admin=True) if event.kind == KIND_HINT_EXPOSURE
+    ]
 
 
 def test_pending_cap_blocks_third_until_disposition(tmp_path: Path) -> None:
@@ -117,7 +121,11 @@ def test_pending_cap_blocks_third_until_disposition(tmp_path: Path) -> None:
     third = service.deliver(_hint("h3", sources=[_source(ref="fork-3")]), clock)
     assert third.hint_id == "h3"
     assert service.pending_count("task-1", "agent-1") == 2
-    assert {hint.hint_id for hint in service.hints()} == {first.hint_id, second.hint_id, third.hint_id}
+    assert {hint.hint_id for hint in service.hints()} == {
+        first.hint_id,
+        second.hint_id,
+        third.hint_id,
+    }
 
 
 def test_cooldown_blocks_until_window_elapses(tmp_path: Path) -> None:
@@ -135,7 +143,10 @@ def test_cooldown_blocks_until_window_elapses(tmp_path: Path) -> None:
 
 def test_same_provenance_refreshes_ttl_without_new_hint(tmp_path: Path) -> None:
     service, ledger, clock = _service(tmp_path)
-    sources = [_source(kind="fork", ref="fork-9"), _source(kind="branch", ref="branch-2", revision="r2")]
+    sources = [
+        _source(kind="fork", ref="fork-9"),
+        _source(kind="branch", ref="branch-2", revision="r2"),
+    ]
     original = service.deliver(_hint("h1", sources=sources, ttl=T0 + timedelta(minutes=10)), clock)
     clock.current = T0 + timedelta(seconds=20)
     refreshed_ttl = T0 + timedelta(hours=2)
@@ -281,7 +292,7 @@ def test_hint_types_expose_no_execute_api() -> None:
     ):
         public = {name for name in dir(cls) if not name.startswith("_")}
         assert forbidden.isdisjoint(public)
-        for name, member in inspect.getmembers(cls, predicate=callable):
+        for name, _member in inspect.getmembers(cls, predicate=callable):
             assert name not in forbidden
     assert "not executable, target agent decides" in (MemoryHint.__doc__ or "")
 

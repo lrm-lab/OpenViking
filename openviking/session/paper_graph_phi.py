@@ -65,8 +65,7 @@ class PaperViolation:
         if self.scope not in _SCOPES:
             raise PhiError("invalid_violation")
         if any(
-            isinstance(item, bool) or not isinstance(item, int)
-            for item in self.evidence_ao_refs
+            isinstance(item, bool) or not isinstance(item, int) for item in self.evidence_ao_refs
         ):
             raise PhiError("invalid_violation")
         if not isinstance(self.note, str):
@@ -323,7 +322,7 @@ def _cycles(
     graph: dict[str, list[str]] = {}
     for source, target in edges:
         graph.setdefault(source, []).append(target)
-    color = {node_id: 0 for node_id in nodes}
+    color = dict.fromkeys(nodes, 0)
     found: list[tuple[str, str]] = []
 
     def walk(node: str) -> None:

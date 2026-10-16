@@ -257,10 +257,10 @@ def resolve_request_uri(uri: str, ctx: RequestContext) -> str:
     """
     # Every authenticated request context carries an effective user identity,
     # including ROOT contexts produced by dev, API-key, and trusted auth modes.
-    # Resolve only the unambiguous home alias for every role; preserve the
-    # existing role-dependent handling of legacy/ambiguous spellings below.
+    # Both aliases bind to this authenticated user's namespace for every role.
+    # Preserve role-dependent handling of other ambiguous spellings below.
     parts = uri_parts(uri)
-    if parts and parts[0] == "~":
+    if parts and parts[0] in {"~", "session"}:
         return resolve_current_user_uri(uri, ctx)
     if ctx.role in {Role.USER, Role.ADMIN}:
         return resolve_current_user_uri(uri, ctx)
@@ -352,6 +352,7 @@ def is_content_root_uri(
         and classification.content_index is not None
         and len(parts) == classification.content_index + 1
     )
+
 
 def _validate_peer_id_segments(parts: list[str]) -> None:
     if len(parts) >= 4 and parts[0] == "user" and parts[2] == "peers":

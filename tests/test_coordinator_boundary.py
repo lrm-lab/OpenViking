@@ -101,9 +101,7 @@ def test_reader_fail_closed_on_version_kind_hash_and_intent() -> None:
 
     unknown_kind = json.loads(json.dumps(request))
     unknown_kind["object_kind"] = "coordinator_retrieve_request"
-    unknown_kind["content_hash"] = _spec_hash(
-        "coordinator_retrieve_request", unknown_kind["body"]
-    )
+    unknown_kind["content_hash"] = _spec_hash("coordinator_retrieve_request", unknown_kind["body"])
     with pytest.raises(ProtocolContractError):
         read_coordinator_document(unknown_kind)
 

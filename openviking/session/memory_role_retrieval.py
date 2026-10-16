@@ -479,9 +479,7 @@ def _cap_discovery(
 ) -> tuple[list[dict[str, str]], list[dict[str, str]], bool]:
     candidates = [card for card in cards if card["useClass"] == "memory_candidate"]
     priors = [card for card in cards if card["useClass"] == "analogical_prior"]
-    combined = [("candidate", card) for card in candidates] + [
-        ("prior", card) for card in priors
-    ]
+    combined = [("candidate", card) for card in candidates] + [("prior", card) for card in priors]
     truncated = len(combined) > DISCOVERY_PUBLIC_CAP
     kept = combined[:DISCOVERY_PUBLIC_CAP]
     return (

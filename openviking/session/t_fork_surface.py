@@ -196,10 +196,7 @@ class TForkSurface:
     def submit_fork_proposal(
         self, proposal: Mapping[str, Any], dispositions: Sequence[Mapping[str, str]], **fields: Any
     ) -> dict[str, Any]:
-        (
-            "Submit ``proposal`` with dispositions. ``retrieval_id`` and "
-            "``recorded_at`` are required."
-        )
+        "Submit ``proposal`` with dispositions. ``retrieval_id`` and ``recorded_at`` are required."
         payload = {
             "dispositions": list(dispositions),
             "proposal": proposal,

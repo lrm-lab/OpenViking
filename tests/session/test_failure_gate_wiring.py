@@ -104,9 +104,12 @@ def _counting_builder(session_dir: Path, calls: list):
 
 
 def _audit_kinds(session_dir: Path) -> list[str]:
-    return [row["event_kind"] for row in FailureGateOrchestrator(
-        session_dir, session_frozen_view_builder(session_dir)
-    ).audit_events()]
+    return [
+        row["event_kind"]
+        for row in FailureGateOrchestrator(
+            session_dir, session_frozen_view_builder(session_dir)
+        ).audit_events()
+    ]
 
 
 def _audit_rows(session_dir: Path) -> tuple[dict, ...]:
@@ -131,9 +134,10 @@ def causal(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_commit_id_prefers_the_archive_directory_name() -> None:
-    assert commit_id_for_archive(
-        f"viking://user/default/sessions/{SESSION}/history/archive_001", TASK
-    ) == "archive_001"
+    assert (
+        commit_id_for_archive(f"viking://user/default/sessions/{SESSION}/history/archive_001", TASK)
+        == "archive_001"
+    )
     assert commit_id_for_archive("", TASK) == TASK
 
 
@@ -350,9 +354,7 @@ def test_session_without_aig_pipeline_skips(tmp_path: Path, causal: None) -> Non
     assert latest_native_aig_revision(tmp_path, SESSION, TASK) is None
 
 
-def test_builder_reads_the_hook_revision_and_does_not_rewrite(
-    tmp_path: Path, causal: None
-) -> None:
+def test_builder_reads_the_hook_revision_and_does_not_rewrite(tmp_path: Path, causal: None) -> None:
     stored = _seed_native(tmp_path)
     builder = session_frozen_view_builder(tmp_path)
     loaded = builder(
@@ -427,9 +429,7 @@ def test_diagnose_delivery_uses_request_ids_and_session_products(
         outcome_contract=_contract(TASK),
         outcome_evaluator_results=(_signal("pass"),),
     )
-    delivery = build_diagnose_delivery(
-        session, revision, parsed, session_dir=tmp_path
-    )
+    delivery = build_diagnose_delivery(session, revision, parsed, session_dir=tmp_path)
     assert delivery.trigger == TRIGGER_DIAGNOSE
     assert delivery.commit_id == COMMIT
     assert delivery.session_id == SESSION
@@ -462,9 +462,7 @@ def test_diagnose_delivery_attaches_script_only_when_session_carries_it(
             "catalog": {"candidates": []},
         },
     )
-    delivery = build_diagnose_delivery(
-        session, revision, parsed, session_dir=tmp_path
-    )
+    delivery = build_diagnose_delivery(session, revision, parsed, session_dir=tmp_path)
     assert delivery.auto_remediate is True
     assert delivery.anchor_block_id == "b-2"
     assert delivery.guidance_plan == plan

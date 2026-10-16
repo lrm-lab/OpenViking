@@ -12,10 +12,10 @@ from pathlib import Path
 import pytest
 
 from openviking.session.influence_view import (
-    AORange,
-    CoverageManifest,
     DETERMINISTIC_FALLBACK_REASON,
     SYNTHETIC_ROOT_SINK_REASON,
+    AORange,
+    CoverageManifest,
     HighSeverityViolation,
     InfluenceBlock,
     InfluenceClaim,
@@ -92,7 +92,9 @@ def _block(
     )
 
 
-def _coverage(blocks: list[InfluenceBlock], *, omitted: tuple[OmittedRange, ...] = ()) -> CoverageManifest:
+def _coverage(
+    blocks: list[InfluenceBlock], *, omitted: tuple[OmittedRange, ...] = ()
+) -> CoverageManifest:
     refs = tuple(ref for block in blocks for ref in block.source_refs)
     sequences = [ref.sequence for ref in refs] or [1]
     return CoverageManifest(
@@ -131,7 +133,9 @@ def _draft(
     )
 
 
-def _claim(claim_id: str, source: str, target: str, *, relation_type: str = "influence") -> InfluenceClaim:
+def _claim(
+    claim_id: str, source: str, target: str, *, relation_type: str = "influence"
+) -> InfluenceClaim:
     return InfluenceClaim(
         claim_id=claim_id,
         source_block_id=source,
@@ -319,7 +323,9 @@ def test_fallback_builder_emits_valid_fallback_view() -> None:
     assert revision.construction_mode == "fallback"
     assert revision.claims == ()
     assert len(revision.blocks) == 2
-    assert {block.granularity_reason for block in revision.blocks} == {DETERMINISTIC_FALLBACK_REASON}
+    assert {block.granularity_reason for block in revision.blocks} == {
+        DETERMINISTIC_FALLBACK_REASON
+    }
     assert [block.segment_ref.segment_id for block in revision.blocks] == ["seg-a", "seg-b"]
     assert revision.blocks[0].ao_start_seq == 1
     assert revision.blocks[0].ao_end_seq == 2
@@ -388,7 +394,9 @@ def test_failure_diagnosis_requires_root_sink_weak_subgraph() -> None:
         purpose="failure_diagnosis",
     )
     stray_hits = [
-        item for item in validate_view(with_stray) if item.code == "block_outside_root_sink_subgraph"
+        item
+        for item in validate_view(with_stray)
+        if item.code == "block_outside_root_sink_subgraph"
     ]
     assert [item.location for item in stray_hits] == ["block:stray"]
 
@@ -671,7 +679,9 @@ def test_retrieval_subgraph_claim_endpoint_must_lie_inside_blocks() -> None:
 
     illegal = _draft([early, late], [claim])
     illegal.add_retrieval_subgraph(_subgraph("sg-half", ("b-script",), ("c-cutover",)))
-    hits = [item for item in validate_view(illegal) if item.code == "subgraph_claim_endpoint_outside"]
+    hits = [
+        item for item in validate_view(illegal) if item.code == "subgraph_claim_endpoint_outside"
+    ]
     assert len(hits) == 1
     assert hits[0].location == "subgraph:sg-half/claim_ids/c-cutover"
     assert _codes(illegal) == {"subgraph_claim_endpoint_outside"}
@@ -695,7 +705,9 @@ def test_duplicate_retrieval_subgraph_id_is_a_violation() -> None:
 
 def test_retrieval_subgraph_over_block_limit_is_a_violation() -> None:
     def many(count: int) -> list[InfluenceBlock]:
-        return [_block(f"b{index}", [index], segment_id=f"seg-{index}") for index in range(1, count + 1)]
+        return [
+            _block(f"b{index}", [index], segment_id=f"seg-{index}") for index in range(1, count + 1)
+        ]
 
     allowed = many(12)
     legal = _draft(allowed)
@@ -705,7 +717,9 @@ def test_retrieval_subgraph_over_block_limit_is_a_violation() -> None:
 
     oversized = many(13)
     illegal = _draft(oversized)
-    illegal.add_retrieval_subgraph(_subgraph("sg-over", tuple(block.block_id for block in oversized)))
+    illegal.add_retrieval_subgraph(
+        _subgraph("sg-over", tuple(block.block_id for block in oversized))
+    )
     hits = [item for item in validate_view(illegal) if item.code == "subgraph_block_limit"]
     assert len(hits) == 1
     assert hits[0].location == "subgraph:sg-over/block_ids"
@@ -719,9 +733,7 @@ def test_retrieval_subgraph_failure_evidence_must_match_marker() -> None:
     early, late, claim = _span()
     evidence = (_evidence(5),)
     legal = _draft([early, late], [claim])
-    legal.add_retrieval_subgraph(
-        _subgraph("sg-open", ("b-script", "b-rate"), ("c-cutover",))
-    )
+    legal.add_retrieval_subgraph(_subgraph("sg-open", ("b-script", "b-rate"), ("c-cutover",)))
     legal.add_retrieval_subgraph(
         _subgraph(
             "sg-failed",
@@ -739,7 +751,9 @@ def test_retrieval_subgraph_failure_evidence_must_match_marker() -> None:
     missing.add_retrieval_subgraph(
         _subgraph("sg-bare", ("b-script", "b-rate"), ("c-cutover",), failure_marked=True)
     )
-    bare_hits = [item for item in validate_view(missing) if item.code == "subgraph_failure_evidence"]
+    bare_hits = [
+        item for item in validate_view(missing) if item.code == "subgraph_failure_evidence"
+    ]
     assert len(bare_hits) == 1
     assert bare_hits[0].location == "subgraph:sg-bare/failure_evidence_refs"
 
@@ -774,11 +788,7 @@ def test_conclusion_block_without_marker_is_not_a_failure_subgraph() -> None:
     assert validate_view(draft) == []
     revision = draft.freeze(revision_id="rev-rate", frozen_at="2026-09-24T08:00:00.000Z")
     subgraph = revision.retrieval_subgraphs[0]
-    roles = {
-        block.role
-        for block in revision.blocks
-        if block.block_id in subgraph.block_ids
-    }
+    roles = {block.role for block in revision.blocks if block.block_id in subgraph.block_ids}
     assert "conclusion" in roles
     assert outcome.summary == "error rate rose"
     assert subgraph.failure_marked is False

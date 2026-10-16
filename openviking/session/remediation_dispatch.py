@@ -43,8 +43,8 @@ from openviking.session.aig_native_protocol import (
     child_run_output_document,
     dispatch_gate_document,
     guidance_adjustment_document,
-    production_direct_admission_document,
     is_sha256_hex,
+    production_direct_admission_document,
     protocol_content_hash,
     protocol_envelope,
     read_blocked_pre_execution,
@@ -61,7 +61,12 @@ from openviking.session.aig_native_protocol import (
     remediation_dispatch_confirmation_document,
     remediation_dispatch_request_document,
 )
-from openviking.session.append_only import append_jsonl, read_json_object, read_jsonl_objects, write_new_json
+from openviking.session.append_only import (
+    append_jsonl,
+    read_json_object,
+    read_jsonl_objects,
+    write_new_json,
+)
 from openviking.session.fork_node_overlay import ForkOverlayError, require_label_set
 from openviking.session.guidance_approval import GuidanceApprovalError, GuidanceApprovalService
 from openviking.session.strategy_pattern import StrategyPatternError, StrategyPatternStore
@@ -134,7 +139,9 @@ class RemediationDispatchService:
                 if row.get("record_kind") != _RECORD_BLOCKED:
                     continue
                 decision_id = _row_hex(row, "decision_id")
-                found.append(read_blocked_pre_execution(self._read_json(self._blocked_path(decision_id))))
+                found.append(
+                    read_blocked_pre_execution(self._read_json(self._blocked_path(decision_id)))
+                )
             return tuple(found)
 
     def dispatch_scripted(
@@ -324,7 +331,9 @@ class RemediationDispatchService:
                         child_block_ids=child_blocks,
                     )
                     admission = read_production_direct_admission(admission_document)
-                    self._write_same(self._admission_path(admission.admission_id), admission_document)
+                    self._write_same(
+                        self._admission_path(admission.admission_id), admission_document
+                    )
                     evaluation_id = (
                         f"{EVIDENCE_TIER_PRODUCTION_DIRECT}:{admission.admission_id}:"
                         f"{step.imagined_node_id}"
@@ -363,7 +372,9 @@ class RemediationDispatchService:
                         report_content_hash=parsed_report.content_hash,
                     )
                     constraint = read_remediation_constraint(constraint_document)
-                    self._write_same(self._constraint_path(constraint.constraint_id), constraint_document)
+                    self._write_same(
+                        self._constraint_path(constraint.constraint_id), constraint_document
+                    )
                     constraints.append(constraint)
                     constraint_ids.append(constraint.constraint_id)
             self._append_index(
@@ -563,7 +574,14 @@ def _caller_controls(controls: Mapping[str, Any]) -> dict[str, Any]:
         if len(value) != len(set(value)):
             raise RemediationDispatchError("dispatch_controls_invalid")
         parsed[key] = sorted(value)
-    for key in ("budget", "executor_agent_id", "executor_role", "idempotency_key", "isolation", "permission"):
+    for key in (
+        "budget",
+        "executor_agent_id",
+        "executor_role",
+        "idempotency_key",
+        "isolation",
+        "permission",
+    ):
         value = controls.get(key)
         if not isinstance(value, str) or not value:
             raise RemediationDispatchError("dispatch_controls_invalid")
@@ -678,7 +696,9 @@ def _adjustment_fingerprint(adjustment: Mapping[str, Any] | None) -> str | None:
     )
 
 
-def _child_session_id(parent_session_id: str, guidance_content_hash: str, idempotency_key: str) -> str:
+def _child_session_id(
+    parent_session_id: str, guidance_content_hash: str, idempotency_key: str
+) -> str:
     digest = protocol_content_hash(
         SCHEMA_VERSION_AIG_NATIVE_V2,
         "child_session_identity",
@@ -788,7 +808,9 @@ def _parse_adjustment(
     return read_guidance_adjustment(document), document
 
 
-def _evaluation_document(*, evaluation_id: str, subject_id: str, evidence_ref: str) -> dict[str, Any]:
+def _evaluation_document(
+    *, evaluation_id: str, subject_id: str, evidence_ref: str
+) -> dict[str, Any]:
     body = {
         "evaluation_id": evaluation_id,
         "evidence_ref": evidence_ref,

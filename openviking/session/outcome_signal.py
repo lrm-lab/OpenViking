@@ -37,9 +37,7 @@ PASS_REWARD_THRESHOLDS: Mapping[str, float] = {
 # Judge/verifier never finished. Substring match against the caller-supplied
 # error text. The driver copies these from sidecar/attempt rows.
 NO_SIGNAL_ERROR_PATTERNS: Mapping[str, frozenset[str]] = {
-    "browsecomp": frozenset(
-        {"parse_error", "timeout", "verifier_error", "verifier_exception"}
-    ),
+    "browsecomp": frozenset({"parse_error", "timeout", "verifier_error", "verifier_exception"}),
     "gdpval": frozenset(
         {
             "fallback_5.0",

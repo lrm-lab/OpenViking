@@ -40,8 +40,8 @@ from openviking.session.strategy_pattern import (
     StrategyPatternStore,
 )
 from tests.test_guidance_approval import (
-    _CAROL,
     _BOB,
+    _CAROL,
     _branch,
     _candidate,
     _catalog,
@@ -112,9 +112,7 @@ def _ao(output_id: str = "ao-child-1") -> dict:
 
 def _snapshot(root: Path) -> dict[str, bytes]:
     return {
-        str(path.relative_to(root)): path.read_bytes()
-        for path in root.rglob("*")
-        if path.is_file()
+        str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()
     }
 
 
@@ -264,10 +262,7 @@ def test_child_run_keeps_provenance_and_does_not_touch_the_failure_run(
     before_run = copy.deepcopy(world.run.__dict__)
     before_files = _snapshot(tmp_path)
     guidance_path = (
-        tmp_path
-        / GUIDANCE_APPROVAL_DIRNAME
-        / "guidance"
-        / f"{approved.guidance.content_hash}.json"
+        tmp_path / GUIDANCE_APPROVAL_DIRNAME / "guidance" / f"{approved.guidance.content_hash}.json"
     )
     guidance_bytes = guidance_path.read_bytes()
     outcome = _dispatch(service, world, approved)
@@ -306,20 +301,23 @@ def test_output_session_cannot_be_the_parent_session(tmp_path: Path) -> None:
     world, approved, service = _approved(tmp_path)
     parent = world.sessions["reader"]
     before = _snapshot(tmp_path)
-    assert _code(
-        lambda: _dispatch(
-            service,
-            world,
-            approved,
-            outputs=[
-                {
-                    "output_id": "blk-parent",
-                    "output_kind": "block",
-                    "child_session_id": parent,
-                }
-            ],
+    assert (
+        _code(
+            lambda: _dispatch(
+                service,
+                world,
+                approved,
+                outputs=[
+                    {
+                        "output_id": "blk-parent",
+                        "output_kind": "block",
+                        "child_session_id": parent,
+                    }
+                ],
+            )
         )
-    ) == "parent_run_sealed"
+        == "parent_run_sealed"
+    )
     assert _run_files(tmp_path) == []
     assert _blocked_files(tmp_path) == []
     assert _snapshot(tmp_path) == before
@@ -329,24 +327,27 @@ def test_execution_report_maps_blocks_and_rejects_a_missing_block(tmp_path: Path
     world, approved, service = _approved(tmp_path)
     parent = world.sessions["reader"]
     imagined = approved.approval.steps[0].imagined_node_id
-    assert _code(
-        lambda: _dispatch(
-            service,
-            world,
-            approved,
-            report=_report(
-                approved.approval,
-                parent,
-                [
-                    {
-                        "actual_block_id": "blk-not-frozen",
-                        "alignment": "equivalent",
-                        "imagined_node_id": imagined,
-                    }
-                ],
-            ),
+    assert (
+        _code(
+            lambda: _dispatch(
+                service,
+                world,
+                approved,
+                report=_report(
+                    approved.approval,
+                    parent,
+                    [
+                        {
+                            "actual_block_id": "blk-not-frozen",
+                            "alignment": "equivalent",
+                            "imagined_node_id": imagined,
+                        }
+                    ],
+                ),
+            )
         )
-    ) == "actual_block_not_in_child_run"
+        == "actual_block_not_in_child_run"
+    )
     assert _run_files(tmp_path) == []
     assert world.patterns.has_direct_evidence("imagined_node", imagined) is False
     with pytest.raises(ProtocolContractError, match="actual_block_id"):
@@ -367,10 +368,7 @@ def test_execution_report_maps_blocks_and_rejects_a_missing_block(tmp_path: Path
 def test_adjustment_is_an_appendix_and_cannot_widen_permission(tmp_path: Path) -> None:
     world, approved, service = _approved(tmp_path)
     guidance_path = (
-        tmp_path
-        / GUIDANCE_APPROVAL_DIRNAME
-        / "guidance"
-        / f"{approved.guidance.content_hash}.json"
+        tmp_path / GUIDANCE_APPROVAL_DIRNAME / "guidance" / f"{approved.guidance.content_hash}.json"
     )
     before = guidance_path.read_bytes()
     imagined = approved.approval.steps[0].imagined_node_id
@@ -400,38 +398,40 @@ def test_adjustment_is_an_appendix_and_cannot_widen_permission(tmp_path: Path) -
         / f"{widened[1].guidance.content_hash}.json"
     )
     wide_before = wide_path.read_bytes()
-    assert _code(
-        lambda: _dispatch(
-            widened[2],
-            widened[0],
-            widened[1],
-            adjustment={
-                "author_agent_id": "agent-a",
-                "capability_limits": ["replay-sandbox", "shell"],
-                "revised_steps": [
-                    {"imagined_node_id": imagined, "statement": "open a shell"}
-                ],
-                "target_role": "task_agent",
-            },
+    assert (
+        _code(
+            lambda: _dispatch(
+                widened[2],
+                widened[0],
+                widened[1],
+                adjustment={
+                    "author_agent_id": "agent-a",
+                    "capability_limits": ["replay-sandbox", "shell"],
+                    "revised_steps": [{"imagined_node_id": imagined, "statement": "open a shell"}],
+                    "target_role": "task_agent",
+                },
+            )
         )
-    ) == "adjustment_forbidden"
+        == "adjustment_forbidden"
+    )
     assert wide_path.read_bytes() == wide_before
     assert _run_files(tmp_path / "wide") == []
-    assert _code(
-        lambda: _dispatch(
-            widened[2],
-            widened[0],
-            widened[1],
-            adjustment={
-                "author_agent_id": "agent-b",
-                "capability_limits": ["replay-sandbox"],
-                "revised_steps": [
-                    {"imagined_node_id": imagined, "statement": "same words"}
-                ],
-                "target_role": "task_agent",
-            },
+    assert (
+        _code(
+            lambda: _dispatch(
+                widened[2],
+                widened[0],
+                widened[1],
+                adjustment={
+                    "author_agent_id": "agent-b",
+                    "capability_limits": ["replay-sandbox"],
+                    "revised_steps": [{"imagined_node_id": imagined, "statement": "same words"}],
+                    "target_role": "task_agent",
+                },
+            )
         )
-    ) == "adjustment_forbidden"
+        == "adjustment_forbidden"
+    )
     assert wide_path.read_bytes() == wide_before
 
 
@@ -650,17 +650,20 @@ def test_functionally_equivalent_is_production_direct(tmp_path: Path) -> None:
 
 def test_missing_report_does_not_create_a_run(tmp_path: Path) -> None:
     world, approved, service = _approved(tmp_path)
-    assert _code(
-        lambda: service.dispatch_scripted(
-            approval_content_hash=approved.approval.content_hash,
-            principal_labels=(_CAROL,),
-            parent_session_id=world.sessions["reader"],
-            controls=_controls(),
-            outputs=[_block()],
-            report=None,
-            pattern_store=world.patterns,
+    assert (
+        _code(
+            lambda: service.dispatch_scripted(
+                approval_content_hash=approved.approval.content_hash,
+                principal_labels=(_CAROL,),
+                parent_session_id=world.sessions["reader"],
+                controls=_controls(),
+                outputs=[_block()],
+                report=None,
+                pattern_store=world.patterns,
+            )
         )
-    ) == "execution_report_required"
+        == "execution_report_required"
+    )
     assert _run_files(tmp_path) == []
     assert _blocked_files(tmp_path) == []
 
@@ -671,9 +674,7 @@ def test_index_ids_are_checked_before_they_become_paths(tmp_path: Path) -> None:
     assert blocked.blocked is True
     index = tmp_path / REMEDIATION_RUN_DIRNAME / "index.jsonl"
     rows = [
-        json.loads(line)
-        for line in index.read_text(encoding="utf-8").splitlines()
-        if line.strip()
+        json.loads(line) for line in index.read_text(encoding="utf-8").splitlines() if line.strip()
     ]
     rows[0]["decision_id"] = "../escaped"
     index.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")

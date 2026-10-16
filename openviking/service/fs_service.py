@@ -256,6 +256,9 @@ class FSService:
         simple: bool = False,
         output: str = "original",
         abs_limit: int = 256,
+        include_abstract: Optional[bool] = None,
+        include_overview: Optional[bool] = None,
+        overview_limit: int = 4000,
         show_all_hidden: bool = False,
         node_limit: int = 1000,
         level_limit: int = 3,
@@ -273,7 +276,10 @@ class FSService:
             recursive: List all subdirectories recursively
             simple: Return only relative path list
             output: str = "original" or "agent"
-            abs_limit: int = 256 if output == "agent" else ignore
+            abs_limit: Maximum returned abstract length
+            include_abstract: Include directory L0 abstracts; defaults to the output format
+            include_overview: Include directory L1 overviews
+            overview_limit: Maximum returned overview length
             show_all_hidden: bool = False (list all hidden files, like -a)
             node_limit: int = 1000 (maximum number of nodes to list)
             sort_by: Optional sort field for non-recursive listings
@@ -290,27 +296,33 @@ class FSService:
                 return await viking_fs.tree(
                     uri,
                     ctx=ctx,
-                    output="original" if tags or use_simple_paths else output,
+                    output="original",
                     abs_limit=abs_limit,
+                    include_abstract=None,
+                    include_overview=False,
+                    overview_limit=overview_limit,
                     show_all_hidden=show_all_hidden,
                     node_limit=page_limit,
                     level_limit=level_limit,
                     offset=page_offset,
                     sort_by=sort_by,
                     sort_order=sort_order,
-                    extra_fields=None if tags or use_simple_paths else extra_fields,
+                    extra_fields=None,
                 )
             return await viking_fs.ls(
                 uri,
                 ctx=ctx,
-                output="original" if tags or use_simple_paths else output,
+                output="original",
                 abs_limit=abs_limit,
+                include_abstract=None,
+                include_overview=False,
+                overview_limit=overview_limit,
                 show_all_hidden=show_all_hidden,
                 node_limit=page_limit,
                 offset=page_offset,
                 sort_by=sort_by,
                 sort_order=sort_order,
-                extra_fields=None if tags or use_simple_paths else extra_fields,
+                extra_fields=None,
             )
 
         if tags:
@@ -337,7 +349,12 @@ class FSService:
                 entries=[entry.get("uri", "") for entry in page.entries],
                 has_more=page.has_more,
             )
-        if tags and (output != "original" or extra_fields):
+        if (
+            output != "original"
+            or extra_fields
+            or include_abstract is True
+            or include_overview is True
+        ):
             return ListingPage(
                 entries=await viking_fs._finalize_listing_entries(
                     page.entries,
@@ -346,6 +363,9 @@ class FSService:
                     extra_fields,
                     recursive,
                     ctx=ctx,
+                    include_abstract=include_abstract,
+                    include_overview=include_overview is True,
+                    overview_limit=overview_limit,
                 ),
                 has_more=page.has_more,
             )
@@ -954,6 +974,10 @@ class FSService:
         tags: Optional[List[str]] = None,
         include_tags: bool = False,
         offset: int = 0,
+        directories_only: bool = False,
+        include_abstract: Optional[bool] = None,
+        include_overview: Optional[bool] = None,
+        overview_limit: int = 4000,
     ) -> ListingPage:
         """Get directory tree."""
         viking_fs = self._ensure_initialized()
@@ -965,7 +989,11 @@ class FSService:
                 ctx=ctx,
                 output="original" if tags else output,
                 abs_limit=abs_limit,
+                include_abstract=None if tags else include_abstract,
+                include_overview=False if tags else include_overview is True,
+                overview_limit=overview_limit,
                 show_all_hidden=show_all_hidden,
+                directories_only=directories_only,
                 node_limit=page_limit,
                 level_limit=level_limit,
                 extra_fields=None if tags else extra_fields,
@@ -981,7 +1009,12 @@ class FSService:
                 offset,
                 node_limit,
             )
-            if output != "original" or extra_fields:
+            if (
+                output != "original"
+                or extra_fields
+                or include_abstract is True
+                or include_overview is True
+            ):
                 return ListingPage(
                     entries=await viking_fs._finalize_listing_entries(
                         page.entries,
@@ -990,6 +1023,9 @@ class FSService:
                         extra_fields,
                         True,
                         ctx=ctx,
+                        include_abstract=include_abstract,
+                        include_overview=include_overview is True,
+                        overview_limit=overview_limit,
                     ),
                     has_more=page.has_more,
                 )
@@ -1025,16 +1061,6 @@ class FSService:
         """Validate write access without mutating the target."""
         viking_fs = self._ensure_initialized()
         await viking_fs._ensure_access(uri, ctx, action=AclAction.WRITE)
-
-    async def system_sync_status(self, uri: str, ctx: RequestContext) -> Dict[str, Any]:
-        """Return multi-write sync status for one Viking URI subtree."""
-        viking_fs = self._ensure_initialized()
-        return await viking_fs.system_sync_status(uri, ctx=ctx)
-
-    async def system_sync_retry(self, uri: str, ctx: RequestContext) -> Dict[str, Any]:
-        """Retry multi-write sync work for one Viking URI subtree."""
-        viking_fs = self._ensure_initialized()
-        return await viking_fs.system_sync_retry(uri, ctx=ctx)
 
     async def read(self, uri: str, ctx: RequestContext, offset: int = 0, limit: int = -1) -> str:
         """Read file content. Accepts a Viking URI or a 32-char hex vector record id."""
@@ -1199,7 +1225,7 @@ class FSService:
         tag_mode: str = "replace",
         acl: AclSpec | Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        """Write to an existing file and refresh semantics/vectors."""
+        """Create or update a file and refresh semantics/vectors."""
         viking_fs = self._ensure_initialized()
         coordinator = ContentWriteCoordinator(viking_fs=viking_fs, vikingdb=self._vikingdb)
         return await coordinator.write(
@@ -1223,6 +1249,8 @@ class FSService:
         ctx: RequestContext,
         wait: bool = True,
         timeout: Optional[float] = None,
+        skip_conflicts: bool = False,
+        processing_mode: str = "semantic_and_vectors",
     ) -> Dict[str, Any]:
         """Apply multiple file writes and aggregate downstream refresh."""
         viking_fs = self._ensure_initialized()
@@ -1233,6 +1261,8 @@ class FSService:
             ctx=ctx,
             wait=wait,
             timeout=timeout,
+            skip_conflicts=skip_conflicts,
+            processing_mode=processing_mode,
         )
 
     async def set_tags(

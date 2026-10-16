@@ -240,14 +240,14 @@ class InfluenceProjection:
         object.__setattr__(self, "card_id", _require_str(self.card_id, "card_id"))
         object.__setattr__(self, "kind", _require_choice(self.kind, "kind", CARD_KINDS))
         object.__setattr__(self, "summary", _require_str(self.summary, "summary", allow_empty=True))
-        object.__setattr__(
-            self, "semantic_type", _require_str(self.semantic_type, "semantic_type")
-        )
+        object.__setattr__(self, "semantic_type", _require_str(self.semantic_type, "semantic_type"))
         object.__setattr__(self, "status", _require_choice(self.status, "status", CARD_STATUSES))
         if not isinstance(self.source_pointer, SourcePointer):
             raise ValueError("source_pointer must be a SourcePointer")
         object.__setattr__(
-            self, "embedding_stub", _copy_json_dict(self.embedding_stub, "embedding_stub", allow_empty=True)
+            self,
+            "embedding_stub",
+            _copy_json_dict(self.embedding_stub, "embedding_stub", allow_empty=True),
         )
         object.__setattr__(self, "acl_labels", _normalize_labels(self.acl_labels, "acl_labels"))
         object.__setattr__(self, "content_hash", _require_str(self.content_hash, "content_hash"))
@@ -489,9 +489,7 @@ class ProjectionRegistry:
             self._require_promotable_locked(revision_id, position_id, provenance)
             entry = self._find_locked(revision_id, position_id)
             if entry is None:
-                raise ValueError(
-                    f"no active projection for {revision_id}:{position_id}"
-                )
+                raise ValueError(f"no active projection for {revision_id}:{position_id}")
             promoted = InfluenceProjection(
                 card_id=entry.card.card_id,
                 kind=entry.card.kind,
@@ -524,11 +522,7 @@ class ProjectionRegistry:
         session = _require_str(session_id, "session_id")
         labels = _normalize_labels(new_labels, "new_labels")
         with self._lock:
-            doomed = [
-                entry
-                for entry in self._entries.values()
-                if entry.card.session_id == session
-            ]
+            doomed = [entry for entry in self._entries.values() if entry.card.session_id == session]
             doomed.sort(key=lambda entry: entry.card.card_id)
             removed = tuple(
                 self._withdraw_locked(entry, reason=REMOVAL_ACL_CHANGE, new_labels=labels)
@@ -581,10 +575,7 @@ class ProjectionRegistry:
 
     def to_dict(self) -> dict[str, Any]:
         with self._lock:
-            entries = [
-                self._entries[card_id].to_dict()
-                for card_id in sorted(self._entries)
-            ]
+            entries = [self._entries[card_id].to_dict() for card_id in sorted(self._entries)]
             positions = []
             for revision_id, position_id in sorted(self._validated):
                 row: dict[str, Any] = {
@@ -773,7 +764,10 @@ class ProjectionRegistry:
     def _find_locked(self, view_revision_id: str, block_or_claim_id: str) -> _ActiveEntry | None:
         for entry in self._entries.values():
             pointer = entry.card.source_pointer
-            if pointer.view_revision_id == view_revision_id and pointer.block_or_claim_id == block_or_claim_id:
+            if (
+                pointer.view_revision_id == view_revision_id
+                and pointer.block_or_claim_id == block_or_claim_id
+            ):
                 return entry
         return None
 
@@ -812,7 +806,9 @@ class ProjectionRegistry:
             )
             validated[key] = _provenance_record(position)
         modes = {
-            _require_str(revision_key, "construction_modes"): _require_str(mode, "construction_modes")
+            _require_str(revision_key, "construction_modes"): _require_str(
+                mode, "construction_modes"
+            )
             for revision_key, mode in modes_raw.items()
         }
         with self._lock:

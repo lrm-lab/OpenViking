@@ -45,16 +45,17 @@ from openviking.session.aig_native_protocol import (
     UnsupportedSchemaVersion,
     base_revision_catalog_from_view,
     canonical_hash_input,
-    protocol_content_hash,
-    read_blocked_pre_execution,
-    read_branch_evaluation,
-    read_first_action_alignment,
-    read_fork_node_overlay,
-    read_fork_proposal,
     guidance_approval_document,
     guidance_publication_document,
     guidance_rejection_document,
+    protocol_content_hash,
     read_agent_candidate_catalog,
+    read_blocked_pre_execution,
+    read_branch_evaluation,
+    read_direct_evidence_admission,
+    read_first_action_alignment,
+    read_fork_node_overlay,
+    read_fork_proposal,
     read_guidance_approval,
     read_guidance_document,
     read_guidance_execution_report,
@@ -64,25 +65,19 @@ from openviking.session.aig_native_protocol import (
     read_legacy_claim_cut,
     read_native_edge_draft,
     read_native_edge_revision,
-    read_direct_evidence_admission,
     read_outcome_contract,
     read_protocol_document,
     read_remediation_dispatch_confirmation,
     read_remediation_dispatch_request,
     read_replay_aig,
-    read_replay_eligibility_assessment,
     read_replay_eligibility,
+    read_replay_eligibility_assessment,
     read_strategy_pattern,
     read_strategy_pattern_proposal,
     read_task_outcome_assessment,
     read_v2_fixture_set,
     strategy_pattern_document,
     strategy_pattern_id,
-)
-from openviking.session.outcome_contract import (
-    DECISION_CONFIRMED_FAILURE,
-    OUTCOME_EVIDENCE_POLICY_VERSION,
-    REASON_EXTERNAL_FAIL,
 )
 from openviking.session.causal_experiences import (
     ApplicabilityCheck,
@@ -99,6 +94,11 @@ from openviking.session.influence_view import (
     SourceRef,
     compute_content_hash,
 )
+from openviking.session.outcome_contract import (
+    DECISION_CONFIRMED_FAILURE,
+    OUTCOME_EVIDENCE_POLICY_VERSION,
+    REASON_EXTERNAL_FAIL,
+)
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "adr0043"
 LEGACY_CONTENT_HASH = "13ccf85f06557bfec5d7790b765769b13d22497374ec7675ac3ebe9adfc5e0ce"
@@ -106,18 +106,14 @@ V2_CONTENT_HASH = "acd7c028ec344e09c8b8c769eb821d00c0cb1571236ed44387738454b107c
 NATIVE_EDGE_DRAFT_HASH = "65356beed0f70b458dc7bb3be81dbf5cfae94a16c58389f046b0e13f6e2ab4ae"
 NATIVE_EDGE_REVISION_HASH = "fab0b5eaa7867e9a38f56a75c30e9e3d9ac2f123799a9d3cd6a6e6cffc0e8c45"
 OUTCOME_CONTRACT_HASH = "e7950f3e439877c6421f8935d8daab06ca3515fddbf2c25e6237cb8f436d7587"
-STRATEGY_PATTERN_PROPOSAL_HASH = (
-    "44b08f0b14d4623bb09ff4395613cb3a13f85cf1eb3911e33ae8283561f2b700"
-)
+STRATEGY_PATTERN_PROPOSAL_HASH = "44b08f0b14d4623bb09ff4395613cb3a13f85cf1eb3911e33ae8283561f2b700"
 STRATEGY_PATTERN_HASH = "17e2a73ec7b19380ed47f31a147c0d399d63cc519e3770a56505ffaf4e098822"
 STRATEGY_PATTERN_ID = "eddcf51b921a4cf01fef9ddc99673e9111460516a0b032d5b96e29ab7357b9b7"
 REPLAY_ELIGIBILITY_ASSESSMENT_HASH = (
     "bcfbb10fb6b8e6d462eb3fb01911426aa08f5a20cc32059816c446cfd05a5e9e"
 )
 REPLAY_AIG_HASH = "7625f9250b790656558e8c1aeda12a81068ece2a8ec65df281b8000d58f34c9d"
-DIRECT_EVIDENCE_ADMISSION_HASH = (
-    "21fd3c830c7a29d2d01bef1275ca94c90d34ffdf3b7fbb01cc0fbb20f4831792"
-)
+DIRECT_EVIDENCE_ADMISSION_HASH = "21fd3c830c7a29d2d01bef1275ca94c90d34ffdf3b7fbb01cc0fbb20f4831792"
 V2_CLAIM_CUT_KEYS = frozenset(
     {
         "claim_id",
@@ -200,9 +196,7 @@ def v2_payload() -> dict[str, Any]:
 
 
 def test_schema_versions_are_closed() -> None:
-    assert SCHEMA_VERSIONS == frozenset(
-        {"legacy-claim-cut-v1", "aig-native-v2"}
-    )
+    assert SCHEMA_VERSIONS == frozenset({"legacy-claim-cut-v1", "aig-native-v2"})
     assert SchemaVersion.LEGACY_CLAIM_CUT_V1.value == SCHEMA_VERSION_LEGACY_CLAIM_CUT
     assert SchemaVersion.AIG_NATIVE_V2.value == SCHEMA_VERSION_AIG_NATIVE_V2
     assert frozenset(item.value for item in SchemaVersion) == SCHEMA_VERSIONS
@@ -234,12 +228,14 @@ def test_legacy_and_v2_content_hashes_do_not_collide(
     assert legacy_payload["content_hash"] == LEGACY_CONTENT_HASH
     assert v2_payload["content_hash"] == V2_CONTENT_HASH
     assert LEGACY_CONTENT_HASH != V2_CONTENT_HASH
-    assert _spec_content_hash(
-        SCHEMA_VERSION_AIG_NATIVE_V2, "legacy_claim_cut", legacy_payload["body"]
-    ) != LEGACY_CONTENT_HASH
-    assert _spec_content_hash(
-        SCHEMA_VERSION_LEGACY_CLAIM_CUT, "v2_fixture_set", v2_payload["body"]
-    ) != V2_CONTENT_HASH
+    assert (
+        _spec_content_hash(SCHEMA_VERSION_AIG_NATIVE_V2, "legacy_claim_cut", legacy_payload["body"])
+        != LEGACY_CONTENT_HASH
+    )
+    assert (
+        _spec_content_hash(SCHEMA_VERSION_LEGACY_CLAIM_CUT, "v2_fixture_set", v2_payload["body"])
+        != V2_CONTENT_HASH
+    )
 
     legacy_text = _spec_dumps(
         {
@@ -334,9 +330,7 @@ def test_v2_fixture_reader_is_deterministic(v2_payload: dict[str, Any]) -> None:
         for step in first.fork_node_overlay.branch_steps
         if step.imagined_node_id is not None
     }
-    assert {
-        step.imagined_node_id for step in first.guidance_execution_report.steps
-    } <= defined
+    assert {step.imagined_node_id for step in first.guidance_execution_report.steps} <= defined
     assert not hasattr(first.fork_node_overlay, "source_refs")
     assert first.task_outcome_assessment.author_role == "reader"
     assert first.task_outcome_assessment.verdict == "failure"
@@ -416,18 +410,14 @@ def test_readers_do_not_downgrade_across_versions(
 
 
 def test_relabeling_legacy_payload_as_v2_is_rejected(legacy_payload: dict[str, Any]) -> None:
-    relabeled = _document(
-        SCHEMA_VERSION_AIG_NATIVE_V2, "legacy_claim_cut", legacy_payload["body"]
-    )
+    relabeled = _document(SCHEMA_VERSION_AIG_NATIVE_V2, "legacy_claim_cut", legacy_payload["body"])
     assert relabeled["content_hash"] != legacy_payload["content_hash"]
     with pytest.raises(ProtocolContractError):
         read_protocol_document(relabeled)
     with pytest.raises(ProtocolContractError):
         read_v2_fixture_set(relabeled)
 
-    disguised = _document(
-        SCHEMA_VERSION_AIG_NATIVE_V2, "v2_fixture_set", legacy_payload["body"]
-    )
+    disguised = _document(SCHEMA_VERSION_AIG_NATIVE_V2, "v2_fixture_set", legacy_payload["body"])
     with pytest.raises(ProtocolContractError, match="Claim/Cut field"):
         read_v2_fixture_set(disguised)
 
@@ -479,9 +469,7 @@ def test_v2_fork_grounding_is_limited_to_blocks_in_the_base_revision(
         )
 
     collided = copy.deepcopy(proposal["body"])
-    collided["branch_steps"] = [
-        {"step_kind": "imagined_node", "imagined_node_id": "blk-action"}
-    ]
+    collided["branch_steps"] = [{"step_kind": "imagined_node", "imagined_node_id": "blk-action"}]
     with pytest.raises(ProtocolContractError, match="factual Block"):
         read_fork_proposal(
             _document(SCHEMA_VERSION_AIG_NATIVE_V2, "fork_proposal", collided),
@@ -583,9 +571,7 @@ def test_only_reader_can_author_fork_proposal(v2_payload: dict[str, Any], role: 
 
 
 @pytest.mark.parametrize("role", ["builder", "critic", "refiner"])
-def test_only_reader_can_author_outcome_assessment(
-    v2_payload: dict[str, Any], role: str
-) -> None:
+def test_only_reader_can_author_outcome_assessment(v2_payload: dict[str, Any], role: str) -> None:
     body = copy.deepcopy(v2_payload["body"]["documents"]["task_outcome_assessment"]["body"])
     body["author_role"] = role
     with pytest.raises(ProtocolContractError, match="author_role must be reader"):
@@ -652,9 +638,7 @@ def test_branch_evaluation_rejects_unknown_status(v2_payload: dict[str, Any]) ->
     body = copy.deepcopy(v2_payload["body"]["documents"]["branch_evaluation"]["body"])
     body["status"] = "deleted"
     with pytest.raises(ProtocolContractError, match="status"):
-        read_branch_evaluation(
-            _document(SCHEMA_VERSION_AIG_NATIVE_V2, "branch_evaluation", body)
-        )
+        read_branch_evaluation(_document(SCHEMA_VERSION_AIG_NATIVE_V2, "branch_evaluation", body))
 
 
 def test_first_action_alignment_records_submitter_observation() -> None:
@@ -792,9 +776,7 @@ def test_guidance_target_role_rejects_block_and_construction_roles(
     body = copy.deepcopy(v2_payload["body"]["documents"]["guidance_document"]["body"])
     body["target_role"] = role
     with pytest.raises(ProtocolContractError, match="target_role"):
-        read_guidance_document(
-            _document(SCHEMA_VERSION_AIG_NATIVE_V2, "guidance_document", body)
-        )
+        read_guidance_document(_document(SCHEMA_VERSION_AIG_NATIVE_V2, "guidance_document", body))
 
 
 def test_v2_fixture_set_rejects_unresolved_branch_refs(v2_payload: dict[str, Any]) -> None:
@@ -828,9 +810,7 @@ def test_replay_eligibility_rejects_unknown_value(v2_payload: dict[str, Any]) ->
     body = copy.deepcopy(v2_payload["body"]["documents"]["replay_eligibility"]["body"])
     body["eligibility"] = "maybe"
     with pytest.raises(ProtocolContractError, match="eligibility"):
-        read_replay_eligibility(
-            _document(SCHEMA_VERSION_AIG_NATIVE_V2, "replay_eligibility", body)
-        )
+        read_replay_eligibility(_document(SCHEMA_VERSION_AIG_NATIVE_V2, "replay_eligibility", body))
 
 
 def test_real_revision_catalog_excludes_claims_and_accepts_its_blocks() -> None:
@@ -1158,14 +1138,17 @@ def test_strategy_pattern_fixtures_are_outside_the_fork_set_and_fail_closed() ->
     assert "semantic_summary" not in pattern_payload["body"]
     assert pattern == read_strategy_pattern(strategy_pattern_document(proposal))
     reversed_conditions = list(reversed(proposal_payload["body"]["applicability_conditions"]))
-    assert strategy_pattern_id(
-        intervention_type=proposal.intervention_type,
-        target_boundary=proposal.target_boundary,
-        mechanism=proposal.mechanism,
-        expected_metric=proposal.expected_metric,
-        capability=proposal.capability,
-        applicability_conditions=reversed_conditions,
-    ) == pattern.pattern_id
+    assert (
+        strategy_pattern_id(
+            intervention_type=proposal.intervention_type,
+            target_boundary=proposal.target_boundary,
+            mechanism=proposal.mechanism,
+            expected_metric=proposal.expected_metric,
+            capability=proposal.capability,
+            applicability_conditions=reversed_conditions,
+        )
+        == pattern.pattern_id
+    )
 
     v2_documents = _load("v2_fixture_set.json")["body"]["documents"]
     assert "strategy_pattern" not in v2_documents
@@ -1391,11 +1374,14 @@ def test_guidance_approval_fixtures_are_outside_the_fork_set_and_fail_closed() -
         )
     )
     assert approval == read_guidance_approval(approval_payload)
-    assert guidance_publication_document(
-        approval,
-        publisher_labels=("user:carol",),
-        published_at="2026-10-10T00:00:03.000Z",
-    ) == publication_payload
+    assert (
+        guidance_publication_document(
+            approval,
+            publisher_labels=("user:carol",),
+            published_at="2026-10-10T00:00:03.000Z",
+        )
+        == publication_payload
+    )
     assert guidance_rejection_document(proposal.content_hash) == rejection_payload
     with pytest.raises(ProtocolContractError, match="object_kind"):
         read_protocol_document(
@@ -1423,7 +1409,9 @@ def test_guidance_approval_fixtures_are_outside_the_fork_set_and_fail_closed() -
         read_guidance_approval(
             _document(SCHEMA_VERSION_AIG_NATIVE_V2, "guidance_approval", success)
         )
-    legacy_guidance = copy.deepcopy(_load("v2_fixture_set.json")["body"]["documents"]["guidance_document"]["body"])
+    legacy_guidance = copy.deepcopy(
+        _load("v2_fixture_set.json")["body"]["documents"]["guidance_document"]["body"]
+    )
     legacy_guidance["selected_agent_id"] = "agent-a"
     with pytest.raises(ProtocolContractError, match="unexpected field"):
         read_guidance_document(
@@ -1513,7 +1501,9 @@ def test_remediation_dispatch_fixtures_are_outside_the_fork_set_and_fail_closed(
         OBJECT_KIND_REMEDIATION_DISPATCH_CONFIRMATION_IDENTITY,
     ):
         with pytest.raises(ProtocolContractError, match="object_kind"):
-            read_protocol_document(_document(SCHEMA_VERSION_AIG_NATIVE_V2, kind, {"request_id": "x"}))
+            read_protocol_document(
+                _document(SCHEMA_VERSION_AIG_NATIVE_V2, kind, {"request_id": "x"})
+            )
 
 
 def _coverage(blocks: tuple[InfluenceBlock, ...]) -> CoverageManifest:

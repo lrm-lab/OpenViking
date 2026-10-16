@@ -225,8 +225,12 @@ class StatusEvent:
                 f"status must be one of {sorted(BRIDGE_STATUSES)}, got {self.status!r}"
             )
         object.__setattr__(self, "at", _require_str(self.at, "status_event.at"))
-        object.__setattr__(self, "signal", _require_optional_str(self.signal, "status_event.signal"))
-        object.__setattr__(self, "detail", _require_optional_str(self.detail, "status_event.detail"))
+        object.__setattr__(
+            self, "signal", _require_optional_str(self.signal, "status_event.signal")
+        )
+        object.__setattr__(
+            self, "detail", _require_optional_str(self.detail, "status_event.detail")
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -305,7 +309,9 @@ def _evidence_refs_from(value: Any) -> tuple[NodeRef, ...]:
     refs: list[NodeRef] = []
     for index, item in enumerate(value):
         refs.append(
-            item if isinstance(item, NodeRef) else validate_node_ref(item, f"evidence_refs[{index}]")
+            item
+            if isinstance(item, NodeRef)
+            else validate_node_ref(item, f"evidence_refs[{index}]")
         )
     return tuple(refs)
 
@@ -367,9 +373,7 @@ class BridgeRecord:
             raise ValueError("counter_example_check must be a dict, str, or None")
         if isinstance(check, dict):
             object.__setattr__(self, "counter_example_check", dict(check))
-        object.__setattr__(
-            self, "security_labels", _security_labels_from(self.security_labels)
-        )
+        object.__setattr__(self, "security_labels", _security_labels_from(self.security_labels))
 
     @property
     def status(self) -> BridgeStatus:
@@ -508,9 +512,7 @@ def check_path_budget(
     ``PATH_MAX_ENTITIES``. Duplicate nodes and edges are always violations.
     Endpoint applicability is the next stage; use ``evaluate_path``.
     """
-    hop_limit = _tighten_limit(
-        max_hypothesis_hops, PATH_MAX_HYPOTHESIS_HOPS, "max_hypothesis_hops"
-    )
+    hop_limit = _tighten_limit(max_hypothesis_hops, PATH_MAX_HYPOTHESIS_HOPS, "max_hypothesis_hops")
     entity_limit = _tighten_limit(max_entities, PATH_MAX_ENTITIES, "max_entities")
     if not isinstance(entity_sequence, Sequence) or isinstance(entity_sequence, (str, bytes)):
         raise ValueError("entity_sequence must be a sequence")
@@ -841,9 +843,7 @@ def evaluate_paths(
             max_hypothesis_hops=max_hypothesis_hops,
             max_entities=max_entities,
         )
-        unchecked_path = (
-            assessment.endpoint_applicability == ENDPOINT_APPLICABILITY_UNCHECKED
-        )
+        unchecked_path = assessment.endpoint_applicability == ENDPOINT_APPLICABILITY_UNCHECKED
         if assessment.pruned and not unchecked_path:
             pruned.append(assessment)
         elif unchecked_path:
@@ -856,9 +856,7 @@ def evaluate_paths(
     return PathEvaluationBatch(
         evaluation_order=PATH_EVALUATION_ORDER,
         endpoint_applicability=(
-            ENDPOINT_APPLICABILITY_UNCHECKED
-            if endpoint_applicability is None
-            else "checked"
+            ENDPOINT_APPLICABILITY_UNCHECKED if endpoint_applicability is None else "checked"
         ),
         retained=tuple(retained),
         pruned=tuple(pruned),
@@ -970,9 +968,7 @@ class CausalBridgeStore:
 
     def _require_causal_write(self) -> None:
         if not is_causal_mode_enabled(self._config):
-            raise PermissionError(
-                "causal bridge writes require skill_trajectory_mode=causal"
-            )
+            raise PermissionError("causal bridge writes require skill_trajectory_mode=causal")
 
     def _load(self) -> None:
         skipped = 0
@@ -987,9 +983,7 @@ class CausalBridgeStore:
                 try:
                     event = json.loads(raw)
                     if not isinstance(event, dict):
-                        raise TypeError(
-                            f"bridge event at line {line_number} must be an object"
-                        )
+                        raise TypeError(f"bridge event at line {line_number} must be an object")
                     self._apply_event(event)
                 except (json.JSONDecodeError, TypeError, KeyError, ValueError) as exc:
                     skipped += 1
@@ -1024,9 +1018,7 @@ class CausalBridgeStore:
         if judgment.judgment_id in self._judgments:
             return False
         self._judgments[judgment.judgment_id] = judgment
-        self._judgments_by_bridge.setdefault(judgment.bridge_id, []).append(
-            judgment.judgment_id
-        )
+        self._judgments_by_bridge.setdefault(judgment.bridge_id, []).append(judgment.judgment_id)
         self._run_counts[judgment.run_id] = self._run_counts.get(judgment.run_id, 0) + 1
         return True
 
@@ -1036,8 +1028,7 @@ class CausalBridgeStore:
         if not isinstance(raw_bridges, list) or not raw_bridges:
             raise ValueError("judgment_commit requires a non-empty bridges list")
         bridges = [
-            BridgeRecord.from_dict(item if isinstance(item, dict) else {})
-            for item in raw_bridges
+            BridgeRecord.from_dict(item if isinstance(item, dict) else {}) for item in raw_bridges
         ]
         if not any(bridge.bridge_id == judgment.bridge_id for bridge in bridges):
             raise ValueError("judgment_commit bridges do not include judgment.bridge_id")
@@ -1106,9 +1097,7 @@ class CausalBridgeStore:
             kept = bridge.bridge_id in keep_ids
             traversable = _is_traversable_status(bridge.status)
             if traversable and not kept:
-                revised = _append_status(
-                    bridge, "inactive", at=at, detail="per_node_active_cap"
-                )
+                revised = _append_status(bridge, "inactive", at=at, detail="per_node_active_cap")
             elif not traversable and kept:
                 revised = _append_status(
                     bridge,
@@ -1160,7 +1149,11 @@ class CausalBridgeStore:
             else _require_number(direct_relevance, "direct_relevance")
         )
         when = _require_str(timestamp, "timestamp") if timestamp is not None else self._now_iso()
-        jid = _require_str(judgment_id, "judgment_id") if judgment_id is not None else str(uuid.uuid4())
+        jid = (
+            _require_str(judgment_id, "judgment_id")
+            if judgment_id is not None
+            else str(uuid.uuid4())
+        )
         labels = None if security_labels is None else _security_labels_from(security_labels)
         key = canonical_bridge_key(source, target, relation)
 
@@ -1207,9 +1200,7 @@ class CausalBridgeStore:
             else:
                 current = self._bridges[bridge_id]
                 if current.kind != "hypothesis":
-                    raise ValueError(
-                        "cannot record a hypothesis judgment on an evidence bridge"
-                    )
+                    raise ValueError("cannot record a hypothesis judgment on an evidence bridge")
                 bridge = current
                 if labels is not None:
                     payload = bridge.to_dict()
@@ -1427,9 +1418,7 @@ class CausalBridgeStore:
             kept,
             assessments,
             applicability=(
-                ENDPOINT_APPLICABILITY_UNCHECKED
-                if endpoint_applicability is None
-                else "checked"
+                ENDPOINT_APPLICABILITY_UNCHECKED if endpoint_applicability is None else "checked"
             ),
             pruned=pruned,
         )
@@ -1462,9 +1451,7 @@ class CausalBridgeStore:
         """
         principal = _principal_labels(principal_labels)
         bridges = [
-            bridge
-            for bridge in self._bridges.values()
-            if _bridge_visible(bridge, principal)
+            bridge for bridge in self._bridges.values() if _bridge_visible(bridge, principal)
         ]
         bridges.sort(key=lambda bridge: (bridge.created_at, bridge.bridge_id))
         return bridges

@@ -98,8 +98,8 @@ from openviking.session.influence_view import (  # noqa: E402
     CONSTRUCTION_MODE_ADAPTIVE_AGENTIC,
     CONSTRUCTION_MODE_NATIVE_SINGLE_PASS,
     PURPOSE_POST_RUN_INDEX,
-    AORange,
     AigNativeEdge,
+    AORange,
     CoverageManifest,
     InfluenceBlock,
     SegmentRef,
@@ -140,8 +140,7 @@ QUESTION_PREFIX = "evoagentbench"
 TOOL_REASON = "one evoagentbench tool event"
 TEMP_PREFIX = "evo-adr-"
 DEFAULT_DATA_DIR = Path(
-    "/data/zhoujie/root-disk/home/zhoujie22/river2_0/evol_bench/"
-    "EvoAgentBench/data"
+    "/data/zhoujie/root-disk/home/zhoujie22/river2_0/evol_bench/EvoAgentBench/data"
 )
 DOMAIN_ORDER = ("code", "ir", "knowledge-work")
 DOMAIN_FILES = {
@@ -593,9 +592,7 @@ def _spec_from_row(row: dict[str, Any], domain_key: str) -> TaskSpec:
             "turn_count": len(prompts),
         }
     )
-    episode_key = _canonical(
-        {"domain": domain, "episode_id": episode_id, "split": split}
-    )
+    episode_key = _canonical({"domain": domain, "episode_id": episode_id, "split": split})
     return TaskSpec(
         label=f"{domain_key} {_report_text(episode_id)}",
         group=domain_key,
@@ -822,7 +819,7 @@ def _row_success(spec: TaskSpec, root: Path) -> dict[str, Any]:
     _check(result.action == ACTION_RETAINED, f"action={result.action}")
     _check(result.fork_node_id is None, "success created a fork")
     _check(result.child_run_id is None, "success created a child run")
-    _check(counts == {key: 0 for key in counts}, f"success objects={counts}")
+    _check(counts == dict.fromkeys(counts, 0), f"success objects={counts}")
     frozen = gate.read_frozen_view(
         task_id=spec.task_id,
         session_id=spec.session_id,
@@ -1151,7 +1148,7 @@ def _tool_script(spec: TaskSpec) -> tuple[list[tuple[str, dict[str, Any]]], str]
         )
     )
     defect_id = ids[-2]
-    for source, target in zip(ids, ids[1:]):
+    for source, target in zip(ids, ids[1:], strict=False):
         if target == "end-1":
             effect = "fxstop"
         elif target == defect_id:
@@ -1542,7 +1539,7 @@ def _row_uncertain(spec: TaskSpec, root: Path) -> dict[str, Any]:
         result.fork_node_id is None and result.child_run_id is None,
         "uncertain created an object",
     )
-    _check(counts == {key: 0 for key in counts}, f"uncertain objects={counts}")
+    _check(counts == dict.fromkeys(counts, 0), f"uncertain objects={counts}")
     _check(ACTION_ADVICE in kinds, "diagnostic advice was not audited")
     _check(ACTION_DISPATCHED not in kinds, "uncertain dispatched")
     return {
@@ -1592,11 +1589,9 @@ def _row_acl(spec: TaskSpec, root: Path) -> dict[str, Any]:
     ]
     _check(_acl_class(first), f"terminal={first}")
     _check(_acl_class(second), f"repeat terminal={second}")
-    _check(before == {key: 0 for key in before}, f"acl objects={before}")
+    _check(before == dict.fromkeys(before, 0), f"acl objects={before}")
     _check(after == before, "repeat acl deliver created an object")
-    audited = any(
-        _acl_class(str(row.get("reason") or row.get("event_kind"))) for row in refused
-    )
+    audited = any(_acl_class(str(row.get("reason") or row.get("event_kind"))) for row in refused)
     _check(audited or _acl_class(first), "acl audit missing")
     return {"objects": before, "terminal": first}
 
@@ -1696,9 +1691,7 @@ def _run_task(spec: TaskSpec) -> dict[str, Any]:
             "uncertain_advice_only": _guard(
                 f"{spec.label} uncertain", lambda: _row_uncertain(spec, base / "uncertain")
             ),
-            "acl_fail_closed": _guard(
-                f"{spec.label} acl", lambda: _row_acl(spec, base / "acl")
-            ),
+            "acl_fail_closed": _guard(f"{spec.label} acl", lambda: _row_acl(spec, base / "acl")),
             "legacy_default_deny_with_audit": _guard(
                 f"{spec.label} legacy", lambda: _row_legacy(spec)
             ),
@@ -1727,8 +1720,12 @@ def _assert_public(value: Any, path: str = "$") -> None:
             _assert_public(item, f"{path}[{index}]")
         return
     if isinstance(value, str):
-        if _UUID.search(value) or value.startswith("/") or any(
-            token in value for token in ("/tmp/", "/data/", "/home/", "root-disk", "worktrees")
+        if (
+            _UUID.search(value)
+            or value.startswith("/")
+            or any(
+                token in value for token in ("/tmp/", "/data/", "/home/", "root-disk", "worktrees")
+            )
         ):
             raise SystemExit(f"report leaked a path or uuid at {path}")
 

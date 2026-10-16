@@ -205,9 +205,7 @@ def read_coordinator_diagnose_request(payload: Mapping[str, Any]) -> Coordinator
     """Parse a diagnose request. Events and other kinds are refused."""
     parsed = read_coordinator_document(payload)
     if not isinstance(parsed, CoordinatorDiagnoseRequest):
-        raise ProtocolContractError(
-            f"object_kind must be {KIND_DIAGNOSE_REQUEST!r}"
-        )
+        raise ProtocolContractError(f"object_kind must be {KIND_DIAGNOSE_REQUEST!r}")
     return parsed
 
 
@@ -279,7 +277,7 @@ def _collect_labels(value: Any) -> list[str]:
         raise ProtocolContractError(exc.code) from exc
     if len(value) != len(labels):
         raise ProtocolContractError("principal_labels must be unique")
-    return [item for item in value]
+    return list(value)
 
 
 def _label_list(value: Any) -> list[str]:

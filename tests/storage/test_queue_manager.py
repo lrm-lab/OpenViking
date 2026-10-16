@@ -19,6 +19,7 @@ from openviking.storage.queuefs.named_queue import DequeueHandlerBase, NamedQueu
 from openviking.storage.queuefs.process_result import ProcessResult
 from openviking.storage.queuefs.queue_manager import QueueManager
 from openviking.storage.queuefs.queue_middleware import QueueMiddleware
+from openviking.utils.async_client_cache import LoopScopedAsyncClientCache
 
 
 def test_queuefs_package_imports_in_a_clean_process(tmp_path) -> None:
@@ -40,12 +41,40 @@ def test_queue_concurrency_uses_separate_configured_values() -> None:
         agfs=object(),
         max_concurrent_external_parse=9,
         max_concurrent_add_resource=7,
+        max_concurrent_reindex=6,
         max_concurrent_session_commit=5,
     )
 
     assert manager._max_concurrent_for_queue(manager.EXTERNAL_PARSE) == 9
     assert manager._max_concurrent_for_queue(manager.ADD_RESOURCE) == 7
+    assert manager._max_concurrent_for_queue(manager.REINDEX) == 6
     assert manager._max_concurrent_for_queue(manager.SESSION_COMMIT) == 5
+
+
+def test_queue_worker_closes_loop_scoped_clients_before_closing_its_loop() -> None:
+    cache = LoopScopedAsyncClientCache()
+    stop_event = threading.Event()
+    loop_closed_at_close = []
+
+    class Client:
+        async def aclose(self):
+            loop_closed_at_close.append(asyncio.get_running_loop().is_closed())
+
+    class Queue:
+        name = "Test"
+
+        async def size(self):
+            cache.get(Client)
+            stop_event.set()
+            return 0
+
+        def has_dequeue_handler(self):
+            return False
+
+    QueueManager(agfs=object())._queue_worker_loop(Queue(), stop_event)
+
+    assert loop_closed_at_close == [False]
+    assert not cache.has_clients()
 
 
 @pytest.mark.asyncio
@@ -143,9 +172,7 @@ async def test_skill_shutdown_releases_lock_after_embedding_worker_exits(
         object(), max_concurrent_semantic=concurrency, max_concurrent_embedding=concurrency
     )
     manager._poll_interval = 0.001
-    manager.set_vlm_resolver(
-        SimpleNamespace(get_vlm=AsyncMock(return_value=SimpleNamespace()))
-    )
+    manager.set_vlm_resolver(SimpleNamespace(get_vlm=AsyncMock(return_value=SimpleNamespace())))
     manager.setup_standard_queues(object(), start=False)
     semantic = manager._queues[manager.SEMANTIC]._dequeue_handler
     manager._queues = {

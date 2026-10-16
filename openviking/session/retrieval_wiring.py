@@ -122,9 +122,7 @@ def retrieve_projected(
     if not isinstance(service, RoleRetrievalService):
         raise TypeError("service must be the caller's RoleRetrievalService")
 
-    def discover(
-        intent: str | None, _pattern: Mapping[str, str] | None
-    ) -> list[dict[str, Any]]:
+    def discover(intent: str | None, _pattern: Mapping[str, str] | None) -> list[dict[str, Any]]:
         result = facade.retrieve(intent if intent else "", principal_labels)
         return [public_card_from_retrieval(card) for card in result.cards]
 

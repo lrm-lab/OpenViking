@@ -254,7 +254,9 @@ def test_one_iteration_reaches_stop_and_replay_is_idempotent(tmp_path: Path) -> 
             "brief_envelope_id": first.brief_envelope_id,
         }
     )
-    committed = next(event for event in orchestrator.events if event.event == EVENT_COMMIT_REVISIONS)
+    committed = next(
+        event for event in orchestrator.events if event.event == EVENT_COMMIT_REVISIONS
+    )
     assert committed.evidence == {"revision_ids": list(first.revision_ids)}
     assert len(first.revision_ids) >= 1
 
@@ -284,13 +286,7 @@ def test_one_iteration_reaches_stop_and_replay_is_idempotent(tmp_path: Path) -> 
     assert loaded is not None
     assert len(loaded["revisions"]) == 1
     assert loaded["latest_revision"]["status"] == ForkStatus.PROVISIONAL
-    rev_dir = (
-        tmp_path
-        / "causal-experiences"
-        / "forks"
-        / first.fork_node_ids[0]
-        / "revisions"
-    )
+    rev_dir = tmp_path / "causal-experiences" / "forks" / first.fork_node_ids[0] / "revisions"
     assert len(list(rev_dir.glob("*.json"))) == 1
     assert len(list((tmp_path / "causal-experiences" / ".idempotency").glob("*.json"))) == 1
     index_lines = (tmp_path / "causal-experiences" / "index.jsonl").read_text().strip().splitlines()

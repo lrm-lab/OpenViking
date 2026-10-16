@@ -47,7 +47,9 @@ from tests.test_failure_gate import (
 )
 
 FIXTURE = (
-    Path(__file__).resolve().parents[1] / "fixtures" / "adr0043"
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
+    / "adr0043"
     / "coordinator_diagnose_request.json"
 )
 _GOLDEN_SESSION = "sess-diagnose"
@@ -133,9 +135,7 @@ def _client(session: Any, ctx: RequestContext, monkeypatch: pytest.MonkeyPatch) 
             status_code=ERROR_CODE_TO_HTTP_STATUS.get(exc.code, 500),
             content=Response(
                 status="error",
-                error=ErrorInfo(
-                    code=exc.code, message=exc.message, details=exc.details
-                ),
+                error=ErrorInfo(code=exc.code, message=exc.message, details=exc.details),
             ).model_dump(),
         )
 
@@ -175,9 +175,7 @@ def test_golden_document_returns_a_hashed_event(
     assert parsed.trigger == "memory_diagnose"
 
 
-def test_replay_returns_the_same_event(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_replay_returns_the_same_event(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_native(tmp_path, _GOLDEN_SESSION, _GOLDEN_TASK)
     session = _session(
         tmp_path,
@@ -243,14 +241,10 @@ def test_intent_and_illegal_id_are_4xx_and_do_not_diagnose(
     client = _client(session, _ctx("carol"), monkeypatch)
     retrieve_body = dict(_golden()["body"])
     retrieve_body["intent"] = "retrieve"
-    retrieve = protocol_envelope(
-        COORDINATOR_SCHEMA_VERSION, KIND_DIAGNOSE_REQUEST, retrieve_body
-    )
+    retrieve = protocol_envelope(COORDINATOR_SCHEMA_VERSION, KIND_DIAGNOSE_REQUEST, retrieve_body)
     illegal_body = dict(_golden()["body"])
     illegal_body["session_id"] = "sess diagnose"
-    illegal = protocol_envelope(
-        COORDINATOR_SCHEMA_VERSION, KIND_DIAGNOSE_REQUEST, illegal_body
-    )
+    illegal = protocol_envelope(COORDINATOR_SCHEMA_VERSION, KIND_DIAGNOSE_REQUEST, illegal_body)
     for payload, code in (
         (retrieve, "intent_must_be_diagnose"),
         (illegal, "invalid_id"),
@@ -278,9 +272,7 @@ def test_missing_coordinator_label_is_denied(
     assert calls == []
 
 
-def test_invisible_session_acl_is_denied(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_invisible_session_acl_is_denied(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[object] = []
     monkeypatch.setattr(
         coordinator_module,

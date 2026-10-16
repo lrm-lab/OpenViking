@@ -9,7 +9,7 @@ import asyncio
 import inspect
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 from uuid import uuid4
@@ -21,12 +21,11 @@ from openviking.message import Message, Part
 from openviking.message.part import TextPart, ToolPart
 from openviking.server.config import ToolOutputExternalizationConfig
 from openviking.server.identity import RequestContext, Role
+from openviking.session import working_memory as wm
 from openviking.session.ao_ledger_recorder import (
     maybe_record_session_tool_exchanges,
     maybe_write_session_archive_attribution,
 )
-from openviking.session.trajectory_index_hook import maybe_index_session_trajectory
-from openviking.session import working_memory as wm
 from openviking.session.archive_store import (
     ArchiveStore,
     _ArchiveMessagesCorruptError,
@@ -61,6 +60,7 @@ from openviking.session.retention import (
     plan_retention,
 )
 from openviking.session.tool_output_externalizer import ToolOutputExternalizer
+from openviking.session.trajectory_index_hook import maybe_index_session_trajectory
 from openviking.session.working_memory import (
     WM_CREATE_WITH_CHECKPOINTS_TOOL,
     WM_SEVEN_SECTIONS,
@@ -150,7 +150,7 @@ def _apply_agent_evolution_setting(
         self_enabled=policy.self_enabled,
         peer_enabled=policy.peer_enabled,
         memory_types=effective_types,
-        working_memory_enabled=policy.working_memory_enabled,
+        enable_working_memory=policy.enable_working_memory,
     )
 
 
@@ -634,15 +634,23 @@ class Session:
 
     async def ensure_exists(self) -> None:
         """Materialize session root and messages file if missing."""
-        if await self.exists():
-            return
-        await self._viking_fs.mkdir(self._session_uri, exist_ok=True, ctx=self.ctx)
-        await self._viking_fs.write_file(
-            f"{self._session_uri}/messages.jsonl",
-            "",
-            ctx=self.ctx,
+        # Initial state must not overwrite a concurrent append or commit.
+        session_path = self._viking_fs._uri_to_path(self._session_uri, ctx=self.ctx)
+        lease = await self._viking_fs._async_agfs.pathlock_acquire_exact(
+            session_path, timeout_secs=_SESSION_PHASE1_LOCK_TIMEOUT_SECONDS
         )
-        await self._save_meta()
+        try:
+            if await self.exists():
+                return
+            await self._viking_fs.mkdir(self._session_uri, exist_ok=True, ctx=self.ctx)
+            await self._viking_fs.write_file(
+                f"{self._session_uri}/messages.jsonl",
+                "",
+                ctx=self.ctx,
+            )
+            await self._save_meta()
+        finally:
+            await self._viking_fs._async_agfs.pathlock_release(lease)
 
     async def _save_meta(self, lease_ref: Optional[Any] = None) -> None:
         """Persist .meta.json to storage using an optional held PathLock lease."""
@@ -1235,6 +1243,7 @@ class Session:
         keep_recent_count: int = 0,
         *,
         memory_policy: Optional[Dict[str, Any]] = None,
+        enable_working_memory: Optional[bool] = None,
         retention_mode: Optional[str] = None,
         keep_recent_turn_count: Optional[int] = None,
         retained_message_token_budget: Optional[int] = None,
@@ -1245,6 +1254,7 @@ class Session:
             self.commit_async(
                 keep_recent_count=keep_recent_count,
                 memory_policy=memory_policy,
+                enable_working_memory=enable_working_memory,
                 retention_mode=retention_mode,
                 keep_recent_turn_count=keep_recent_turn_count,
                 retained_message_token_budget=retained_message_token_budget,
@@ -1258,6 +1268,7 @@ class Session:
         keep_recent_count: int = 0,
         *,
         memory_policy: Optional[Dict[str, Any]] = None,
+        enable_working_memory: Optional[bool] = None,
         retention_mode: Optional[str] = None,
         keep_recent_turn_count: Optional[int] = None,
         retained_message_token_budget: Optional[int] = None,
@@ -1309,7 +1320,9 @@ class Session:
             from openviking.session.outcome_contract import external_evidence_from_session
 
             external_evidence_from_session(evaluator_results=outcome_evaluator_results)
-        if aig_question is not None and (not isinstance(aig_question, str) or not aig_question.strip()):
+        if aig_question is not None and (
+            not isinstance(aig_question, str) or not aig_question.strip()
+        ):
             raise ValueError("aig_question must be a non-empty string")
         if reset_context and (keep_recent_count != 0 or retention_mode is not None):
             raise ValueError("reset_context requires keep_recent_count=0 and no retention_mode")
@@ -1339,6 +1352,8 @@ class Session:
         effective_min_tail = max(0, int(1 if min_raw_tail_steps is None else min_raw_tail_steps))
         if turn_mode and effective_token_budget <= 0:
             raise ValueError("retained_message_token_budget must be greater than 0")
+        if enable_working_memory is not None and not isinstance(enable_working_memory, bool):
+            raise ValueError("enable_working_memory must be a boolean or null")
         in_memory_default_memory_policy = self._meta.memory_policy
         agent_evolution_enabled = self._agent_evolution_enabled
         if self._agent_evolution_enabled_provider is not None:
@@ -1355,6 +1370,10 @@ class Session:
                 effective_policy,
                 agent_evolution_enabled=agent_evolution_enabled,
             )
+            if enable_working_memory is not None:
+                effective_policy = replace(
+                    effective_policy, enable_working_memory=enable_working_memory
+                )
             effective_memory_policy = effective_policy.to_dict()
             effective_memory_types = sorted(_effective_memory_types(effective_policy))
             agent_memory_skip_reason = _agent_memory_skip_reason(
@@ -1423,6 +1442,10 @@ class Session:
                     effective_policy,
                     agent_evolution_enabled=agent_evolution_enabled,
                 )
+                if enable_working_memory is not None:
+                    effective_policy = replace(
+                        effective_policy, enable_working_memory=enable_working_memory
+                    )
                 effective_memory_policy = effective_policy.to_dict()
                 effective_memory_types = sorted(_effective_memory_types(effective_policy))
                 agent_memory_skip_reason = _agent_memory_skip_reason(
@@ -1462,6 +1485,7 @@ class Session:
                     "task_id": None,
                     "archive_uri": None,
                     "archived": False,
+                    "effective_enable_working_memory": effective_policy.enable_working_memory,
                     "reason": "no_messages",
                     "trace_id": trace_id,
                     **({"reset_context": True} if reset_context else {}),
@@ -1515,6 +1539,7 @@ class Session:
                     "task_id": None,
                     "archive_uri": None,
                     "archived": False,
+                    "effective_enable_working_memory": effective_policy.enable_working_memory,
                     "reason": "all_within_keep_window",
                     "trace_id": trace_id,
                     "estimated_active_tokens": (
@@ -1665,6 +1690,7 @@ class Session:
             "task_id": task_id,
             "archive_uri": archive_uri,
             "archived": True,
+            "effective_enable_working_memory": effective_policy.enable_working_memory,
             "trace_id": trace_id,
             **({"reset_context": True} if reset_context else {}),
             "estimated_active_tokens": (
@@ -1681,7 +1707,10 @@ class Session:
         """
         # ponytail: reuse archive ordering; no second session identity or context store.
         newest = f"{self._session_uri}/history/archive_{self._compression.compression_index:03d}"
-        if self._compression.compression_index > 0 and await self._archives.is_context_reset_archive(newest):
+        if (
+            self._compression.compression_index > 0
+            and await self._archives.is_context_reset_archive(newest)
+        ):
             return  # Context is already empty; no second boundary needed.
         self._compression.compression_index += 1
         archive_uri = (
@@ -1690,7 +1719,7 @@ class Session:
         try:
             await self._viking_fs.write_file(
                 f"{archive_uri}/.done",
-                json.dumps({"context_reset": True, "working_memory_enabled": False}),
+                json.dumps({"context_reset": True, "enable_working_memory": False}),
                 ctx=self.ctx,
             )
         except Exception as exc:
@@ -1958,9 +1987,7 @@ class Session:
             return {"contexts": contexts, "session_skills": skills}
         return contexts
 
-    def _run_post_extraction_causal_seam(
-        self, task_id: str, archive_uri: str = ""
-    ) -> None:
+    def _run_post_extraction_causal_seam(self, task_id: str, archive_uri: str = "") -> None:
         """Phase 2 trajectory index, failure gate, and optional diagnosis.
 
         No provider and no provider factory means the index hook is not
@@ -2059,14 +2086,20 @@ class Session:
                     ov_config = get_openviking_config()
                     effective_policy = MemoryPolicy.from_dict(memory_policy)
                     extraction_batch_limits = resolve_extraction_batch_limits(auto_commit_policy)
-                    working_memory_enabled = effective_policy.working_memory_enabled
+                    enable_working_memory = effective_policy.enable_working_memory
+                    logger.info(
+                        "Session commit task=%s archive=%s enable_working_memory=%s",
+                        task_id,
+                        archive_uri,
+                        enable_working_memory,
+                    )
                     checkpoint_requests = (
                         await self._checkpoints.collect_requests_for_phase2(
                             archive_uri,
                             covered_failed_archives,
                             messages,
                         )
-                        if working_memory_enabled
+                        if enable_working_memory
                         else []
                     )
                     latest_archive_overview = (
@@ -2074,7 +2107,7 @@ class Session:
                             exclude_archive_uri=archive_uri,
                             before_archive_index=archive_index,
                         )
-                        if working_memory_enabled
+                        if enable_working_memory
                         else ""
                     )
                     extraction_messages = await self._tool_outputs.hydrate_for_extraction(messages)
@@ -2087,7 +2120,7 @@ class Session:
                     )
 
                     async def _run_archive_summary() -> None:
-                        if not working_memory_enabled:
+                        if not enable_working_memory:
                             logger.info(
                                 "Working Memory summary skipped "
                                 "(memory_policy.working_memory.enabled=false)"
@@ -2204,7 +2237,9 @@ class Session:
                             archive_uri,
                             {
                                 "completed_memory_steps": (
-                                    self._archives.serialize_completed_memory_steps(completed_memory_steps)
+                                    self._archives.serialize_completed_memory_steps(
+                                        completed_memory_steps
+                                    )
                                 )
                             },
                         )
@@ -2241,7 +2276,7 @@ class Session:
                         and bool(long_term_messages)
                     )
                     post_commit_extraction_ran = bool(
-                        working_memory_enabled or (self._session_compressor and long_term_has_work)
+                        enable_working_memory or (self._session_compressor and long_term_has_work)
                     )
                     if post_commit_extraction_ran:
                         logger.info(
@@ -2251,7 +2286,7 @@ class Session:
 
                         extraction_tasks: List[Any] = []
                         extraction_labels: List[str] = []
-                        if working_memory_enabled:
+                        if enable_working_memory:
                             extraction_tasks.append(_run_archive_summary())
                             extraction_labels.append("archive_summary")
 
@@ -2380,11 +2415,16 @@ class Session:
                             from openviking.session.aig_commit_wiring import run_commit_four_roles
 
                             result = await asyncio.to_thread(
-                                run_commit_four_roles, self, task_id, aig_vlm,
+                                run_commit_four_roles,
+                                self,
+                                task_id,
+                                aig_vlm,
                             )
                             logger.info(
                                 "commit four-role AIG %s for %s: %s",
-                                result.status, task_id, result.reason,
+                                result.status,
+                                task_id,
+                                result.reason,
                             )
                         except Exception:
                             logger.warning("commit four-role AIG failed", exc_info=True)
@@ -2461,7 +2501,7 @@ class Session:
                 archive_uri,
                 first_message_id,
                 last_message_id,
-                working_memory_enabled=working_memory_enabled,
+                enable_working_memory=enable_working_memory,
                 coverage_start_archive=coverage_start_archive,
                 coverage_end_archive=coverage_end_archive,
                 covered_failed_archives=covered_failed_archives,
@@ -2517,11 +2557,12 @@ class Session:
             telemetry.set_error("session.commit.phase2", "CANCELLED", "session commit cancelled")
             snapshot = telemetry.finish("cancelled")
             _publish_telemetry_summary_best_effort(snapshot)
-            await self._write_failed_marker(
-                archive_uri,
-                stage="cancelled",
-                error="session commit cancelled",
-            )
+            if tracker.is_cancellation_requested(task_id):
+                await self._write_failed_marker(
+                    archive_uri,
+                    stage="cancelled",
+                    error="session commit cancelled",
+                )
             raise
         except Exception as e:
             telemetry.set_error("session.commit.phase2", type(e).__name__, str(e))
@@ -2546,7 +2587,7 @@ class Session:
         first_message_id: str,
         last_message_id: str,
         *,
-        working_memory_enabled: Optional[bool] = None,
+        enable_working_memory: Optional[bool] = None,
         coverage_start_archive: Optional[str] = None,
         coverage_end_archive: Optional[str] = None,
         covered_failed_archives: Optional[List[str]] = None,
@@ -2560,7 +2601,7 @@ class Session:
             {
                 "starting_message_id": first_message_id,
                 "ending_message_id": last_message_id,
-                "working_memory_enabled": working_memory_enabled,
+                "enable_working_memory": enable_working_memory,
                 "coverage_start_archive": coverage_start_archive or archive_id,
                 "coverage_end_archive": coverage_end_archive or archive_id,
                 "covered_failed_archives": list(covered_failed_archives or []),
@@ -2695,10 +2736,14 @@ class Session:
                 continue
 
             overview = await self._archives.read_overview(archive["archive_uri"])
-            if not overview:
+            if not overview and archive.get("enable_working_memory") is not False:
                 break
 
-            abstract = await self._archives.read_abstract(archive["archive_uri"], overview)
+            abstract = (
+                await self._archives.read_abstract(archive["archive_uri"], overview)
+                if overview
+                else ""
+            )
             return {
                 "archive_id": archive_id,
                 "abstract": abstract,
@@ -2762,7 +2807,9 @@ class Session:
                 }
             elif await self._archives.is_context_reset_archive(terminal["archive_uri"]):
                 terminal = None
-            else:
+            elif (await self._archives.read_done(terminal["archive_uri"])).get(
+                "enable_working_memory"
+            ) is not False:
                 # A required overview that is missing or unreadable still keeps
                 # the archive terminal here; the warning is emitted by the full
                 # scan used for Phase 2 bookkeeping.
@@ -2787,7 +2834,9 @@ class Session:
                     archive["archive_uri"],
                 )
 
-        merged_messages = self._archives.stable_deduplicate_messages(archive_messages + list(self._messages))
+        merged_messages = self._archives.stable_deduplicate_messages(
+            archive_messages + list(self._messages)
+        )
         merged_messages = await self._checkpoints.insert_terminal_checkpoints(
             merged_messages,
             terminal if terminal_state == "completed" else None,
@@ -3081,58 +3130,47 @@ class Session:
                 f"branch=CREATE (prior={'legacy' if latest_archive_overview else 'none'} "
                 f"{len(latest_archive_overview or '')}B)"
             )
-            try:
-                prompt = render_prompt(
-                    "compression.ov_wm_v2",
-                    {
-                        "messages": formatted,
-                        "latest_archive_overview": latest_archive_overview or "",
-                        "checkpoint_instructions": checkpoint_instructions,
-                        "output_language": output_language,
+            prompt = render_prompt(
+                "compression.ov_wm_v2",
+                {
+                    "messages": formatted,
+                    "latest_archive_overview": latest_archive_overview or "",
+                    "checkpoint_instructions": checkpoint_instructions,
+                    "output_language": output_language,
+                },
+            )
+            if checkpoint_requests:
+                response = await vlm.get_completion_async(
+                    prompt=prompt,
+                    tools=[WM_CREATE_WITH_CHECKPOINTS_TOOL],
+                    tool_choice={
+                        "type": "function",
+                        "function": {"name": "create_working_memory"},
                     },
                 )
-                if checkpoint_requests:
-                    response = await vlm.get_completion_async(
-                        prompt=prompt,
-                        tools=[WM_CREATE_WITH_CHECKPOINTS_TOOL],
-                        tool_choice={
-                            "type": "function",
-                            "function": {"name": "create_working_memory"},
-                        },
+                if not (
+                    getattr(response, "has_tool_calls", False)
+                    and getattr(response, "tool_calls", None)
+                ):
+                    raise ValueError(
+                        "Working Memory creation returned no create_working_memory tool call"
                     )
-                    if not (
-                        getattr(response, "has_tool_calls", False)
-                        and getattr(response, "tool_calls", None)
-                    ):
-                        raise ValueError(
-                            "Working Memory creation returned no create_working_memory tool call"
-                        )
-                    args = response.tool_calls[0].arguments
-                    if isinstance(args, str):
-                        args = json.loads(args)
-                    if not isinstance(args, dict):
-                        raise ValueError("create_working_memory arguments must be an object")
-                    working_memory = args.get("working_memory")
-                    if not isinstance(working_memory, str) or not working_memory.strip():
-                        raise ValueError("create_working_memory.working_memory is empty")
-                    return _ArchiveSummaryResult(
-                        overview=working_memory,
-                        checkpoint_summaries=wm.parse_required_checkpoint_summaries(
-                            args,
-                            len(checkpoint_requests),
-                        ),
-                    )
-                return await vlm.get_completion_async(prompt)
-            except Exception as e:
-                wm.wm_debug(f"creation failed: {e}")
-                logger.warning(f"WM creation failed: {e}")
-                if checkpoint_requests:
-                    raise
-                turn_count = len([m for m in messages if is_user_query(m)])
-                return (
-                    f"# Session Summary\n\n"
-                    f"**Overview**: {turn_count} turns, {len(messages)} messages"
+                args = response.tool_calls[0].arguments
+                if isinstance(args, str):
+                    args = json.loads(args)
+                if not isinstance(args, dict):
+                    raise ValueError("create_working_memory arguments must be an object")
+                working_memory = args.get("working_memory")
+                if not isinstance(working_memory, str) or not working_memory.strip():
+                    raise ValueError("create_working_memory.working_memory is empty")
+                return _ArchiveSummaryResult(
+                    overview=working_memory,
+                    checkpoint_summaries=wm.parse_required_checkpoint_summaries(
+                        args,
+                        len(checkpoint_requests),
+                    ),
                 )
+            return await vlm.get_completion_async(prompt)
 
         # -------- Branch 2: has prior WM v2 -> tool_call incremental update --------
         wm.wm_debug(f"branch=UPDATE (prior WM={len(latest_archive_overview)}B)")

@@ -32,16 +32,27 @@ def test_retry_and_rejected_output_are_accounted_before_report(tmp_path: Path):
         calls += 1
         if calls == 1:
             raise TimeoutError("secret-shaped diagnostics must not be logged")
-        return Response({
-            "choices": [{"finish_reason": "stop", "message": {"content": "wrong output"}}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
-                      "prompt_tokens_details": {"cached_tokens": 40},
-                      "completion_tokens_details": {"reasoning_tokens": 5}},
-        })
+        return Response(
+            {
+                "choices": [{"finish_reason": "stop", "message": {"content": "wrong output"}}],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "total_tokens": 120,
+                    "prompt_tokens_details": {"cached_tokens": 40},
+                    "completion_tokens_details": {"reasoning_tokens": 5},
+                },
+            }
+        )
 
     path = tmp_path / "usage.jsonl"
-    provider = LenovoGemmaProvider(api_key="never-log-this-key", model="GLM-5.3-Flash",
-                                   urlopen=transport, sleep=lambda _: None, usage_path=path)
+    provider = LenovoGemmaProvider(
+        api_key="never-log-this-key",
+        model="GLM-5.3-Flash",
+        urlopen=transport,
+        sleep=lambda _: None,
+        usage_path=path,
+    )
     provider.bind_audit_context(role="critic", run_id="episode-a2")
     assert provider(ToolloopTurn("private prompt", (), ())).verb == "invalid_provider_result"
     report = read_usage(path)
@@ -68,8 +79,15 @@ def test_missing_usage_and_killed_request_are_not_counted_as_zero(tmp_path: Path
     request_id, started = recorder.started(model="GLM-5.3-Flash", network_attempt=0)
     # The start is visible before any response or final four-role report exists.
     assert read_usage(path)["overall"]["incomplete_http_attempts"] == 1
-    recorder.completed(request_id=request_id, started=started, model="GLM-5.3-Flash",
-                       network_attempt=0, status="ok", http_status=200, payload={})
+    recorder.completed(
+        request_id=request_id,
+        started=started,
+        model="GLM-5.3-Flash",
+        network_attempt=0,
+        status="ok",
+        http_status=200,
+        payload={},
+    )
     total = read_usage(path)["overall"]
     assert total["incomplete_http_attempts"] == 0
     assert total["completed_attempts_without_full_usage"] == 1
@@ -80,8 +98,15 @@ def test_missing_usage_and_killed_request_are_not_counted_as_zero(tmp_path: Path
 
 
 def test_usage_normalization_preserves_zero_and_does_not_double_count_reasoning():
-    usage = normalized_usage({"usage": {"input_tokens": 0, "output_tokens": 12,
-                                        "output_tokens_details": {"reasoning_tokens": 10}}})
+    usage = normalized_usage(
+        {
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 12,
+                "output_tokens_details": {"reasoning_tokens": 10},
+            }
+        }
+    )
     assert usage["input_tokens"] == 0
     assert usage["total_tokens"] == 12
     assert usage["reasoning_tokens"] == 10

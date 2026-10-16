@@ -64,7 +64,7 @@ function getToolResultsById(parts: MessagePart[]): Map<string, ToolResultPart> {
   )
 }
 
-function stripPlaygroundContextSuffix(text: string): string {
+function stripLegacyContextSuffix(text: string): string {
   return text
     .replace(/\n\n当前选中的上下文资源：\s*viking:\/\/[\s\S]*$/u, '')
     .replace(
@@ -88,15 +88,21 @@ function formatRelativeTime(iso: string, t: TFunction<'sessions'>): string {
 }
 
 // ---------------------------------------------------------------------------
-// TypingIndicator
+// StreamingIndicator
 // ---------------------------------------------------------------------------
 
-function TypingIndicator() {
+function StreamingIndicator() {
+  const { t } = useTranslation('sessions')
   return (
-    <div className="flex items-center gap-1 py-1">
-      <span className="size-1.5 rounded-full bg-muted-foreground/40 animate-bounce [animation-delay:0ms]" />
-      <span className="size-1.5 rounded-full bg-muted-foreground/40 animate-bounce [animation-delay:150ms]" />
-      <span className="size-1.5 rounded-full bg-muted-foreground/40 animate-bounce [animation-delay:300ms]" />
+    <div
+      role="status"
+      aria-label={t('chat.generating')}
+      className="flex h-5 items-center"
+    >
+      <span
+        aria-hidden="true"
+        className="size-1.5 animate-pulse rounded-full bg-muted-foreground motion-reduce:animate-none"
+      />
     </div>
   )
 }
@@ -204,7 +210,7 @@ const UserMessage = memo(function UserMessage({
   compact?: boolean
 }) {
   const { t } = useTranslation('sessions')
-  const text = stripPlaygroundContextSuffix(getTextFromParts(message))
+  const text = stripLegacyContextSuffix(getTextFromParts(message))
 
   return (
     <div
@@ -327,7 +333,6 @@ function StreamingAssistantMessage({
   onResourceClick?: (uri: string) => void
 }) {
   const safeParts = Array.isArray(parts) ? parts : []
-  const hasContent = safeParts.length > 0
   const toolResultsById = getToolResultsById(safeParts)
 
   return (
@@ -340,7 +345,7 @@ function StreamingAssistantMessage({
           renderStreamingPart(part, i, toolResultsById, onResourceClick),
         )}
 
-        {!hasContent ? <TypingIndicator /> : null}
+        <StreamingIndicator />
       </div>
     </div>
   )

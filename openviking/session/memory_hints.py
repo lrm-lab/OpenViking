@@ -149,7 +149,9 @@ class HintSource:
             revision = data["revision"]
         except KeyError as exc:
             raise ValueError("source requires kind, ref, and revision") from exc
-        return cls(kind=kind, ref=ref, revision=revision if isinstance(revision, str) else _bad_revision())
+        return cls(
+            kind=kind, ref=ref, revision=revision if isinstance(revision, str) else _bad_revision()
+        )
 
 
 def _bad_revision() -> str:
@@ -666,7 +668,9 @@ class HintDeliveryService:
             preference = self._preferences.get(hint.target_agent_id)
             if preference is not None:
                 blocked = tuple(
-                    source.kind for source in hint.sources if source.kind in preference.blocked_kinds
+                    source.kind
+                    for source in hint.sources
+                    if source.kind in preference.blocked_kinds
                 )
                 if blocked:
                     raise BlockedKindRejected(hint.target_agent_id, blocked)
@@ -1033,9 +1037,7 @@ class HintDeliveryService:
         outcomes = [OutcomeRecord.from_dict(raw) for raw in payload.get("outcomes", [])]
         preferences = {
             pref.target_agent_id: pref
-            for pref in (
-                TargetPreference.from_dict(raw) for raw in payload.get("preferences", [])
-            )
+            for pref in (TargetPreference.from_dict(raw) for raw in payload.get("preferences", []))
         }
         expired = set(payload.get("expired_hint_ids", []))
         last_delivery = _load_last_delivery(payload.get("last_delivery_at", {}))

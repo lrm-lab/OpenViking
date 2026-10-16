@@ -60,9 +60,7 @@ REASON_READER_SUCCESS = "reader_success"
 REASON_READER_INFERENCE_ONLY = "reader_inference_only"
 REASON_READER_UNCERTAIN = "reader_uncertain"
 
-_DECISIONS = frozenset(
-    {DECISION_SUCCESS, DECISION_CONFIRMED_FAILURE, DECISION_UNCERTAIN}
-)
+_DECISIONS = frozenset({DECISION_SUCCESS, DECISION_CONFIRMED_FAILURE, DECISION_UNCERTAIN})
 _SIGNAL_KINDS = frozenset({"evaluator", "test", "acceptance"})
 _SIGNALS = frozenset({"pass", "fail"})
 OUTCOME_SIGNAL_KINDS = _SIGNAL_KINDS
@@ -210,12 +208,14 @@ def external_evidence_from_session(
     parsed: list[ExternalOutcomeEvidence] = []
     for item in evaluator_results:
         parsed.append(_parse_result(item))
-    parsed.sort(key=lambda evidence: (
-        evidence.binding_id,
-        evidence.signal_kind,
-        evidence.signal,
-        evidence.evidence_ref,
-    ))
+    parsed.sort(
+        key=lambda evidence: (
+            evidence.binding_id,
+            evidence.signal_kind,
+            evidence.signal,
+            evidence.evidence_ref,
+        )
+    )
     return tuple(parsed)
 
 
@@ -464,9 +464,7 @@ def _criterion_uncertainty(
 ) -> str | None:
     """Return an uncertain reason, or None when every criterion is explicit."""
     expected = {item.criterion_id for item in contract.acceptance_criteria}
-    observed = {
-        item.criterion_id: item.disposition for item in assessment.criterion_dispositions
-    }
+    observed = {item.criterion_id: item.disposition for item in assessment.criterion_dispositions}
     if not expected:
         return REASON_CRITERIA_MISSING
     if not expected <= set(observed):
@@ -487,9 +485,7 @@ def _criterion_uncertainty(
 
 def _adjudication(decision: str, reason: str) -> OutcomeAdjudication:
     follow_up = (
-        FOLLOW_UP_RECORDED_ONLY
-        if decision == DECISION_CONFIRMED_FAILURE
-        else FOLLOW_UP_FORBIDDEN
+        FOLLOW_UP_RECORDED_ONLY if decision == DECISION_CONFIRMED_FAILURE else FOLLOW_UP_FORBIDDEN
     )
     return OutcomeAdjudication(
         policy_version=OUTCOME_EVIDENCE_POLICY_VERSION,

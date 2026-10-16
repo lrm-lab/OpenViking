@@ -28,8 +28,8 @@ from openviking_cli.session.user_id import UserIdentifier
 from tests.test_trajectory_index_hook import (
     SESSION_ID,
     SESSION_URI,
-    _DummyFS,
     _causal_config,
+    _DummyFS,
     _forbid_synthetic,
     _install_commit_fakes,
     _set_causal,

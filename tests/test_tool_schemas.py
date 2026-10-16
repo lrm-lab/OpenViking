@@ -8,14 +8,14 @@ from pathlib import Path
 
 from benchmark.causal_memory.lenovo_gemma_provider import openai_tools_from_catalog
 from openviking.session.aig_tool_surface import (
+    _OPTIONAL_FIELDS,
+    _REQUIRED_FIELDS,
     AUTHORSHIP_VALUES,
     TOOL_CATALOG,
     TOOL_EXACT_ARGS,
     TOOL_SCHEMAS,
-    _OPTIONAL_FIELDS,
-    _REQUIRED_FIELDS,
-    AoSnapshot,
     AigToolSurface,
+    AoSnapshot,
     ToolSurfaceError,
 )
 from openviking.session.aig_toolloop_builder import (
@@ -429,9 +429,7 @@ def test_step_refs_overlap_offers_ready_repair(tmp_path: Path) -> None:
             "new_step_refs": [1],
         }
     ]
-    surface.call(
-        "modify_block", {"block_id": "a", "fields": {"step_refs": [1], "summary": "s"}}
-    )
+    surface.call("modify_block", {"block_id": "a", "fields": {"step_refs": [1], "summary": "s"}})
     surface.call(
         "add_block",
         {

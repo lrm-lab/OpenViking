@@ -192,9 +192,7 @@ def test_citation_without_bridge_id_does_not_count_for_bridge(tmp_path: Path) ->
     assert ledger.bridge_citation_count("bridge-2") == 1
     assert ledger.bridge_citation_count("bridge-missing") == 0
 
-    strength = ledger.materialize_strength(
-        REF, T0, PolicyVersion(policy_id="p-v1"), ["chan-a"]
-    )
+    strength = ledger.materialize_strength(REF, T0, PolicyVersion(policy_id="p-v1"), ["chan-a"])
     assert strength.in_task_reference_strength == pytest.approx(3.0)
     assert strength.cross_task_reference_strength == pytest.approx(2.0)
 
@@ -275,14 +273,19 @@ def test_jsonl_roundtrip_is_lossless(tmp_path: Path) -> None:
         restored = CitationEvent.from_dict(json.loads(json.dumps(event.to_dict())))
         assert restored == event
 
-    policy = PolicyVersion(policy_id="p-custom", in_task_half_life_days=3, cross_task_half_life_days=10)
+    policy = PolicyVersion(
+        policy_id="p-custom", in_task_half_life_days=3, cross_task_half_life_days=10
+    )
     assert PolicyVersion.from_dict(json.loads(json.dumps(policy.to_dict()))) == policy
     assert [event.kind for event in reloaded.events(require_admin=True)] == [
         "citation",
         "hint_exposure",
         "index_level_exposure",
     ]
-    assert reloaded.events(require_admin=True)[1].occurred_at != reloaded.events(require_admin=True)[0].occurred_at
+    assert (
+        reloaded.events(require_admin=True)[1].occurred_at
+        != reloaded.events(require_admin=True)[0].occurred_at
+    )
 
 
 def test_materialize_strength_rejects_none_and_events_for_is_scoped(tmp_path: Path) -> None:
@@ -334,9 +337,7 @@ def test_fsync_on_append_reloads_complete_batch(
 ) -> None:
     fsync_calls: list[int] = []
     monkeypatch.setattr(citation_ledger_module.os, "fsync", lambda fd: fsync_calls.append(fd))
-    assert (
-        inspect.signature(CitationLedger.__init__).parameters["fsync_on_append"].default is True
-    )
+    assert inspect.signature(CitationLedger.__init__).parameters["fsync_on_append"].default is True
 
     batch = 4
     for enabled in (True, False):

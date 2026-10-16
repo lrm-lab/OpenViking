@@ -107,17 +107,19 @@ def allocate_discovery(
         ceilings=ceilings,
     )
     if exploration is not None:
-        exploration = {**exploration, "allocation_reason": "exploration", "selection_mode": "exploration"}
+        exploration = {
+            **exploration,
+            "allocation_reason": "exploration",
+            "selection_mode": "exploration",
+        }
     prior_pool = priors
     prior_cap = PRIOR_CAP - (1 if fact_paused else 0)
-    prior_rotation = stable_rotation(
-        plan_hash, PRIOR, [card["corpus"] for card in prior_pool]
-    )
+    prior_rotation = stable_rotation(plan_hash, PRIOR, [card["corpus"] for card in prior_pool])
     selected_priors, prior_short = _water_fill(
         prior_pool,
         cap=prior_cap,
         rotation=prior_rotation,
-        ceilings={corpus: CORPUS_CEILING for corpus in prior_rotation},
+        ceilings=dict.fromkeys(prior_rotation, CORPUS_CEILING),
     )
     ordered_candidates = _interleave(selected_candidates, candidate_rotation, exploration)
     ordered_priors = _interleave(selected_priors, prior_rotation, None)
@@ -140,7 +142,8 @@ def allocate_discovery(
             "allocation": ALLOCATION_POLICY_VERSION,
             "interleave": INTERLEAVE_POLICY_VERSION,
         },
-        candidate_truncated=candidate_short or _unseated(candidates, selected_candidates, exploration),
+        candidate_truncated=candidate_short
+        or _unseated(candidates, selected_candidates, exploration),
         prior_truncated=prior_short or len(selected_priors) < len(prior_pool),
     )
 
@@ -230,9 +233,7 @@ def _draw_exploration(
         PROVISIONAL_FORK: [card for card in cards if card["stratum"] == PROVISIONAL_FORK],
     }
     if _skill_gate_open(skill_explorations, skill_exploitations):
-        allowed[COLD_START_SKILL] = [
-            card for card in cards if card["stratum"] == COLD_START_SKILL
-        ]
+        allowed[COLD_START_SKILL] = [card for card in cards if card["stratum"] == COLD_START_SKILL]
     strata = [name for name, pool in allowed.items() if pool]
     if not strata:
         return None
@@ -279,7 +280,7 @@ def _water_fill(
     for queue in queues.values():
         queue.sort(key=lambda card: (card["corpus_rank"], card["identity"]))
     selected: list[dict[str, Any]] = []
-    taken = {corpus: 0 for corpus in queues}
+    taken = dict.fromkeys(queues, 0)
     for corpus in rotation:
         if len(selected) >= cap:
             break
@@ -323,17 +324,13 @@ def _interleave(
     ordered: list[Mapping[str, Any]] = []
     for corpus in rotation:
         if queues.get(corpus):
-            ordered.append(
-                {**queues[corpus].pop(0), "interleave_reason": "rank_depth_zipper"}
-            )
+            ordered.append({**queues[corpus].pop(0), "interleave_reason": "rank_depth_zipper"})
     if exploration is not None:
         ordered.append({**exploration, "interleave_reason": "exploration_after_first_round"})
     while any(queues.values()):
         for corpus in rotation:
             if queues.get(corpus):
-                ordered.append(
-                    {**queues[corpus].pop(0), "interleave_reason": "rank_depth_zipper"}
-                )
+                ordered.append({**queues[corpus].pop(0), "interleave_reason": "rank_depth_zipper"})
     return [
         OrderedCard(
             id=card["id"],

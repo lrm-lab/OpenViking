@@ -18,10 +18,10 @@ from pathlib import Path
 from typing import Any
 
 from openviking.session.ao_ledger import (
+    LEDGER_FILENAME,
     AOAttribution,
     AOLedger,
     AORecord,
-    LEDGER_FILENAME,
     build_observation,
     extract_skill_invocations,
 )
@@ -140,12 +140,7 @@ def write_archive_attribution(
 
 
 def _action_from_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
-    tool_name = (
-        tool_call.get("tool")
-        or tool_call.get("tool_name")
-        or tool_call.get("name")
-        or ""
-    )
+    tool_name = tool_call.get("tool") or tool_call.get("tool_name") or tool_call.get("name") or ""
     action: dict[str, Any] = {"tool": str(tool_name)}
     tool_id = tool_call.get("tool_id")
     if tool_id:
@@ -254,7 +249,9 @@ def _fallback_dedup_digest(
     return hashlib.sha256(_canonical_json(body).encode("utf-8")).hexdigest()
 
 
-def _fallback_digest_from_parts(session_id: str, action: dict[str, Any], observation: dict[str, Any]) -> str | None:
+def _fallback_digest_from_parts(
+    session_id: str, action: dict[str, Any], observation: dict[str, Any]
+) -> str | None:
     tool_name = str(action.get("tool") or "")
     if not session_id or not tool_name or "arguments" not in action:
         return None
@@ -448,9 +445,11 @@ class AOLedgerRecorder:
             source_ids = getattr(message, "source_message_ids", None)
             content = getattr(message, "content", "")
             if (
-                isinstance(source_ids, list) and source_ids
+                isinstance(source_ids, list)
+                and source_ids
                 and all(isinstance(item, str) and item for item in source_ids)
-                and isinstance(content, str) and content.strip()
+                and isinstance(content, str)
+                and content.strip()
             ):
                 key = ("source_message", *sorted(source_ids))
                 with self._dedup_lock:
@@ -462,7 +461,9 @@ class AOLedgerRecorder:
                         captured = True
                 if captured:
                     try:
-                        participant = getattr(message, "peer_id", None) or getattr(message, "role", "")
+                        participant = getattr(message, "peer_id", None) or getattr(
+                            message, "role", ""
+                        )
                         record = self.ledger.append(
                             action={
                                 "kind": "channel_message",
@@ -488,9 +489,7 @@ class AOLedgerRecorder:
                     continue
                 tool_id = str(getattr(part, "tool_id", "") or "")
                 call_part = (
-                    part
-                    if getattr(part, "tool_input", None)
-                    else call_parts.get(tool_id, part)
+                    part if getattr(part, "tool_input", None) else call_parts.get(tool_id, part)
                 )
                 message_ref: dict[str, Any] = {}
                 message_id = getattr(message, "id", None)

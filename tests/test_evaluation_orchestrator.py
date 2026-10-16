@@ -66,7 +66,11 @@ def _with_evidence(event: str, payload: dict | None = None) -> dict:
     body = dict(payload or {})
     if event == EVENT_FREEZE_BRIEF and not body.get("brief_envelope_id"):
         body["brief_envelope_id"] = "brief-1"
-    if event == EVENT_COMMIT_REVISIONS and not body.get("revision_ids") and not body.get("outcome_envelope_id"):
+    if (
+        event == EVENT_COMMIT_REVISIONS
+        and not body.get("revision_ids")
+        and not body.get("outcome_envelope_id")
+    ):
         body["revision_ids"] = ["rev-1"]
     return body
 
@@ -242,7 +246,9 @@ def test_state_log_roundtrip_is_lossless(tmp_path) -> None:
             ]
         },
     )
-    restored = EvaluationOrchestrator(tmp_path / "loop.json", clock=MutableClock(), event_id_factory=SequenceIds())
+    restored = EvaluationOrchestrator(
+        tmp_path / "loop.json", clock=MutableClock(), event_id_factory=SequenceIds()
+    )
     assert restored.to_dict() == orchestrator.to_dict()
     again = EvaluationOrchestrator.from_dict(orchestrator.to_dict())
     assert again.to_dict() == orchestrator.to_dict()
@@ -310,7 +316,8 @@ def test_worker_seats_reject_when_full_and_reuse_after_release() -> None:
         clock.current = datetime(2026, 9, 24, 0, index, tzinfo=timezone.utc)
         leases.append(pool.acquire(f"holder-{index}", f"explorer-{index}"))
     assert [(item.holder, item.purpose, item.acquired_at) for item in pool.held_snapshot()] == [
-        (f"holder-{index}", f"explorer-{index}", f"2026-09-24T00:0{index}:00.000Z") for index in range(5)
+        (f"holder-{index}", f"explorer-{index}", f"2026-09-24T00:0{index}:00.000Z")
+        for index in range(5)
     ]
     try:
         pool.acquire("holder-5", "explorer")
@@ -325,7 +332,9 @@ def test_worker_seats_reject_when_full_and_reuse_after_release() -> None:
     assert len(pool.held_snapshot()) == 5
 
     leases[0].release()
-    assert [item.holder for item in pool.held_snapshot()] == [f"holder-{index}" for index in range(1, 5)]
+    assert [item.holder for item in pool.held_snapshot()] == [
+        f"holder-{index}" for index in range(1, 5)
+    ]
     again = pool.acquire("holder-reuse", "explorer")
     assert [item.holder for item in pool.held_snapshot()][-1] == "holder-reuse"
     again.release()
@@ -427,7 +436,9 @@ def test_payload_hash_is_content_address_of_canonical_json(tmp_path) -> None:
     first = _orchestrator(tmp_path, "hash-a.json")
     recorded = first.advance(EVENT_MEMORY_RETRIEVE, payload)
     assert recorded.payload_hash == content_address(payload)
-    assert recorded.payload_hash == content_address({"refs": ["b", "a"], "step": EVENT_MEMORY_RETRIEVE})
+    assert recorded.payload_hash == content_address(
+        {"refs": ["b", "a"], "step": EVENT_MEMORY_RETRIEVE}
+    )
     assert recorded.payload_hash != content_address({"step": EVENT_MEMORY_RETRIEVE, "refs": ["a"]})
 
     second = _orchestrator(tmp_path, "hash-b.json")

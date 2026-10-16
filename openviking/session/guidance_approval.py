@@ -17,8 +17,8 @@ run. It does not consume GuidanceExecutionReport.
 
 from __future__ import annotations
 
-import threading
 import re
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -331,9 +331,7 @@ class GuidanceApprovalService:
                     "selected_agent_id": approval.selected_agent_id,
                 }
             )
-            return GuidanceApprovalCommit(
-                approval=approval, guidance=guidance, deduplicated=False
-            )
+            return GuidanceApprovalCommit(approval=approval, guidance=guidance, deduplicated=False)
 
     def publish(
         self,
@@ -475,9 +473,7 @@ class GuidanceApprovalService:
             or guidance.content_hash != approval.guidance_content_hash
         ):
             raise GuidanceApprovalError("stored_record_invalid")
-        selected = select_target_agent(
-            proposal, catalog, frozenset(basis.principal_labels)
-        )
+        selected = select_target_agent(proposal, catalog, frozenset(basis.principal_labels))
         if selected != approval.selected_agent_id:
             raise GuidanceApprovalError("stored_record_invalid")
         return approval
@@ -566,7 +562,10 @@ class GuidanceApprovalService:
         for path in directory.glob("*.json"):
             payload = read_json_object(path, GuidanceApprovalError, code="stored_record_invalid")
             body = payload.get("body")
-            if isinstance(body, dict) and body.get("proposal_content_hash") == proposal_content_hash:
+            if (
+                isinstance(body, dict)
+                and body.get("proposal_content_hash") == proposal_content_hash
+            ):
                 return True
         return False
 
@@ -628,9 +627,7 @@ class GuidanceApprovalService:
         )
 
     def _load_guidance(self, content_hash: str) -> GuidanceDocument | None:
-        return _load_hashed(
-            self._guidance_path(content_hash), content_hash, read_guidance_document
-        )
+        return _load_hashed(self._guidance_path(content_hash), content_hash, read_guidance_document)
 
     def _load_publication(self, record_id: str) -> GuidancePublication | None:
         path = self._publication_path(record_id)
@@ -655,7 +652,9 @@ class GuidanceApprovalService:
         reader: Callable[[Mapping[str, Any]], AgentCandidateCatalog],
     ) -> None:
         if path.is_file():
-            existing = reader(read_json_object(path, GuidanceApprovalError, code="stored_record_invalid"))
+            existing = reader(
+                read_json_object(path, GuidanceApprovalError, code="stored_record_invalid")
+            )
             loaded = reader(payload)
             if existing != loaded:
                 raise GuidanceApprovalError("stored_record_invalid")
@@ -737,12 +736,14 @@ def _canonical_signals(
                 evidence_ref=item.evidence_ref,
             )
         )
-    items.sort(key=lambda signal: (
-        signal.binding_id,
-        signal.signal_kind,
-        signal.signal,
-        signal.evidence_ref,
-    ))
+    items.sort(
+        key=lambda signal: (
+            signal.binding_id,
+            signal.signal_kind,
+            signal.signal,
+            signal.evidence_ref,
+        )
+    )
     unique: list[OutcomeEvidenceSignal] = []
     seen: set[tuple[str, str, str, str]] = set()
     for signal in items:
@@ -778,9 +779,7 @@ def _adjudication_envelope(basis: _Adjudication) -> dict[str, Any]:
     return protocol_envelope(SCHEMA_VERSION_AIG_NATIVE_V2, _ADJUDICATION_KIND, body)
 
 
-def _publication_record_id(
-    approval_content_hash: str, publisher_labels: Sequence[str]
-) -> str:
+def _publication_record_id(approval_content_hash: str, publisher_labels: Sequence[str]) -> str:
     """Idempotency key for one approval published by one principal."""
     return protocol_content_hash(
         SCHEMA_VERSION_AIG_NATIVE_V2,
@@ -792,9 +791,7 @@ def _publication_record_id(
     )
 
 
-def _publication_delta(
-    expected: GuidancePublication, submitted: GuidancePublication
-) -> str | None:
+def _publication_delta(expected: GuidancePublication, submitted: GuidancePublication) -> str | None:
     if (
         submitted.selected_agent_id != expected.selected_agent_id
         or submitted.target_role != expected.target_role

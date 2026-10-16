@@ -68,16 +68,16 @@ from openviking.session.extraction_write import (
     NativeExtractionPayload,
     freeze_native_edge_view,
 )
-from openviking.session.legacy_write_gate import LegacyWriteRefused
 from openviking.session.influence_projection import ProjectionRegistry
 from openviking.session.influence_view import PURPOSE_POST_RUN_INDEX, ViewSupersedeIndex
+from openviking.session.legacy_write_gate import LegacyWriteRefused
 from openviking.session.session_acl import session_acl_callback
 from openviking.session.trajectory_index import (
     PRIORITY_EVALUATION,
     PRIORITY_FAILED,
     PRIORITY_SUCCEEDED,
-    IndexJob,
     IndexedResult,
+    IndexJob,
     Priority,
     SkippedResult,
     TrajectoryIndexService,

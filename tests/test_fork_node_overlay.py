@@ -48,8 +48,8 @@ from openviking.session.fork_node_overlay import (
 )
 from openviking.session.influence_view import (
     PURPOSE_POST_RUN_INDEX,
-    AORange,
     AigNativeEdge,
+    AORange,
     CoverageManifest,
     InfluenceBlock,
     InfluenceClaim,
@@ -289,9 +289,7 @@ def _legacy_payload(fork_node_id: str, *, position_kind: str, position_ref: str)
 def test_identity_binds_revision_and_anchor_block_context() -> None:
     revision = _native_revision()
     catalog = catalog_for_base_revision(revision)
-    stable = fork_node_stable_id(
-        catalog.base_revision_id, "b-2", catalog.block_content_hash
-    )
+    stable = fork_node_stable_id(catalog.base_revision_id, "b-2", catalog.block_content_hash)
     revision_identity = fork_node_revision_id(
         catalog.base_revision_id, "b-2", catalog.block_content_hash
     )
@@ -305,16 +303,12 @@ def test_identity_binds_revision_and_anchor_block_context() -> None:
     changed_blocks = _native_revision("rev-overlay-1", summary="anchor text changed")
     changed = catalog_for_base_revision(changed_blocks)
     assert changed.block_content_hash != catalog.block_content_hash
-    assert fork_node_stable_id(
-        changed.base_revision_id, "b-2", changed.block_content_hash
-    ) != stable
-    other_anchor = fork_node_stable_id(
-        catalog.base_revision_id, "b-1", catalog.block_content_hash
+    assert (
+        fork_node_stable_id(changed.base_revision_id, "b-2", changed.block_content_hash) != stable
     )
+    other_anchor = fork_node_stable_id(catalog.base_revision_id, "b-1", catalog.block_content_hash)
     assert other_anchor != stable
-    other_revision = fork_node_stable_id(
-        "rev-other", "b-2", catalog.block_content_hash
-    )
+    other_revision = fork_node_stable_id("rev-other", "b-2", catalog.block_content_hash)
     assert other_revision != stable
 
 
@@ -418,7 +412,9 @@ def test_same_proposal_is_idempotent_and_a_different_one_conflicts(tmp_path: Pat
     assert second.deduplicated is True
     assert second.stored == first.stored
     assert len(_overlay_files(tmp_path)) == 1
-    overlay_rows = [row for row in _index_lines(tmp_path) if row["record_kind"] == "fork_node_overlay"]
+    overlay_rows = [
+        row for row in _index_lines(tmp_path) if row["record_kind"] == "fork_node_overlay"
+    ]
     assert len(overlay_rows) == 1
     other = _proposal(
         catalog,
@@ -432,13 +428,12 @@ def test_same_proposal_is_idempotent_and_a_different_one_conflicts(tmp_path: Pat
         store.submit_proposal(other, principal_labels=(_OWNER,))
     assert conflict.value.code == "overlay_conflict"
     assert len(_overlay_files(tmp_path)) == 1
-    assert json.loads(_overlay_files(tmp_path)[0].read_text(encoding="utf-8"))[
-        "proposal_content_hash"
-    ] == payload["content_hash"]
-    reopened = _store(tmp_path)
-    loaded = reopened.read_overlay(
-        catalog.base_revision_id, "b-2", principal_labels=(_OWNER,)
+    assert (
+        json.loads(_overlay_files(tmp_path)[0].read_text(encoding="utf-8"))["proposal_content_hash"]
+        == payload["content_hash"]
     )
+    reopened = _store(tmp_path)
+    loaded = reopened.read_overlay(catalog.base_revision_id, "b-2", principal_labels=(_OWNER,))
     assert loaded == first.stored
     other_anchor = _proposal(catalog, document_hash=revision.content_hash, anchor_block_id="b-1")
     other_commit = store.submit_proposal(other_anchor, principal_labels=(_OWNER,))
@@ -463,23 +458,27 @@ def test_server_revalidates_acl_existence_membership_hash_and_branch(tmp_path: P
     assert principal_type.value.code == "acl_denied"
     assert _overlay_files(tmp_path) == []
 
-    missing = _proposal(catalog, document_hash=revision.content_hash, base_revision_id="rev-missing")
+    missing = _proposal(
+        catalog, document_hash=revision.content_hash, base_revision_id="rev-missing"
+    )
     with pytest.raises(ForkOverlayError) as absent:
         store.submit_proposal(missing, principal_labels=(_OWNER,))
     assert absent.value.code == "base_revision_missing"
 
-    bad_anchor = _proposal(catalog, document_hash=revision.content_hash, anchor_block_id="blk-missing")
+    bad_anchor = _proposal(
+        catalog, document_hash=revision.content_hash, anchor_block_id="blk-missing"
+    )
     with pytest.raises(ProtocolContractError, match="is not a Block"):
         store.submit_proposal(bad_anchor, principal_labels=(_OWNER,))
-    bad_hash = _proposal(catalog, document_hash=revision.content_hash, base_revision_block_content_hash="a" * 64)
+    bad_hash = _proposal(
+        catalog, document_hash=revision.content_hash, base_revision_block_content_hash="a" * 64
+    )
     with pytest.raises(ProtocolContractError, match="block_content_hash does not match"):
         store.submit_proposal(bad_hash, principal_labels=(_OWNER,))
     foreign_step = _proposal(
         catalog,
         document_hash=revision.content_hash,
-        branch_steps=[
-            {"block_id": "blk-from-other-revision", "step_kind": "factual_block_ref"}
-        ],
+        branch_steps=[{"block_id": "blk-from-other-revision", "step_kind": "factual_block_ref"}],
     )
     with pytest.raises(ProtocolContractError, match="factual_block_ref"):
         store.submit_proposal(foreign_step, principal_labels=(_OWNER,))
@@ -522,7 +521,9 @@ def test_server_revalidates_acl_existence_membership_hash_and_branch(tmp_path: P
     assert not_revision.value.code == "revision_required"
     again = store.register_base_revision(revision, acl_labels=(_OWNER,))
     assert again == catalog
-    assert len([row for row in _index_lines(tmp_path) if row["record_kind"] == "base_revision"]) == 1
+    assert (
+        len([row for row in _index_lines(tmp_path) if row["record_kind"] == "base_revision"]) == 1
+    )
 
 
 def test_legacy_edge_and_cut_forks_stay_read_only(tmp_path: Path) -> None:
@@ -586,7 +587,9 @@ def test_legacy_edge_and_cut_forks_stay_read_only(tmp_path: Path) -> None:
 
     revision = _native_revision()
     catalog = overlay.register_base_revision(revision, acl_labels=principal)
-    commit = overlay.submit_proposal(_proposal(catalog, document_hash=revision.content_hash), principal_labels=principal)
+    commit = overlay.submit_proposal(
+        _proposal(catalog, document_hash=revision.content_hash), principal_labels=principal
+    )
     for consumer in _V2_CONSUMERS:
         assert guard_v2_fork_consumer(commit.stored, consumer) is None
         assert guard_v2_fork_consumer(commit.stored.overlay, consumer) is None

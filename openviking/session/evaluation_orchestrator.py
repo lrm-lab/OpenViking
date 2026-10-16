@@ -146,7 +146,9 @@ class IllegalTransition(Exception):
     def __init__(self, current: OrchestratorState, requested: OrchestratorState | str) -> None:
         self.current = current
         self.requested = requested
-        requested_text = requested.value if isinstance(requested, OrchestratorState) else str(requested)
+        requested_text = (
+            requested.value if isinstance(requested, OrchestratorState) else str(requested)
+        )
         super().__init__(f"illegal transition from {current.value} to {requested_text}")
 
 
@@ -234,7 +236,11 @@ class NoGainTracker:
 
     def observe(self, evidence_refs: Iterable[str], key_judgment: str) -> int:
         refs = tuple(_require_str(ref, "evidence_refs") for ref in evidence_refs)
-        judgment = key_judgment if isinstance(key_judgment, str) else _require_str(key_judgment, "key_judgment")
+        judgment = (
+            key_judgment
+            if isinstance(key_judgment, str)
+            else _require_str(key_judgment, "key_judgment")
+        )
         if self.previous_refs is None:
             self.previous_refs = refs
             self.previous_judgment = judgment
@@ -257,7 +263,11 @@ class NoGainTracker:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> NoGainTracker:
         raw_refs = data.get("previous_refs")
-        refs = None if raw_refs is None else tuple(_require_str(ref, "previous_refs") for ref in raw_refs)
+        refs = (
+            None
+            if raw_refs is None
+            else tuple(_require_str(ref, "previous_refs") for ref in raw_refs)
+        )
         judgment = data.get("previous_judgment")
         if judgment is not None:
             judgment = _require_str(judgment, "previous_judgment")
@@ -279,7 +289,11 @@ class IterationResult:
     no_gain_streak: int | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "evidence_refs", tuple(_require_str(ref, "evidence_refs") for ref in self.evidence_refs))
+        object.__setattr__(
+            self,
+            "evidence_refs",
+            tuple(_require_str(ref, "evidence_refs") for ref in self.evidence_refs),
+        )
         if not isinstance(self.key_judgment, str):
             raise ValueError("key_judgment must be a string")
         if self.no_gain_streak is not None and (
@@ -392,7 +406,9 @@ class StateEvent:
             event=_require_str(data["event"], "event"),
             payload_hash=_require_str(data["payload_hash"], "payload_hash"),
             occurred_at=_require_str(data["occurred_at"], "occurred_at"),
-            evidence=_copy_evidence(data["evidence"]) if isinstance(data.get("evidence"), Mapping) else None,
+            evidence=_copy_evidence(data["evidence"])
+            if isinstance(data.get("evidence"), Mapping)
+            else None,
         )
 
 
@@ -636,7 +652,9 @@ class EvaluationOrchestrator:
             )
         )
         self._lock = threading.Lock()
-        self._evaluation_id = _require_str(evaluation_id, "evaluation_id") if evaluation_id else uuid.uuid4().hex
+        self._evaluation_id = (
+            _require_str(evaluation_id, "evaluation_id") if evaluation_id else uuid.uuid4().hex
+        )
         self._state = OrchestratorState.CREATED
         self._events: list[StateEvent] = []
         self._proposals: list[AgentProposal] = []
@@ -736,10 +754,14 @@ class EvaluationOrchestrator:
             self._persist()
             return record
 
-    def submit_trigger_proposal(self, agent_role: str, proposal: Mapping[str, Any]) -> AgentProposal:
+    def submit_trigger_proposal(
+        self, agent_role: str, proposal: Mapping[str, Any]
+    ) -> AgentProposal:
         return self._submit(PROPOSAL_TRIGGER, agent_role, proposal)
 
-    def submit_schedule_proposal(self, agent_role: str, proposal: Mapping[str, Any]) -> AgentProposal:
+    def submit_schedule_proposal(
+        self, agent_role: str, proposal: Mapping[str, Any]
+    ) -> AgentProposal:
         return self._submit(PROPOSAL_SCHEDULE, agent_role, proposal)
 
     def should_stop(
@@ -799,12 +821,15 @@ class EvaluationOrchestrator:
         )
         orchestrator._state = OrchestratorState(_require_str(data["state"], "state"))
         orchestrator._events = [StateEvent.from_dict(item) for item in data.get("events", [])]
-        orchestrator._proposals = [AgentProposal.from_dict(item) for item in data.get("proposals", [])]
+        orchestrator._proposals = [
+            AgentProposal.from_dict(item) for item in data.get("proposals", [])
+        ]
         orchestrator._waiting_conditions = [
             WaitingCondition.from_dict(item) for item in data.get("waiting_conditions", [])
         ]
         orchestrator._satisfied_conditions = [
-            _require_str(item, "satisfied_conditions") for item in data.get("satisfied_conditions", [])
+            _require_str(item, "satisfied_conditions")
+            for item in data.get("satisfied_conditions", [])
         ]
         if path is not None:
             orchestrator._path = _resolve_store_path(path)
@@ -946,7 +971,9 @@ class EvaluationOrchestrator:
         payload = json.loads(self._path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("evaluation orchestrator store must be a JSON object")
-        restored = EvaluationOrchestrator.from_dict(payload, clock=self._clock, event_id_factory=self._ids)
+        restored = EvaluationOrchestrator.from_dict(
+            payload, clock=self._clock, event_id_factory=self._ids
+        )
         self._evaluation_id = restored.evaluation_id
         self._state = restored.state
         self._events = list(restored.events)

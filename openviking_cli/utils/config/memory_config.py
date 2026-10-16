@@ -10,9 +10,7 @@ logger = get_logger(__name__)
 
 SKILL_TRAJECTORY_MODE_LEGACY = "legacy"
 SKILL_TRAJECTORY_MODE_CAUSAL = "causal"
-SKILL_TRAJECTORY_MODES = frozenset(
-    (SKILL_TRAJECTORY_MODE_LEGACY, SKILL_TRAJECTORY_MODE_CAUSAL)
-)
+SKILL_TRAJECTORY_MODES = frozenset((SKILL_TRAJECTORY_MODE_LEGACY, SKILL_TRAJECTORY_MODE_CAUSAL))
 
 
 class TrajectoryIndexConfig(BaseModel):
@@ -251,9 +249,7 @@ def _memory_config_from_source(config: Any) -> MemoryConfig:
     mode = getattr(config, "skill_trajectory_mode", None)
     if mode is not None:
         return MemoryConfig(skill_trajectory_mode=mode)
-    raise TypeError(
-        "config must be MemoryConfig, OpenVikingConfig, a mapping, or None"
-    )
+    raise TypeError("config must be MemoryConfig, OpenVikingConfig, a mapping, or None")
 
 
 def resolve_skill_trajectory_mode(

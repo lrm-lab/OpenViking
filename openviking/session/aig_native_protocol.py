@@ -224,9 +224,7 @@ _V2_DOCUMENT_KINDS = (
     OBJECT_KIND_BRANCH_EVALUATION,
     OBJECT_KIND_FIRST_ACTION_ALIGNMENT,
 )
-_FORK_OBJECT_KINDS = frozenset(
-    {OBJECT_KIND_FORK_PROPOSAL, OBJECT_KIND_FORK_NODE_OVERLAY}
-)
+_FORK_OBJECT_KINDS = frozenset({OBJECT_KIND_FORK_PROPOSAL, OBJECT_KIND_FORK_NODE_OVERLAY})
 _TOP_LEVEL_DOCUMENT_KINDS = frozenset(
     {
         OBJECT_KIND_LEGACY_CLAIM_CUT,
@@ -288,7 +286,7 @@ _KIND_SCHEMA_VERSION = {
     OBJECT_KIND_REMEDIATION_CONSTRAINT: SCHEMA_VERSION_AIG_NATIVE_V2,
     OBJECT_KIND_PRODUCTION_DIRECT_ADMISSION: SCHEMA_VERSION_AIG_NATIVE_V2,
     OBJECT_KIND_TOOLLOOP_DRAFT_OP: SCHEMA_VERSION_AIG_NATIVE_V2,
-    **{kind: SCHEMA_VERSION_AIG_NATIVE_V2 for kind in _V2_DOCUMENT_KINDS},
+    **dict.fromkeys(_V2_DOCUMENT_KINDS, SCHEMA_VERSION_AIG_NATIVE_V2),
 }
 _ENVELOPE_KEYS = frozenset({"schema_version", "object_kind", "content_hash", "body"})
 
@@ -889,9 +887,7 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _VERDICTS = frozenset({"success", "failure", "uncertain"})
 _CRITERIA_DISPOSITIONS = frozenset({"explicit", "provisional", "missing", "conflict"})
 _NON_EXPLICIT_CRITERIA = frozenset({"provisional", "missing", "conflict"})
-_ELIGIBILITY_VALUES = frozenset(
-    {"replayable", "conditionally_replayable", "non_replayable"}
-)
+_ELIGIBILITY_VALUES = frozenset({"replayable", "conditionally_replayable", "non_replayable"})
 EVIDENCE_TIER_PRODUCTION_DIRECT = "production-direct"
 EVIDENCE_TIER_REPLAY_DIRECT = "replay-direct"
 EVIDENCE_TIER_ANALOGICAL = "analogical"
@@ -906,9 +902,7 @@ _EVIDENCE_TIERS = frozenset(
         EVIDENCE_TIER_MODEL_ONLY,
     }
 )
-_EVALUATION_STATUSES = frozenset(
-    {"active", "challenged", "invalidated", "retired", "superseded"}
-)
+_EVALUATION_STATUSES = frozenset({"active", "challenged", "invalidated", "retired", "superseded"})
 _EVALUATION_STATUS_ACTIVE = "active"
 _SUBJECT_KINDS = frozenset({"imagined_node", "strategy_pattern"})
 ALIGNMENT_EQUIVALENT = "equivalent"
@@ -934,9 +928,7 @@ _PERMISSION_STATES = frozenset({"sufficient", "insufficient"})
 _ISOLATION_STATES = frozenset({"isolated", "unisolated"})
 _BUDGET_STATES = frozenset({"compliant", "exceeded", "unbounded"})
 _EVALUATOR_STATES = frozenset({"bound", "unbound"})
-_DIRECT_ALIGNMENTS = frozenset(
-    {ALIGNMENT_EQUIVALENT, ALIGNMENT_FUNCTIONALLY_EQUIVALENT}
-)
+_DIRECT_ALIGNMENTS = frozenset({ALIGNMENT_EQUIVALENT, ALIGNMENT_FUNCTIONALLY_EQUIVALENT})
 _OUTCOME_DEPTHS = frozenset({"prefix", "full_branch"})
 _HARD_ELIGIBILITY_REASONS = frozenset(
     {
@@ -976,9 +968,7 @@ EVALUATION_STATUSES = _EVALUATION_STATUSES
 EVALUATION_STATUS_ACTIVE = _EVALUATION_STATUS_ACTIVE
 STEP_KIND_FACTUAL = _STEP_KIND_FACTUAL
 STEP_KIND_IMAGINED = _STEP_KIND_IMAGINED
-DIRECT_EVIDENCE_TIERS = frozenset(
-    {EVIDENCE_TIER_PRODUCTION_DIRECT, EVIDENCE_TIER_REPLAY_DIRECT}
-)
+DIRECT_EVIDENCE_TIERS = frozenset({EVIDENCE_TIER_PRODUCTION_DIRECT, EVIDENCE_TIER_REPLAY_DIRECT})
 EXPLORATORY_EVIDENCE_TIERS = frozenset(
     {
         EVIDENCE_TIER_ANALOGICAL,
@@ -986,9 +976,7 @@ EXPLORATORY_EVIDENCE_TIERS = frozenset(
         EVIDENCE_TIER_MODEL_ONLY,
     }
 )
-NEGATIVE_EVALUATION_STATUSES = frozenset(
-    {"challenged", "invalidated", "retired", "superseded"}
-)
+NEGATIVE_EVALUATION_STATUSES = frozenset({"challenged", "invalidated", "retired", "superseded"})
 OUTCOME_ALIGNMENT_DEPTHS = _OUTCOME_DEPTHS
 ALIGNMENTS = _ALIGNMENTS
 DIRECT_ALIGNMENTS = _DIRECT_ALIGNMENTS
@@ -1084,9 +1072,7 @@ def canonical_hash_input(
     }
 
 
-def protocol_content_hash(
-    schema_version: str, object_kind: str, body: Mapping[str, Any]
-) -> str:
+def protocol_content_hash(schema_version: str, object_kind: str, body: Mapping[str, Any]) -> str:
     """SHA-256 hex of the version-tagged canonical body."""
     encoded = canonical_dumps(canonical_hash_input(schema_version, object_kind, body))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -2023,8 +2009,7 @@ def read_protocol_document(
     kind = payload.get("object_kind")
     if version == SCHEMA_VERSION_AIG_NATIVE_V2 and kind in _FORK_OBJECT_KINDS:
         raise ProtocolContractError(
-            f"object_kind {kind!r} requires a base revision catalog; "
-            "refusing to guess grounding"
+            f"object_kind {kind!r} requires a base revision catalog; refusing to guess grounding"
         )
     reader = _KIND_READERS.get(kind) if isinstance(kind, str) else None
     if (
@@ -2077,9 +2062,7 @@ def read_v2_fixture_set(payload: Mapping[str, Any]) -> V2FixtureSet:
     if not isinstance(documents, dict):
         raise ProtocolContractError("documents must be a dict")
     _require_exact_keys(documents, frozenset(_V2_DOCUMENT_KINDS), "documents")
-    members = {
-        kind: _read_v2_member(documents[kind], kind, catalog) for kind in _V2_DOCUMENT_KINDS
-    }
+    members = {kind: _read_v2_member(documents[kind], kind, catalog) for kind in _V2_DOCUMENT_KINDS}
     proposal = members[OBJECT_KIND_FORK_PROPOSAL]
     overlay = members[OBJECT_KIND_FORK_NODE_OVERLAY]
     replay = members[OBJECT_KIND_REPLAY_ELIGIBILITY]
@@ -2098,8 +2081,7 @@ def read_v2_fixture_set(payload: Mapping[str, Any]) -> V2FixtureSet:
         )
     if report.source_fork_id != overlay.fork_node_id:
         raise ProtocolContractError(
-            "guidance_execution_report.source_fork_id does not match "
-            "fork_node_overlay.fork_node_id"
+            "guidance_execution_report.source_fork_id does not match fork_node_overlay.fork_node_id"
         )
     if report.guidance_id != guidance.guidance_id:
         raise ProtocolContractError(
@@ -2126,9 +2108,7 @@ def read_v2_fixture_set(payload: Mapping[str, Any]) -> V2FixtureSet:
     )
 
 
-def read_fork_proposal(
-    payload: Mapping[str, Any], catalog: BaseRevisionCatalog
-) -> ForkProposal:
+def read_fork_proposal(payload: Mapping[str, Any], catalog: BaseRevisionCatalog) -> ForkProposal:
     """Parse a v2 ForkProposal and require its anchor Block in ``catalog``."""
     _require_catalog(catalog)
     version, body, digest = _open_envelope(
@@ -2194,15 +2174,11 @@ def read_task_outcome_assessment(payload: Mapping[str, Any]) -> TaskOutcomeAsses
     verdict = _require_choice(body.get("verdict"), "verdict", _VERDICTS)
     dispositions = _parse_criterion_dispositions(body.get("criteria_dispositions"))
     evidence_refs = _parse_evidence_refs(body.get("evidence_refs"))
-    non_explicit = [
-        item for item in dispositions if item.disposition in _NON_EXPLICIT_CRITERIA
-    ]
+    non_explicit = [item for item in dispositions if item.disposition in _NON_EXPLICIT_CRITERIA]
     if not dispositions or non_explicit:
         shown = non_explicit[0].disposition if non_explicit else "missing"
         if verdict != "uncertain":
-            raise ProtocolContractError(
-                f"criteria_disposition {shown!r} must be uncertain"
-            )
+            raise ProtocolContractError(f"criteria_disposition {shown!r} must be uncertain")
     elif not evidence_refs:
         raise ProtocolContractError("explicit criteria require evidence_refs")
     return TaskOutcomeAssessment(
@@ -2602,10 +2578,7 @@ def is_replay_provenance_identity(
     view_id: str | None = None,
 ) -> bool:
     """True when any identity field uses the reserved replay prefix."""
-    if (
-        isinstance(revision_id, str)
-        and revision_id.startswith(REPLAY_REVISION_PREFIX)
-    ):
+    if isinstance(revision_id, str) and revision_id.startswith(REPLAY_REVISION_PREFIX):
         return True
     if isinstance(session_id, str) and session_id.startswith(REPLAY_SESSION_PREFIX):
         return True
@@ -2648,14 +2621,10 @@ def inspect_replay_controls(controls: Mapping[str, Any]) -> ReplayControlDecisio
     _require_exact_keys(controls, _REPLAY_CONTROL_KEYS, "replay_controls")
     intervention_type = _require_str(controls.get("intervention_type"), "intervention_type")
     target_boundary = _require_str(controls.get("target_boundary"), "target_boundary")
-    capabilities = _parse_str_list(
-        controls.get("required_capabilities"), "required_capabilities"
-    )
+    capabilities = _parse_str_list(controls.get("required_capabilities"), "required_capabilities")
     safety = _parse_str_map(controls.get("safety_control_params"), "safety_control_params")
     anchor_state = _require_choice(controls.get("anchor_state"), "anchor_state", _ANCHOR_STATES)
-    dependencies = _require_choice(
-        controls.get("dependencies"), "dependencies", _DEPENDENCY_STATES
-    )
+    dependencies = _require_choice(controls.get("dependencies"), "dependencies", _DEPENDENCY_STATES)
     permissions = _require_choice(controls.get("permissions"), "permissions", _PERMISSION_STATES)
     isolation = _require_choice(
         controls.get("side_effect_isolation"), "side_effect_isolation", _ISOLATION_STATES
@@ -2749,7 +2718,7 @@ def verify_outcome_alignment(
     if len(step_alignments) != len(required):
         return False
     blocks = set(replay_block_ids)
-    for expected_id, record in zip(required, step_alignments):
+    for expected_id, record in zip(required, step_alignments, strict=True):
         if not isinstance(record, GuidanceStepAlignment):
             return False
         if record.imagined_node_id != expected_id:
@@ -3091,9 +3060,7 @@ def read_replay_eligibility_assessment(
         reader_name="v2 reader",
         reject_claim_cut=True,
     )
-    decision = inspect_replay_controls(
-        {key: body[key] for key in _REPLAY_CONTROL_KEYS}
-    )
+    decision = inspect_replay_controls({key: body[key] for key in _REPLAY_CONTROL_KEYS})
     if body.get("eligibility") != decision.eligibility or body.get("route") != decision.route:
         raise ProtocolContractError("eligibility does not match controlled fields")
     if body.get("reasons") != list(decision.reasons):
@@ -3203,9 +3170,7 @@ def read_replay_result(payload: Mapping[str, Any]) -> ReplayResult:
         if not ids:
             raise ProtocolContractError("observed_block_ids must be a non-empty list")
         if not isinstance(raw_alignment, dict):
-            raise ProtocolContractError(
-                "completed replay result requires first_action_alignment"
-            )
+            raise ProtocolContractError("completed replay result requires first_action_alignment")
         alignment = read_first_action_alignment(raw_alignment)
         if alignment.actual_block_id is not None and alignment.actual_block_id not in ids:
             raise ProtocolContractError("actual_block_id is not an observed block")
@@ -3252,9 +3217,7 @@ def read_replay_aig(payload: Mapping[str, Any]) -> ReplayAigDocument:
     )
     provenance = body.get("provenance")
     if provenance != REPLAY_PROVENANCE:
-        raise ProtocolContractError(
-            f"provenance must be {REPLAY_PROVENANCE!r}, got {provenance!r}"
-        )
+        raise ProtocolContractError(f"provenance must be {REPLAY_PROVENANCE!r}, got {provenance!r}")
     base_revision_id = _require_str(body.get("base_revision_id"), "base_revision_id")
     replay_run_id = _require_safe_id(body.get("replay_run_id"), "replay_run_id")
     source_fork_id = _require_str(body.get("source_fork_id"), "source_fork_id")
@@ -3342,9 +3305,7 @@ def read_direct_evidence_admission(payload: Mapping[str, Any]) -> DirectEvidence
         body.get("step_alignments"), "step_alignments", allow_empty=True
     )
     _reject_duplicate_step_ids(step_alignments, "step_alignments")
-    branch_imagined_ids = _parse_str_list(
-        body.get("branch_imagined_ids"), "branch_imagined_ids"
-    )
+    branch_imagined_ids = _parse_str_list(body.get("branch_imagined_ids"), "branch_imagined_ids")
     if len(branch_imagined_ids) != len(set(branch_imagined_ids)):
         raise ProtocolContractError("branch_imagined_ids must be unique")
     replay_block_ids = _parse_str_list(body.get("replay_block_ids"), "replay_block_ids")
@@ -3443,15 +3404,11 @@ def read_direct_evidence_admission(payload: Mapping[str, Any]) -> DirectEvidence
     )
 
 
-_GUIDANCE_STEP_KEYS = frozenset(
-    {"evidence_refs", "imagined_node_id", "statement", "step_id"}
-)
+_GUIDANCE_STEP_KEYS = frozenset({"evidence_refs", "imagined_node_id", "statement", "step_id"})
 _CANDIDATE_KEYS = frozenset(
     {"acl_labels", "agent_id", "available", "capabilities", "roles", "task_member"}
 )
-_OUTCOME_EVIDENCE_KEYS = frozenset(
-    {"binding_id", "evidence_ref", "signal", "signal_kind"}
-)
+_OUTCOME_EVIDENCE_KEYS = frozenset({"binding_id", "evidence_ref", "signal", "signal_kind"})
 _REJECTION_REASONS = frozenset({GUIDANCE_REJECTION_REASON})
 
 
@@ -3648,9 +3605,7 @@ def guidance_approval_id(
 ) -> str:
     """Digest of the versioned selection inputs. Callers do not supply this id."""
     body = {
-        "candidate_catalog_hash": _require_hex(
-            candidate_catalog_hash, "candidate_catalog_hash"
-        ),
+        "candidate_catalog_hash": _require_hex(candidate_catalog_hash, "candidate_catalog_hash"),
         "proposal_content_hash": _require_hex(proposal_content_hash, "proposal_content_hash"),
         "selected_agent_id": _require_safe_id(selected_agent_id, "selected_agent_id"),
     }
@@ -3838,16 +3793,12 @@ def read_guidance_approval(payload: Mapping[str, Any]) -> GuidanceApproval:
         risk=risk,
         evidence_refs=evidence_refs,
     )
-    guidance_content_hash = _require_hex(
-        body.get("guidance_content_hash"), "guidance_content_hash"
-    )
+    guidance_content_hash = _require_hex(body.get("guidance_content_hash"), "guidance_content_hash")
     expected_guidance = protocol_content_hash(
         SCHEMA_VERSION_AIG_NATIVE_V2, OBJECT_KIND_GUIDANCE_DOCUMENT, projected
     )
     if guidance_content_hash != expected_guidance:
-        raise ProtocolContractError(
-            "guidance_content_hash does not match the guidance projection"
-        )
+        raise ProtocolContractError("guidance_content_hash does not match the guidance projection")
     return GuidanceApproval(
         schema_version=version,
         object_kind=OBJECT_KIND_GUIDANCE_APPROVAL,
@@ -3891,9 +3842,7 @@ def guidance_document_from_approval(approval: GuidanceApproval) -> dict[str, Any
     )
     document = _envelope(OBJECT_KIND_GUIDANCE_DOCUMENT, projected)
     if document["content_hash"] != approval.guidance_content_hash:
-        raise ProtocolContractError(
-            "guidance_content_hash does not match the guidance projection"
-        )
+        raise ProtocolContractError("guidance_content_hash does not match the guidance projection")
     return document
 
 
@@ -3973,15 +3922,11 @@ def read_guidance_publication(payload: Mapping[str, Any]) -> GuidancePublication
         risk=risk,
         evidence_refs=evidence_refs,
     )
-    guidance_content_hash = _require_hex(
-        body.get("guidance_content_hash"), "guidance_content_hash"
-    )
+    guidance_content_hash = _require_hex(body.get("guidance_content_hash"), "guidance_content_hash")
     if guidance_content_hash != protocol_content_hash(
         SCHEMA_VERSION_AIG_NATIVE_V2, OBJECT_KIND_GUIDANCE_DOCUMENT, projected
     ):
-        raise ProtocolContractError(
-            "guidance_content_hash does not match the guidance projection"
-        )
+        raise ProtocolContractError("guidance_content_hash does not match the guidance projection")
     return GuidancePublication(
         schema_version=version,
         object_kind=OBJECT_KIND_GUIDANCE_PUBLICATION,
@@ -4052,16 +3997,12 @@ def judge_dispatch_gates(controls: Mapping[str, Any]) -> DispatchGateJudgment:
         raise ProtocolContractError("dispatch controls must be a dict")
     _require_exact_keys(controls, _DISPATCH_CONTROL_KEYS, "dispatch controls")
     guidance_id = _require_safe_id(controls.get("guidance_id"), "guidance_id")
-    source_guidance_id = _require_safe_id(
-        controls.get("source_guidance_id"), "source_guidance_id"
-    )
+    source_guidance_id = _require_safe_id(controls.get("source_guidance_id"), "source_guidance_id")
     if source_guidance_id != guidance_id:
         raise ProtocolContractError("source_guidance_id must equal guidance_id")
     _require_hex(controls.get("guidance_content_hash"), "guidance_content_hash")
     _require_safe_id(controls.get("source_fork_id"), "source_fork_id")
-    parent_session_id = _require_safe_id(
-        controls.get("parent_session_id"), "parent_session_id"
-    )
+    parent_session_id = _require_safe_id(controls.get("parent_session_id"), "parent_session_id")
     bound_session_id = _require_safe_id(controls.get("bound_session_id"), "bound_session_id")
     principal_labels = _sorted_id_list(
         controls.get("principal_labels"), "principal_labels", allow_empty=True
@@ -4071,16 +4012,10 @@ def judge_dispatch_gates(controls: Mapping[str, Any]) -> DispatchGateJudgment:
         "bound_principal_labels",
         allow_empty=True,
     )
-    permission = _require_choice(
-        controls.get("permission"), "permission", _DISPATCH_PERMISSIONS
-    )
+    permission = _require_choice(controls.get("permission"), "permission", _DISPATCH_PERMISSIONS)
     executor_role = _require_str(controls.get("executor_role"), "executor_role")
-    executor_agent_id = _require_safe_id(
-        controls.get("executor_agent_id"), "executor_agent_id"
-    )
-    selected_agent_id = _require_safe_id(
-        controls.get("selected_agent_id"), "selected_agent_id"
-    )
+    executor_agent_id = _require_safe_id(controls.get("executor_agent_id"), "executor_agent_id")
+    selected_agent_id = _require_safe_id(controls.get("selected_agent_id"), "selected_agent_id")
     budget = _require_choice(controls.get("budget"), "budget", _BUDGET_STATES)
     isolation = _require_choice(controls.get("isolation"), "isolation", _ISOLATION_STATES)
     allowlist = _sorted_id_list(
@@ -4159,7 +4094,9 @@ def _parse_gate_results(value: Any) -> tuple[DispatchGateResult, ...]:
         _require_exact_keys(item, _GATE_RESULT_KEYS, label)
         parsed.append(
             DispatchGateResult(
-                gate=_require_choice(item.get("gate"), f"{label}.gate", frozenset(DISPATCH_GATE_ORDER)),
+                gate=_require_choice(
+                    item.get("gate"), f"{label}.gate", frozenset(DISPATCH_GATE_ORDER)
+                ),
                 passed=_require_bool(item.get("passed"), f"{label}.passed"),
                 reason=_require_str(item.get("reason"), f"{label}.reason"),
             )
@@ -4175,9 +4112,7 @@ def _read_dispatch_gate(payload: Mapping[str, Any], expected_kind: str) -> Dispa
         reader_name="v2 reader",
         reject_claim_cut=True,
     )
-    judgment = judge_dispatch_gates(
-        {key: body[key] for key in _DISPATCH_CONTROL_KEYS}
-    )
+    judgment = judge_dispatch_gates({key: body[key] for key in _DISPATCH_CONTROL_KEYS})
     identity = {key: body[key] for key in body if key not in _GATE_DERIVED_KEYS}
     decision_id = _require_hex(body.get("decision_id"), "decision_id")
     expected_id = protocol_content_hash(
@@ -4193,10 +4128,7 @@ def _read_dispatch_gate(payload: Mapping[str, Any], expected_kind: str) -> Dispa
             raise ProtocolContractError("admitted dispatch requires failed_gate to be null")
     elif failed != judgment.failed_gate:
         raise ProtocolContractError("failed_gate does not match the server rule")
-    if (
-        body.get("outcome") != judgment.outcome
-        or body.get("reasons") != list(judgment.reasons)
-    ):
+    if body.get("outcome") != judgment.outcome or body.get("reasons") != list(judgment.reasons):
         raise ProtocolContractError("outcome does not match the server rule")
     expected_outcome = (
         "blocked_pre_execution"
@@ -4217,9 +4149,7 @@ def _read_dispatch_gate(payload: Mapping[str, Any], expected_kind: str) -> Dispa
         parent_session_id=_require_safe_id(body.get("parent_session_id"), "parent_session_id"),
         bound_session_id=_require_safe_id(body.get("bound_session_id"), "bound_session_id"),
         source_fork_id=_require_safe_id(body.get("source_fork_id"), "source_fork_id"),
-        source_guidance_id=_require_safe_id(
-            body.get("source_guidance_id"), "source_guidance_id"
-        ),
+        source_guidance_id=_require_safe_id(body.get("source_guidance_id"), "source_guidance_id"),
         selected_agent_id=_require_safe_id(body.get("selected_agent_id"), "selected_agent_id"),
         executor_role=_require_str(body.get("executor_role"), "executor_role"),
         executor_agent_id=_require_safe_id(body.get("executor_agent_id"), "executor_agent_id"),
@@ -4278,8 +4208,7 @@ def dispatch_gate_document(controls: Mapping[str, Any]) -> dict[str, Any]:
     )
     body["failed_gate"] = judgment.failed_gate
     body["gates"] = [
-        {"gate": item.gate, "passed": item.passed, "reason": item.reason}
-        for item in judgment.gates
+        {"gate": item.gate, "passed": item.passed, "reason": item.reason} for item in judgment.gates
     ]
     body["outcome"] = judgment.outcome
     body["reasons"] = list(judgment.reasons)
@@ -4437,9 +4366,7 @@ def read_remediation_dispatch_confirmation(
         confirmation_id=confirmation_id,
         request_id=_require_hex(body.get("request_id"), "request_id"),
         child_run_id=_require_safe_id(body.get("child_run_id"), "child_run_id"),
-        status=_require_choice(
-            body.get("status"), "status", _DISPATCH_CONFIRMATION_STATUSES
-        ),
+        status=_require_choice(body.get("status"), "status", _DISPATCH_CONFIRMATION_STATUSES),
         executor=_require_choice(body.get("executor"), "executor", _DISPATCH_EXECUTORS),
     )
 
@@ -4837,9 +4764,7 @@ def read_production_direct_admission(payload: Mapping[str, Any]) -> ProductionDi
         reject_claim_cut=True,
     )
     identity = {
-        key: body[key]
-        for key in body
-        if key not in {"admission_id", "evidence_tier", "reasons"}
+        key: body[key] for key in body if key not in {"admission_id", "evidence_tier", "reasons"}
     }
     admission_id = _require_hex(body.get("admission_id"), "admission_id")
     expected = protocol_content_hash(
@@ -5008,9 +4933,7 @@ _KIND_READERS: dict[str, Callable[..., Any]] = {
 }
 
 
-def _read_v2_member(
-    payload: Mapping[str, Any], kind: str, catalog: BaseRevisionCatalog
-) -> Any:
+def _read_v2_member(payload: Mapping[str, Any], kind: str, catalog: BaseRevisionCatalog) -> Any:
     reader = _KIND_READERS.get(kind)
     if reader is None or kind not in _V2_DOCUMENT_KINDS:
         raise ProtocolContractError(f"object_kind must be a v2 document, got {kind!r}")
@@ -5078,9 +5001,7 @@ def _reject_native_lifecycle_fields(value: Any) -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
             if key in _NATIVE_EDGE_LIFECYCLE_FIELDS:
-                raise ProtocolContractError(
-                    f"native edge rejects claim lifecycle field {key!r}"
-                )
+                raise ProtocolContractError(f"native edge rejects claim lifecycle field {key!r}")
             _reject_native_lifecycle_fields(item)
     elif isinstance(value, list):
         for item in value:
@@ -5113,9 +5034,7 @@ def _exact_native_dict(
     return payload
 
 
-def _check_paper_block_fields(
-    record: Mapping[str, Any], label: str, *, paper_strict: bool
-) -> None:
+def _check_paper_block_fields(record: Mapping[str, Any], label: str, *, paper_strict: bool) -> None:
     """Optional paper fields on a native block.
 
     ``defect_recorded``, when present, must be an object with a non-empty
@@ -5154,15 +5073,15 @@ def _check_native_body_shape(body: Mapping[str, Any], *, paper_strict: bool = Fa
             optional=_NATIVE_BLOCK_OPTIONAL_KEYS,
         )
         _check_paper_block_fields(record, f"blocks[{index}]", paper_strict=paper_strict)
-        _exact_native_dict(record.get("segment_ref"), _NATIVE_SEGMENT_KEYS, f"blocks[{index}].segment_ref")
+        _exact_native_dict(
+            record.get("segment_ref"), _NATIVE_SEGMENT_KEYS, f"blocks[{index}].segment_ref"
+        )
         refs = record.get("source_refs")
         hashes = record.get("source_content_hashes")
         if not isinstance(refs, list) or not refs:
             raise ProtocolContractError(f"blocks[{index}].source_refs must be a non-empty list")
         if not isinstance(hashes, list):
-            raise ProtocolContractError(
-                f"blocks[{index}].source_content_hashes must be a list"
-            )
+            raise ProtocolContractError(f"blocks[{index}].source_content_hashes must be a list")
         for ref_index, ref in enumerate(refs):
             _exact_native_dict(
                 ref, _NATIVE_SOURCE_KEYS, f"blocks[{index}].source_refs[{ref_index}]"
@@ -5173,7 +5092,9 @@ def _check_native_body_shape(body: Mapping[str, Any], *, paper_strict: bool = Fa
     for index, edge in enumerate(edges):
         _exact_native_dict(edge, _NATIVE_EDGE_KEYS, f"edges[{index}]")
     coverage = _exact_native_dict(body.get("coverage"), _NATIVE_COVERAGE_KEYS, "coverage")
-    _exact_native_dict(coverage.get("total_ao_range"), _NATIVE_RANGE_KEYS, "coverage.total_ao_range")
+    _exact_native_dict(
+        coverage.get("total_ao_range"), _NATIVE_RANGE_KEYS, "coverage.total_ao_range"
+    )
     inspected = coverage.get("inspected_refs")
     if not isinstance(inspected, list):
         raise ProtocolContractError("coverage.inspected_refs must be a list")
@@ -5235,15 +5156,11 @@ def _require_safe_id(value: Any, field: str) -> str:
 def _parse_criterion_dispositions(value: Any) -> tuple[CriterionDisposition, ...]:
     """Map criterion id to a closed disposition. Keys are contract criterion ids."""
     if not isinstance(value, dict):
-        raise ProtocolContractError(
-            "criteria_dispositions must be an object keyed by criterion id"
-        )
+        raise ProtocolContractError("criteria_dispositions must be an object keyed by criterion id")
     items: list[CriterionDisposition] = []
     for key in sorted(value):
         if not is_safe_id(key):
-            raise ProtocolContractError(
-                f"criteria_dispositions key {key!r} must be a criterion id"
-            )
+            raise ProtocolContractError(f"criteria_dispositions key {key!r} must be a criterion id")
         disposition = _require_choice(
             value[key], f"criteria_dispositions.{key}", _CRITERIA_DISPOSITIONS
         )
@@ -5350,9 +5267,7 @@ def _require_choice(value: Any, field: str, choices: frozenset[str]) -> str:
 def _require_reader_author(value: Any, document: str) -> str:
     author = _require_str(value, "author_role")
     if author != _READER_ROLE:
-        raise ProtocolContractError(
-            f"{document} author_role must be reader, got {author!r}"
-        )
+        raise ProtocolContractError(f"{document} author_role must be reader, got {author!r}")
     return author
 
 
@@ -5620,9 +5535,7 @@ def _parse_execution_steps(value: Any) -> tuple[GuidanceStepAlignment, ...]:
     return _parse_step_alignments(value, "steps", allow_empty=False)
 
 
-def _reject_duplicate_step_ids(
-    steps: Sequence[GuidanceStepAlignment], field: str
-) -> None:
+def _reject_duplicate_step_ids(steps: Sequence[GuidanceStepAlignment], field: str) -> None:
     seen: set[str] = set()
     for step in steps:
         if step.imagined_node_id in seen:

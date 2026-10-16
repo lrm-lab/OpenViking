@@ -12,6 +12,10 @@ from openviking.parse.parsers.media.utils import (
 )
 from openviking.storage.index_action import FieldPatch
 from openviking.utils import embedding_utils
+from openviking.utils.embedding_input import (
+    EMBEDDING_TRUNCATION_SUFFIX,
+    estimate_embedding_input_tokens,
+)
 from openviking.utils.ingest_options import IngestOptions
 from openviking_cli.utils.config.parser_config import ImageConfig
 
@@ -323,6 +327,33 @@ async def test_vectorize_image_downsamples_large_embedding_input(monkeypatch):
     assert max(width, height) <= 64
     assert fs.content == original
     assert fs.read_file_bytes_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_vectorize_image_uses_supplied_bytes_without_second_read(monkeypatch):
+    queue = DummyQueue()
+    original = _jpeg_bytes(20, 20)
+    fs = DummyFS(b"must not be read")
+    monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))
+    monkeypatch.setattr(embedding_utils, "get_viking_fs", lambda: fs)
+    monkeypatch.setattr(
+        embedding_utils,
+        "get_openviking_config",
+        lambda: types.SimpleNamespace(
+            embedding=types.SimpleNamespace(text_source="content_only", max_input_tokens=1000),
+            image=ImageConfig(preview_max_dimension=64, max_file_size_mb=100.0),
+        ),
+    )
+
+    await embedding_utils.vectorize_file(
+        file_path="viking://resources/docs/image.jpg",
+        summary_dict={"name": "image.jpg", "summary": "image"},
+        parent_uri="viking://resources/docs",
+        ctx=DummyReq(),
+        file_content=original,
+    )
+
+    assert fs.read_file_bytes_calls == 0
 
 
 @pytest.mark.asyncio
@@ -679,6 +710,26 @@ async def test_vectorize_directory_meta_applies_merge_per_level(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_vectorize_directory_meta_writes_per_level_source_md5(monkeypatch):
+    queue = DummyQueue()
+    monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))
+    monkeypatch.setattr(embedding_utils, "get_viking_fs", lambda: DummyFS("ignored"))
+
+    await embedding_utils.vectorize_directory_meta(
+        uri="viking://user/default/resources/demo",
+        abstract="demo abstract",
+        overview="demo overview",
+        ctx=DummyReq(),
+        md5s={0: "abstract-md5", 1: "overview-md5"},
+    )
+
+    assert [item.context_data["md5"] for item in queue.items] == [
+        "abstract-md5",
+        "overview-md5",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_vectorize_directory_meta_l1_abstract_is_overview(monkeypatch):
     """L1 records must carry the overview in the abstract scalar so Rerank
     sees L1 text instead of the L0 abstract."""
@@ -1022,9 +1073,19 @@ async def test_vectorize_content_only_reads_embedding_input(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_vectorize_file_bounds_content_before_enqueue(monkeypatch):
+@pytest.mark.parametrize(
+    "content, expected, expected_tokens",
+    [
+        ("a1👍" * 100, "a1👍" * 26 + "a1" + EMBEDDING_TRUNCATION_SUFFIX, 28),
+        ("中文あ가Ｌ、" * 100, "中文あ가Ｌ、" * 4 + "中文" + EMBEDDING_TRUNCATION_SUFFIX, 28),
+        ("a1中👍" * 5, "a1中👍" * 5, 9),
+    ],
+    ids=["ordinary-characters", "wide-text", "within-budget"],
+)
+async def test_vectorize_file_bounds_content_before_enqueue(
+    monkeypatch, content, expected, expected_tokens
+):
     queue = DummyQueue()
-    content = " ".join(f"token-{i}" for i in range(200))
     fs = DummyFS(content)
     monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))
     monkeypatch.setattr(embedding_utils, "get_viking_fs", lambda: fs)
@@ -1043,8 +1104,9 @@ async def test_vectorize_file_bounds_content_before_enqueue(monkeypatch):
     )
 
     assert len(queue.items) == 1
-    assert queue.items[0].message != content
-    assert queue.items[0].message.endswith("...(truncated for embedding)")
+    message = queue.items[0].message
+    assert message == expected
+    assert estimate_embedding_input_tokens(message) == expected_tokens
     assert fs.read_file_calls == 1
 
 

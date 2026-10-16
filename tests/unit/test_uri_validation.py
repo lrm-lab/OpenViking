@@ -111,3 +111,15 @@ def test_validate_viking_uri_rejects_home_alias_for_restricted_scopes():
     scope_list = reason.split("Must be one of:", 1)[1]
     assert "resources" in scope_list
     assert "~" not in scope_list
+
+
+@pytest.mark.parametrize("role_name", ["USER", "ADMIN", "ROOT"])
+def test_legacy_session_alias_resolves_to_authenticated_user(role_name):
+    from openviking.core.uri_validation import validate_request_viking_uri
+    from openviking.server.identity import RequestContext, Role
+    from openviking_cli.session.user_id import UserIdentifier
+
+    ctx = RequestContext(user=UserIdentifier("account-a", "alice"), role=getattr(Role, role_name))
+    assert validate_request_viking_uri("viking://session/s1/messages.jsonl", ctx) == (
+        "viking://user/alice/sessions/s1/messages.jsonl"
+    )

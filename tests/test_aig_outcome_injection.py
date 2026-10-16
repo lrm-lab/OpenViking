@@ -216,7 +216,7 @@ def test_run_toolloop_default_mode_matches_fail_prompt(tmp_path: Path) -> None:
         run_id="run-fail",
         mode="fail",
     )
-    success = run_toolloop(
+    run_toolloop(
         snapshot,
         "what failed?",
         success_provider,

@@ -35,7 +35,6 @@ from openviking.session.retrieval_facade import (
     RetrievalProfile,
     RetrievalQuery,
     RetrievalResult,
-    _RankPlan,
     _allocate_stateful,
     _derive_query_seed,
     _document_text,
@@ -43,6 +42,7 @@ from openviking.session.retrieval_facade import (
     _pending_score,
     _principal_set,
     _rank_hits,
+    _RankPlan,
     coerce_profile,
     coerce_query,
     default_acl_filter,
@@ -257,9 +257,7 @@ def _experience_cards(
     cards: list[RetrievalCard] = []
     documents: list[str] = []
     _append_overlays(corpus.overlay_store, principal_labels, cards, documents)
-    _append_patterns(
-        corpus.pattern_store, corpus.overlay_store, principal_labels, cards, documents
-    )
+    _append_patterns(corpus.pattern_store, corpus.overlay_store, principal_labels, cards, documents)
     _append_guidance(corpus.guidance_publications, principal_labels, cards, documents)
     return _rank_hits(cards, documents, query, plan)
 
@@ -281,10 +279,7 @@ def _append_overlays(
     for stored in overlays:
         guard_v2_fork_consumer(stored, _V2_RETRIEVAL)
         overlay = stored.overlay
-        step_ids = [
-            step.block_id or step.imagined_node_id or ""
-            for step in overlay.branch_steps
-        ]
+        step_ids = [step.block_id or step.imagined_node_id or "" for step in overlay.branch_steps]
         cards.append(
             _card(
                 kind="fork_overlay",
@@ -467,11 +462,14 @@ def _without_legacy(cards: Sequence[RetrievalCard]) -> list[RetrievalCard]:
     return [card for card in cards if card.kind not in LEGACY_ACTIVITY_KINDS]
 
 
-def _call_rerank(hook: Any, cards: Sequence[RetrievalCard], context: Mapping[str, Any]) -> list[RetrievalCard]:
+def _call_rerank(
+    hook: Any, cards: Sequence[RetrievalCard], context: Mapping[str, Any]
+) -> list[RetrievalCard]:
     if isinstance(hook, IdentityRerank) or hasattr(hook, "rerank"):
         reranked = hook.rerank(cards, context)
     else:
         reranked = hook(cards, context)
     return [
-        card if isinstance(card, RetrievalCard) else RetrievalCard.from_dict(card) for card in reranked
+        card if isinstance(card, RetrievalCard) else RetrievalCard.from_dict(card)
+        for card in reranked
     ]

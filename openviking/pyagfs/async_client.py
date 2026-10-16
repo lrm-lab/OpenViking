@@ -304,6 +304,7 @@ class AsyncAGFSClient:
         offset: int = 0,
         sort_by: str | None = None,
         sort_order: str = "asc",
+        directories_only: bool = False,
         fs_ctx: Dict[str, str] | None = None,
     ) -> list[Dict[str, Any]]:
         """Return a sorted range from a recursive directory traversal."""
@@ -312,6 +313,8 @@ class AsyncAGFSClient:
             "node_limit": node_limit,
             "level_limit": level_limit,
         }
+        if directories_only:
+            kwargs["directories_only"] = True
         if offset:
             kwargs["offset"] = offset
         if sort_by is not None:
@@ -345,18 +348,6 @@ class AsyncAGFSClient:
             continuation_token=continuation_token,
             ctx=_fs_ctx_or_default(path, fs_ctx),
         )
-
-    async def system_sync_status(
-        self, path: str, *, fs_ctx: Dict[str, str] | None = None
-    ) -> Dict[str, Any]:
-        """Return multi-write sync status for a file or directory path."""
-        return await self.run("system_sync_status", path, ctx=_fs_ctx_or_default(path, fs_ctx))
-
-    async def system_sync_retry(
-        self, path: str, *, fs_ctx: Dict[str, str] | None = None
-    ) -> Dict[str, Any]:
-        """Retry pending multi-write sync work for a file or directory path."""
-        return await self.run("system_sync_retry", path, ctx=_fs_ctx_or_default(path, fs_ctx))
 
     # -- pathlock async wrappers ------------------------------------------------
 

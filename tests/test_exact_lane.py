@@ -61,7 +61,9 @@ def _request(**overrides: Any) -> dict[str, Any]:
 
 
 class _Calls:
-    def __init__(self, cards: list[dict[str, Any]] | None = None, records: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self, cards: list[dict[str, Any]] | None = None, records: list[dict[str, Any]] | None = None
+    ) -> None:
         self.cards = [] if cards is None else cards
         self.records = [] if records is None else records
         self.discovered: list[tuple[Any, Any]] = []
@@ -191,13 +193,23 @@ def test_invisible_hits_do_not_consume_the_public_limit() -> None:
 
 def test_limit_applies_after_authorization_and_canonical_order() -> None:
     records = [
-        _record(sourceSessionRef="session-b", aoId="b", sequence=1, matchedField="action", text="ab"),
-        _record(sourceSessionRef="session-a", aoId="a2", sequence=2, matchedField="action", text="ab"),
-        _record(sourceSessionRef="session-a", aoId="am", sequence=1, matchedField="message", text="ab"),
-        _record(sourceSessionRef="session-a", aoId="a1", sequence=1, matchedField="action", text="ab"),
+        _record(
+            sourceSessionRef="session-b", aoId="b", sequence=1, matchedField="action", text="ab"
+        ),
+        _record(
+            sourceSessionRef="session-a", aoId="a2", sequence=2, matchedField="action", text="ab"
+        ),
+        _record(
+            sourceSessionRef="session-a", aoId="am", sequence=1, matchedField="message", text="ab"
+        ),
+        _record(
+            sourceSessionRef="session-a", aoId="a1", sequence=1, matchedField="action", text="ab"
+        ),
         _record(sourceSessionRef="hidden", aoId="hid", text="ab", visible=False),
     ]
-    lane = execute_exact_lane(_clause(fields=["action", "message"]), records, limit=2, snapshot_ref=SNAP)
+    lane = execute_exact_lane(
+        _clause(fields=["action", "message"]), records, limit=2, snapshot_ref=SNAP
+    )
     assert [ref["aoId"] for ref in lane["currentEvidenceRefs"]] == ["b", "a1"]
     assert lane["exactLaneAudit"]["returnedCount"] == 2
     assert lane["exactLaneAudit"]["truncated"] is True
@@ -336,7 +348,9 @@ def test_empty_exact_does_not_backfill_discovery_and_discovery_does_not_backfill
 def test_effective_limit_enters_the_plan_hash_and_replays() -> None:
     calls = _Calls(records=[_record(text="ab")])
     service = RoleRetrievalService()
-    request = _request(operationId="op-hash", intentText=None, query={"exact": _clause(expression="ab")})
+    request = _request(
+        operationId="op-hash", intentText=None, query={"exact": _clause(expression="ab")}
+    )
     del request["intentText"]
     first = service.retrieve(
         role="reader",
@@ -420,7 +434,9 @@ def test_field_order_and_case_default_are_canonical() -> None:
     service = RoleRetrievalService()
     base = {
         "operationId": "op-canon",
-        "query": {"exact": {"expression": "ab", "syntax": "literal", "fields": ["message", "action"]}},
+        "query": {
+            "exact": {"expression": "ab", "syntax": "literal", "fields": ["message", "action"]}
+        },
     }
     first = service.retrieve(
         role="critic",

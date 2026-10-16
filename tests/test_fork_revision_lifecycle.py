@@ -78,9 +78,9 @@ def _control_contract(**overrides: object) -> dict[str, object]:
 def _passing_gates() -> dict[str, object]:
     return {
         "anchor_valid": {"valid": True, "checked_at": "2026-09-24T00:00:00.000Z"},
-        "applicability_check": {
-            dimension: APPLICABILITY_CONCLUSION_APPLICABLE for dimension in APPLICABILITY_DIMENSIONS
-        },
+        "applicability_check": dict.fromkeys(
+            APPLICABILITY_DIMENSIONS, APPLICABILITY_CONCLUSION_APPLICABLE
+        ),
         "counter_example_check": {
             "conclusion": COUNTER_EXAMPLE_CONCLUSION_CLEAR,
             "refs": ["ref-counter-1"],
@@ -179,9 +179,7 @@ def test_validated_requires_observed_branch_and_control_invalidated_appends(tmp_
     assert invalidated.status == ForkStatus.INVALIDATED
     assert invalidated.supersedes_revision_id == invalidated_source.revision_id
     assert invalidated.revision_id != invalidated_source.revision_id
-    previous = store.get_revision(
-        invalidated_source.fork_node_id, invalidated_source.revision_id
-    )
+    previous = store.get_revision(invalidated_source.fork_node_id, invalidated_source.revision_id)
     assert previous is not None
     assert previous["status"] == ForkStatus.PROVISIONAL
     loaded = store.get_fork_node(invalidated_source.fork_node_id)
@@ -195,7 +193,9 @@ def test_validated_requires_observed_branch_and_control_invalidated_appends(tmp_
 def test_grounding_snapshot_reverse_index_and_revalidation(tmp_path) -> None:
     store = _store(tmp_path)
     grounding = _grounding()
-    other = _grounding(view_revision_id="view-rev-other", position_ref="edge:7", position_kind="edge")
+    other = _grounding(
+        view_revision_id="view-rev-other", position_ref="edge:7", position_kind="edge"
+    )
     provisional = store.commit_provisional(
         store.submit_fork_draft(_payload(), influence_grounding=grounding),
         _PASSING_CHECKS,
@@ -225,9 +225,7 @@ def test_grounding_snapshot_reverse_index_and_revalidation(tmp_path) -> None:
     )
 
     position_key = influence_position_key(grounding)
-    history = store.query_intervention_history(
-        grounding.view_revision_id, position_key, _PRINCIPAL
-    )
+    history = store.query_intervention_history(grounding.view_revision_id, position_key, _PRINCIPAL)
     assert [row["fork_node_id"] for row in history] == [provisional.fork_node_id]
     assert history[0]["revision_id"] == provisional.revision_id
     assert history[0]["validation_status"] == ForkStatus.PROVISIONAL
@@ -235,9 +233,7 @@ def test_grounding_snapshot_reverse_index_and_revalidation(tmp_path) -> None:
     assert history[0]["needs_revalidation"] is False
 
     validated = store.append_validated(provisional.fork_node_id, _validated_evidence())
-    history = store.query_intervention_history(
-        grounding.view_revision_id, position_key, _PRINCIPAL
-    )
+    history = store.query_intervention_history(grounding.view_revision_id, position_key, _PRINCIPAL)
     assert [row["revision_id"] for row in history] == [
         provisional.revision_id,
         validated.revision_id,
@@ -256,9 +252,7 @@ def test_grounding_snapshot_reverse_index_and_revalidation(tmp_path) -> None:
     flagged = store.mark_needs_revalidation(grounding.view_revision_id)
     assert flagged == 2
     assert revision_path.read_bytes() == before
-    history = store.query_intervention_history(
-        grounding.view_revision_id, position_key, _PRINCIPAL
-    )
+    history = store.query_intervention_history(grounding.view_revision_id, position_key, _PRINCIPAL)
     assert len(history) == 2
     assert all(row["needs_revalidation"] is True for row in history)
     other_history = store.query_intervention_history(
@@ -367,9 +361,7 @@ def test_intervention_history_hides_rows_the_principal_cannot_see(tmp_path) -> N
     )
     assert hidden == []
 
-    visible = store.query_intervention_history(
-        grounding.view_revision_id, position_key, _PRINCIPAL
-    )
+    visible = store.query_intervention_history(grounding.view_revision_id, position_key, _PRINCIPAL)
     assert [row["revision_id"] for row in visible] == [provisional.revision_id]
     assert set(visible[0]) == {
         "fork_node_id",
@@ -394,9 +386,7 @@ def test_upsert_rejects_direct_validated_and_invalidated_status(tmp_path) -> Non
     with pytest.raises(ValueError, match="append_validated/append_invalidated"):
         store.upsert_fork_node(_payload(status=ForkStatus.VALIDATED), idempotency_key="direct-v")
     with pytest.raises(ValueError, match="append_validated/append_invalidated"):
-        store.upsert_fork_node(
-            _payload(status=ForkStatus.INVALIDATED), idempotency_key="direct-i"
-        )
+        store.upsert_fork_node(_payload(status=ForkStatus.INVALIDATED), idempotency_key="direct-i")
     assert store.get_fork_node(_payload()["fork_node_id"]) is None
 
     accepted = store.upsert_fork_node(
@@ -460,9 +450,9 @@ def test_validation_gates_all_pass_appends_validated(tmp_path) -> None:
 def test_failed_applicability_or_counter_example_stays_provisional(tmp_path) -> None:
     store, fork_node_id, revision_id = _commit(tmp_path)
     not_applicable = _validated_evidence()
-    not_applicable["applicability_check"] = {
-        dimension: APPLICABILITY_CONCLUSION_APPLICABLE for dimension in APPLICABILITY_DIMENSIONS
-    }
+    not_applicable["applicability_check"] = dict.fromkeys(
+        APPLICABILITY_DIMENSIONS, APPLICABILITY_CONCLUSION_APPLICABLE
+    )
     not_applicable["applicability_check"]["failure_mode"] = APPLICABILITY_CONCLUSION_NOT
     result = store.append_validated(fork_node_id, not_applicable)
     assert result.status == ForkStatus.PROVISIONAL

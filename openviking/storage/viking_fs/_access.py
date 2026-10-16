@@ -3,6 +3,7 @@
 """Access control, URI/path conversion, and visibility mixin for VikingFS."""
 
 import hashlib
+import inspect
 import json
 import re
 from contextlib import contextmanager
@@ -229,12 +230,15 @@ class _AccessMixin:
         access = await self._can_access_many(uris, real_ctx, action=action)
         denied = next((uri for uri in uris if not access.get(uri, False)), None)
         if denied is not None:
-            raise PermissionDeniedError(f"Access denied for {denied}", resource=denied)
+            raise PermissionDeniedError(
+                f"Access denied for {denied}: {action.value} permission required",
+                resource=denied,
+            )
 
         if action is AclAction.READ:
             return
 
-        self._ensure_identity_not_deleting(real_ctx)
+        await self._ensure_identity_not_deleting(real_ctx)
         for uri in uris:
             self._safe_uri_parts(uri)
             if uri == "viking://" and real_ctx.role == Role.USER:
@@ -289,7 +293,9 @@ class _AccessMixin:
             effective = await self.acl_manager.resolve(uri, real_ctx)
             if acl_allows(effective, real_ctx, AclAction.MANAGE):
                 return real_ctx
-        raise PermissionDeniedError(f"ACL management denied for {uri}", resource=uri)
+        raise PermissionDeniedError(
+            f"ACL management denied for {uri}: manage permission required", resource=uri
+        )
 
     async def _ensure_acl_target_exists(self, uri: str, ctx: RequestContext) -> bool:
         """Return whether the ACL target is a directory; raise if it is missing."""
@@ -398,10 +404,12 @@ class _AccessMixin:
     async def delete_acl(self, uri: str, ctx: Optional[RequestContext] = None) -> Dict[str, Any]:
         return await self.set_acl(uri, [], acl_mode=AclMode.INHERIT, ctx=ctx)
 
-    def _ensure_identity_not_deleting(self, ctx: RequestContext) -> None:
+    async def _ensure_identity_not_deleting(self, ctx: RequestContext) -> None:
         guard = getattr(self, "_deletion_guard", None)
-        if ctx.role != Role.ROOT and guard is not None and guard(ctx.account_id, ctx.user.user_id):
-            raise FailedPreconditionError("Identity deletion is in progress")
+        if ctx.role != Role.ROOT and guard is not None:
+            result = guard(ctx.account_id, ctx.user.user_id)
+            if await result if inspect.isawaitable(result) else result:
+                raise FailedPreconditionError("Identity deletion is in progress")
 
     def _ensure_supported_delete_namespace(self, normalized_uri: str) -> None:
         parts = [p for p in normalized_uri[len("viking://") :].strip("/").split("/") if p]
@@ -548,6 +556,7 @@ class _AccessMixin:
         sort_by: Optional[str] = None,
         sort_order: str = "asc",
         ctx: Optional[RequestContext] = None,
+        directories_only: bool = False,
     ):
         """Yield one visible tree page after namespace and ACL filtering."""
         real_ctx = self._ctx_or_default(ctx)
@@ -583,6 +592,7 @@ class _AccessMixin:
                 offset=raw_offset,
                 sort_by=sort_by,
                 sort_order=sort_order,
+                directories_only=directories_only,
             )
             if not raw_entries:
                 return

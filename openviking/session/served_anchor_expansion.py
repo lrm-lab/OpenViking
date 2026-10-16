@@ -26,9 +26,7 @@ HARD_MAX_STEPS = 8
 UNIQUE_SERVED_CAP = 30
 DEFAULT_OPERATION_LIMIT = 12
 PUBLIC_RELATIONS = frozenset({"similar", "skills"})
-RETIRED_RELATIONS = frozenset(
-    {"episodeInsight", "related", "collaborators", "interactions"}
-)
+RETIRED_RELATIONS = frozenset({"episodeInsight", "related", "collaborators", "interactions"})
 RETIRED_KINDS = frozenset({"episode", "insight"})
 SKILL_EDGE_ORDER = ("skillGrounding", "skillLineage")
 FORBIDDEN_AUTHORITY = frozenset(

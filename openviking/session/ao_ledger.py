@@ -187,9 +187,7 @@ def _consume_pending_skill_invocations(
             return []
         pending = list(buffer)
         matched = [
-            entry
-            for entry in pending
-            if entry.tool_call_id and entry.tool_call_id in call_ids
+            entry for entry in pending if entry.tool_call_id and entry.tool_call_id in call_ids
         ]
         if matched:
             rest = [entry for entry in pending if entry not in matched]

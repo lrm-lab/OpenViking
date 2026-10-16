@@ -77,7 +77,12 @@ class ServedDeliveryLedger:
         }
         self.deliveries.append(delivery)
         self._by_key[dedup] = delivery
-        return {"delivery": delivery, "duplicate": False, "refreshed": False, "utility_counted": False}
+        return {
+            "delivery": delivery,
+            "duplicate": False,
+            "refreshed": False,
+            "utility_counted": False,
+        }
 
 
 def build_provenance(
@@ -100,7 +105,11 @@ def build_provenance(
     priors = _cards(envelope.get("analogical_priors"))
     served = {card["id"]: card for card in candidates if card["use_class"] == "memory_candidate"}
     prior_ids = {card["id"] for card in priors}
-    if isinstance(source_ids, (str, bytes)) or not isinstance(source_ids, Sequence) or not source_ids:
+    if (
+        isinstance(source_ids, (str, bytes))
+        or not isinstance(source_ids, Sequence)
+        or not source_ids
+    ):
         raise HintError("empty_sources")
     chosen: list[str] = []
     for source_id in source_ids:
@@ -141,7 +150,9 @@ def _completeness(lanes: Mapping[str, Any]) -> str:
     ]
     if states and all(state == "completed" for state in states):
         return "complete"
-    if any(state == "completed" for state in states) and any(state == "terminated" for state in states):
+    if any(state == "completed" for state in states) and any(
+        state == "terminated" for state in states
+    ):
         return "partial"
     return "unavailable"
 

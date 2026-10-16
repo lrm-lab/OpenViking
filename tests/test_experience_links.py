@@ -6,8 +6,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from openviking.session.aig_native_protocol import guidance_execution_report_document
 from openviking.session.append_only import write_exclusive
 from openviking.session.experience_links import (
@@ -198,12 +196,8 @@ def test_acl_hides_the_other_principal_and_replay_is_unreachable(tmp_path: Path)
     hidden = links.expand(world.fork_node_id, principal_labels=(_BOB,), unresolved=())
     assert hidden["edges"] == []
     assert _code(
-        lambda: links.expand(
-            "replay-rev:hidden", principal_labels=("user:carol",), unresolved=()
-        )
-    ) == (
-        "replay_provenance_excluded"
-    )
+        lambda: links.expand("replay-rev:hidden", principal_labels=("user:carol",), unresolved=())
+    ) == ("replay_provenance_excluded")
     replay = _native_revision("replay-rev:hidden")
     catalog = world.overlays.register_base_revision(replay, acl_labels=("user:carol",))
     payload = _proposal(catalog, document_hash=replay.content_hash)
@@ -304,9 +298,7 @@ def test_guides_and_executed_as(tmp_path: Path) -> None:
 
 def test_hop_and_card_budgets_fail_closed(tmp_path: Path) -> None:
     links, world = _service(tmp_path, reader_max_hops=2, reader_max_cards=1)
-    first = links.expand(
-        "missing-subject", principal_labels=("user:carol",), unresolved=()
-    )
+    first = links.expand("missing-subject", principal_labels=("user:carol",), unresolved=())
     second = links.expand(
         "missing-subject",
         principal_labels=("user:carol",),
@@ -314,22 +306,28 @@ def test_hop_and_card_budgets_fail_closed(tmp_path: Path) -> None:
         unresolved=(),
     )
     assert second["hops"] == 2
-    assert _code(
-        lambda: links.expand(
-            "missing-subject",
-            principal_labels=("user:carol",),
-            context_id=first["context_id"],
-            unresolved=(),
+    assert (
+        _code(
+            lambda: links.expand(
+                "missing-subject",
+                principal_labels=("user:carol",),
+                context_id=first["context_id"],
+                unresolved=(),
+            )
         )
-    ) == "hop_budget_exceeded"
+        == "hop_budget_exceeded"
+    )
     cards, _world_cards = _service(tmp_path / "cards", reader_max_cards=1)
-    assert _code(
-        lambda: cards.expand(
-            _world_cards.fork_node_id,
-            principal_labels=("user:carol",),
-            unresolved=(),
+    assert (
+        _code(
+            lambda: cards.expand(
+                _world_cards.fork_node_id,
+                principal_labels=("user:carol",),
+                unresolved=(),
+            )
         )
-    ) == "hop_budget_exceeded"
+        == "hop_budget_exceeded"
+    )
     assert _code(
         lambda: links.expand(
             "x",
@@ -337,9 +335,7 @@ def test_hop_and_card_budgets_fail_closed(tmp_path: Path) -> None:
             principal_labels=("user:carol",),
             unresolved=(),
         )
-    ) == (
-        "unknown_link_type"
-    )
+    ) == ("unknown_link_type")
 
 
 def test_reader_profile_allows_eight_hops_then_refuses(tmp_path: Path) -> None:
@@ -356,11 +352,14 @@ def test_reader_profile_allows_eight_hops_then_refuses(tmp_path: Path) -> None:
         )
         context_id = result["context_id"]
     assert result["hops"] == DEFAULT_READER_MAX_HOPS
-    assert _code(
-        lambda: links.expand(
-            "nobody",
-            principal_labels=(_ALICE,),
-            context_id=context_id,
-            unresolved=(),
+    assert (
+        _code(
+            lambda: links.expand(
+                "nobody",
+                principal_labels=(_ALICE,),
+                context_id=context_id,
+                unresolved=(),
+            )
         )
-    ) == "hop_budget_exceeded"
+        == "hop_budget_exceeded"
+    )

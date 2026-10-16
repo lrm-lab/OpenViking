@@ -46,7 +46,8 @@ from openviking.session.strategy_pattern import (
     StrategyPatternError,
     StrategyPatternStore,
 )
-from tests.test_fork_node_overlay import _native_revision, _proposal, _store as _overlay_store
+from tests.test_fork_node_overlay import _native_revision, _proposal
+from tests.test_fork_node_overlay import _store as _overlay_store
 
 _DIRECT_TIERS = ("production-direct", "replay-direct")
 
@@ -298,9 +299,7 @@ def test_imagined_node_stays_counterfactual_when_evidence_is_appended(tmp_path: 
         _proposal(catalog, document_hash=revision.content_hash),
         principal_labels=("user:alice",),
     ).stored
-    overlay_path = (
-        tmp_path / FORK_NODE_OVERLAY_DIRNAME / "overlays" / f"{stored.fork_node_id}.json"
-    )
+    overlay_path = tmp_path / FORK_NODE_OVERLAY_DIRNAME / "overlays" / f"{stored.fork_node_id}.json"
     catalog_path = next((tmp_path / FORK_NODE_OVERLAY_DIRNAME / "base-revisions").glob("*.json"))
     overlay_before = overlay_path.read_bytes()
     catalog_before = catalog_path.read_bytes()
@@ -359,9 +358,7 @@ def test_exact_controlled_fields_accumulate_on_one_pattern(tmp_path: Path) -> No
     second = _overlay(catalog, "fork-b", ("img-b",))
     ordered = _overlay(catalog, "fork-c", ("img-c",))
     core = _core()
-    reversed_core = _core(
-        applicability_conditions=list(reversed(core["applicability_conditions"]))
-    )
+    reversed_core = _core(applicability_conditions=list(reversed(core["applicability_conditions"])))
     pattern = store.accept_proposal(
         first, catalog, _proposal_payload(first, "img-a", summary="wording one")
     )
@@ -469,27 +466,33 @@ def test_analogical_evidence_cannot_be_promoted_to_direct(tmp_path: Path) -> Non
     store.freeze_branch(overlay, catalog)
     for tier in _DIRECT_TIERS:
         before = _evaluation_files(tmp_path)
-        assert _code(
-            lambda tier=tier: store.append_similar_fork_evidence(
-                evaluation_id=f"eval-promote-{tier}",
+        assert (
+            _code(
+                lambda tier=tier: store.append_similar_fork_evidence(
+                    evaluation_id=f"eval-promote-{tier}",
+                    subject_kind="imagined_node",
+                    subject_id="img-retry",
+                    evidence_ref="evidence:similar",
+                    estimated_confidence=0.9,
+                    evidence_tier=tier,
+                )
+            )
+            == "analogical_promotion_forbidden"
+        )
+        assert _evaluation_files(tmp_path) == before
+    assert (
+        _code(
+            lambda: store.append_similar_fork_evidence(
+                evaluation_id="eval-observe",
                 subject_kind="imagined_node",
                 subject_id="img-retry",
-                evidence_ref="evidence:similar",
-                estimated_confidence=0.9,
-                evidence_tier=tier,
+                evidence_ref="evidence:observe",
+                estimated_confidence=0.5,
+                evidence_tier="observational",
             )
-        ) == "analogical_promotion_forbidden"
-        assert _evaluation_files(tmp_path) == before
-    assert _code(
-        lambda: store.append_similar_fork_evidence(
-            evaluation_id="eval-observe",
-            subject_kind="imagined_node",
-            subject_id="img-retry",
-            evidence_ref="evidence:observe",
-            estimated_confidence=0.5,
-            evidence_tier="observational",
         )
-    ) == "analogical_tier_required"
+        == "analogical_tier_required"
+    )
 
     stored = store.append_similar_fork_evidence(
         evaluation_id="eval-analog-1",
@@ -516,9 +519,10 @@ def test_analogical_evidence_cannot_be_promoted_to_direct(tmp_path: Path) -> Non
         "evidence:similar",
         "replay-direct",
     )
-    assert _code(
-        lambda: store.append_evaluation(promoted, admission=_direct_admission("img-retry"))
-    ) == "analogical_promotion_forbidden"
+    assert (
+        _code(lambda: store.append_evaluation(promoted, admission=_direct_admission("img-retry")))
+        == "analogical_promotion_forbidden"
+    )
     assert evaluation_path.read_bytes() == evaluation_bytes
     assert len(_evaluation_files(tmp_path)) == 1
     assert store.has_direct_evidence("imagined_node", "img-retry") is False
@@ -564,11 +568,10 @@ def test_later_direct_record_does_not_rewrite_analogical_evidence(tmp_path: Path
         "evidence:production-run",
         "production-direct",
     )
-    assert _code(
-        lambda: store.append_evaluation(
-            mismatched, admission=_direct_admission("img-retry")
-        )
-    ) == "direct_admission_mismatch"
+    assert (
+        _code(lambda: store.append_evaluation(mismatched, admission=_direct_admission("img-retry")))
+        == "direct_admission_mismatch"
+    )
     wrong_node = _evaluation(
         "imagined_node",
         "img-retry",
@@ -576,11 +579,10 @@ def test_later_direct_record_does_not_rewrite_analogical_evidence(tmp_path: Path
         "evidence:wrong-node",
         "replay-direct",
     )
-    assert _code(
-        lambda: store.append_evaluation(
-            wrong_node, admission=_direct_admission("img-other")
-        )
-    ) == "direct_admission_mismatch"
+    assert (
+        _code(lambda: store.append_evaluation(wrong_node, admission=_direct_admission("img-other")))
+        == "direct_admission_mismatch"
+    )
     direct = store.append_evaluation(
         _evaluation(
             "imagined_node",
@@ -608,18 +610,21 @@ def test_later_direct_record_does_not_rewrite_analogical_evidence(tmp_path: Path
     )
     assert observed.evidence_tier == "model-only"
     assert store.has_direct_evidence("strategy_pattern", pattern.pattern_id) is False
-    assert _code(
-        lambda: store.append_evaluation(
-            _evaluation(
-                "strategy_pattern",
-                pattern.pattern_id,
-                "eval-outcome-missing",
-                "evidence:outcome-missing",
-                "replay-direct",
-            ),
-            admission=_direct_admission("img-retry"),
+    assert (
+        _code(
+            lambda: store.append_evaluation(
+                _evaluation(
+                    "strategy_pattern",
+                    pattern.pattern_id,
+                    "eval-outcome-missing",
+                    "evidence:outcome-missing",
+                    "replay-direct",
+                ),
+                admission=_direct_admission("img-retry"),
+            )
         )
-    ) == "direct_admission_mismatch"
+        == "direct_admission_mismatch"
+    )
     replay = store.append_evaluation(
         _evaluation(
             "strategy_pattern",
@@ -657,15 +662,18 @@ def test_confidence_adjustment_is_a_new_analogical_append(tmp_path: Path) -> Non
         evidence_ref="evidence:similar-1",
         estimated_confidence=0.25,
     )
-    assert _code(
-        lambda: store.append_similar_fork_evidence(
-            evaluation_id="eval-analog-1",
-            subject_kind="imagined_node",
-            subject_id="img-retry",
-            evidence_ref="evidence:similar-1",
-            estimated_confidence=0.5,
+    assert (
+        _code(
+            lambda: store.append_similar_fork_evidence(
+                evaluation_id="eval-analog-1",
+                subject_kind="imagined_node",
+                subject_id="img-retry",
+                evidence_ref="evidence:similar-1",
+                estimated_confidence=0.5,
+            )
         )
-    ) == "evaluation_conflict"
+        == "evaluation_conflict"
+    )
     assert store.estimated_confidence("imagined_node", "img-retry") == 0.25
     updated = store.append_similar_fork_evidence(
         evaluation_id="eval-analog-2",
@@ -691,15 +699,18 @@ def test_confidence_adjustment_is_a_new_analogical_append(tmp_path: Path) -> Non
         )
     before = _evaluation_files(tmp_path)
     for bad in (1.1, -0.01, True, "0.25"):
-        assert _code(
-            lambda bad=bad: store.append_similar_fork_evidence(
-                evaluation_id="eval-bad-confidence",
-                subject_kind="imagined_node",
-                subject_id="img-retry",
-                evidence_ref="evidence:bad",
-                estimated_confidence=bad,
+        assert (
+            _code(
+                lambda bad=bad: store.append_similar_fork_evidence(
+                    evaluation_id="eval-bad-confidence",
+                    subject_kind="imagined_node",
+                    subject_id="img-retry",
+                    evidence_ref="evidence:bad",
+                    estimated_confidence=bad,
+                )
             )
-        ) == "invalid_confidence"
+            == "invalid_confidence"
+        )
     assert _evaluation_files(tmp_path) == before
 
 

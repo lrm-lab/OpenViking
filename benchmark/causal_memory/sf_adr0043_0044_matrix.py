@@ -34,10 +34,8 @@ from openviking.session.active_retrieval import (  # noqa: E402
     retrieve_active,
 )
 from openviking.session.aig_native_protocol import (  # noqa: E402
-    OBJECT_KIND_AGENT_CANDIDATE_CATALOG,
     OBJECT_KIND_FIRST_ACTION_ALIGNMENT,
     OBJECT_KIND_FORK_PROPOSAL,
-    OBJECT_KIND_GUIDED_COUNTERFACTUAL_BRANCH,
     OBJECT_KIND_OUTCOME_CONTRACT,
     OBJECT_KIND_STRATEGY_PATTERN_PROPOSAL,
     OBJECT_KIND_TASK_OUTCOME_ASSESSMENT,
@@ -96,8 +94,8 @@ from openviking.session.influence_view import (  # noqa: E402
     CONSTRUCTION_MODE_ADAPTIVE_AGENTIC,
     CONSTRUCTION_MODE_NATIVE_SINGLE_PASS,
     PURPOSE_POST_RUN_INDEX,
-    AORange,
     AigNativeEdge,
+    AORange,
     CoverageManifest,
     InfluenceBlock,
     SegmentRef,
@@ -515,9 +513,7 @@ def _load_instance(family_dir: Path) -> TaskSpec:
         "tests": [item.criterion_id for item in criteria],
     }
     seed = _sha256(
-        json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
+        json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     )
     return TaskSpec(
         family=family_dir.name,
@@ -706,7 +702,7 @@ def _row_success(spec: TaskSpec, root: Path) -> dict[str, Any]:
     _check(result.action == ACTION_RETAINED, f"action={result.action}")
     _check(result.fork_node_id is None, "success created a fork")
     _check(result.child_run_id is None, "success created a child run")
-    _check(counts == {key: 0 for key in counts}, f"success objects={counts}")
+    _check(counts == dict.fromkeys(counts, 0), f"success objects={counts}")
     frozen = gate.read_frozen_view(
         task_id=spec.task_id,
         session_id=spec.session_id,
@@ -1035,7 +1031,7 @@ def _tool_script(spec: TaskSpec) -> tuple[list[tuple[str, dict[str, Any]]], str]
         )
     )
     defect_id = ids[-2]
-    for source, target in zip(ids, ids[1:]):
+    for source, target in zip(ids, ids[1:], strict=False):
         if target == "end-1":
             effect = "fxstop"
         elif target == defect_id:
@@ -1063,7 +1059,9 @@ def _tool_script(spec: TaskSpec) -> tuple[list[tuple[str, dict[str, Any]]], str]
     return script, defect_id
 
 
-def _proposal(catalog: Any, revision: Any, anchor: str, factual: str, imagined: str) -> dict[str, Any]:
+def _proposal(
+    catalog: Any, revision: Any, anchor: str, factual: str, imagined: str
+) -> dict[str, Any]:
     return _envelope(
         OBJECT_KIND_FORK_PROPOSAL,
         {
@@ -1129,7 +1127,9 @@ def _tool_forks(
     }
     locked = TForkSurface(root, external_evidence=(), **common)
     names = {name for name, _text in locked.catalog()}
-    _check(names.isdisjoint(ACTION_VERBS), f"locked catalog listed {sorted(names & set(ACTION_VERBS))}")
+    _check(
+        names.isdisjoint(ACTION_VERBS), f"locked catalog listed {sorted(names & set(ACTION_VERBS))}"
+    )
     probe = _proposal(catalog, revision, "task-1", "task-1", "img-probe")
     _check(
         _coded(
@@ -1141,7 +1141,9 @@ def _tool_forks(
     )
     _check(
         _coded(
-            lambda: locked.submit_fork_proposal(probe, [], retrieval_id="ignored", recorded_at=RECORDED),
+            lambda: locked.submit_fork_proposal(
+                probe, [], retrieval_id="ignored", recorded_at=RECORDED
+            ),
             TForkError,
         )
         == "phase_locked",
@@ -1157,7 +1159,10 @@ def _tool_forks(
         for index, item in enumerate(spec.criteria)
     )
     opened = TForkSurface(root, external_evidence=evidence, **common)
-    _check(set(ACTION_VERBS) <= {name for name, _text in opened.catalog()}, "action verbs stayed hidden")
+    _check(
+        set(ACTION_VERBS) <= {name for name, _text in opened.catalog()},
+        "action verbs stayed hidden",
+    )
     return {
         "catalog": catalog,
         "common": common,
@@ -1233,7 +1238,9 @@ def _budget(bundle: dict[str, Any], revision: Any, anchor: str) -> dict[str, Any
     )
     _check(
         _coded(
-            lambda: card_surface.expand_experience_links(first["fork_node_id"], unresolved=("gap",)),
+            lambda: card_surface.expand_experience_links(
+                first["fork_node_id"], unresolved=("gap",)
+            ),
             TForkError,
         )
         == "hop_budget_exceeded",
@@ -1275,7 +1282,10 @@ def _row_toolloop(spec: TaskSpec, root: Path) -> dict[str, Any]:
         run_id=spec.task_id,
     )
     failed = [(item.verb, item.error_code) for item in built.audit if not item.ok]
-    _check(built.status == "submitted" and not failed, f"toolloop status={built.status} failed={failed[:6]}")
+    _check(
+        built.status == "submitted" and not failed,
+        f"toolloop status={built.status} failed={failed[:6]}",
+    )
     surface = AigToolSurface(snapshot, root=root / "loop", run_id=spec.task_id)
     _check(surface.submitted, "reopened toolloop draft was not submitted")
     if spec.refine:
@@ -1334,7 +1344,9 @@ def _row_toolloop(spec: TaskSpec, root: Path) -> dict[str, Any]:
         revision.construction_mode,
     )
     if spec.refine:
-        _check(compiled.entered_loop is True and compiled.revision_rounds == 1, "refine lane drifted")
+        _check(
+            compiled.entered_loop is True and compiled.revision_rounds == 1, "refine lane drifted"
+        )
     else:
         _check(
             compiled.entered_loop is False and compiled.revision_rounds == 0,
@@ -1350,7 +1362,9 @@ def _row_toolloop(spec: TaskSpec, root: Path) -> dict[str, Any]:
         construction_run=compiled.run,
         sidecar_path=compiled.sidecar_path,
     )
-    _check(reader.reader_report_hash == compiled.run.reader_report_hash, "reader report was not frozen")
+    _check(
+        reader.reader_report_hash == compiled.run.reader_report_hash, "reader report was not frozen"
+    )
     _check(not reader.budget_exhausted, "reader budget exhausted")
     _check(bool(reader.anchor_candidates), "anchor candidates were empty")
     defects = {
@@ -1405,8 +1419,10 @@ def _row_uncertain(spec: TaskSpec, root: Path) -> dict[str, Any]:
     _check(result.decision == DECISION_UNCERTAIN, f"decision={result.decision}")
     _check(result.reason == REASON_CRITERIA_MISSING, f"reason={result.reason}")
     _check(result.action == ACTION_ADVICE, f"action={result.action}")
-    _check(result.fork_node_id is None and result.child_run_id is None, "uncertain created an object")
-    _check(counts == {key: 0 for key in counts}, f"uncertain objects={counts}")
+    _check(
+        result.fork_node_id is None and result.child_run_id is None, "uncertain created an object"
+    )
+    _check(counts == dict.fromkeys(counts, 0), f"uncertain objects={counts}")
     _check(ACTION_ADVICE in kinds, "diagnostic advice was not audited")
     _check(ACTION_DISPATCHED not in kinds, "uncertain dispatched")
     return {
@@ -1450,13 +1466,19 @@ def _row_acl(spec: TaskSpec, root: Path) -> dict[str, Any]:
     second = once()
     after = _counts(root)
     refused = [
-        row for row in gate.audit_events() if row.get("outcome") == AUDIT_REFUSED or row.get("event_kind") == AUDIT_REFUSED
+        row
+        for row in gate.audit_events()
+        if row.get("outcome") == AUDIT_REFUSED or row.get("event_kind") == AUDIT_REFUSED
     ]
     _check(_acl_class(first), f"terminal={first}")
     _check(_acl_class(second), f"repeat terminal={second}")
-    _check(before == {key: 0 for key in before}, f"acl objects={before}")
+    _check(before == dict.fromkeys(before, 0), f"acl objects={before}")
     _check(after == before, "repeat acl deliver created an object")
-    _check(any(_acl_class(str(row.get("reason") or row.get("event_kind"))) for row in refused) or _acl_class(first), "acl audit missing")
+    _check(
+        any(_acl_class(str(row.get("reason") or row.get("event_kind"))) for row in refused)
+        or _acl_class(first),
+        "acl audit missing",
+    )
     return {"objects": before, "terminal": first}
 
 
@@ -1479,7 +1501,9 @@ def _row_legacy(spec: TaskSpec) -> dict[str, Any]:
     payload = json.loads(LEGACY_FIXTURE.read_text(encoding="utf-8"))
     document = read_legacy_claim_cut(payload)
     _check(document.content_hash == payload["content_hash"], "legacy content hash drifted")
-    _check(document.claim.claim_id == payload["body"]["claim"]["claim_id"], "legacy claim was not read")
+    _check(
+        document.claim.claim_id == payload["body"]["claim"]["claim_id"], "legacy claim was not read"
+    )
     _check(
         document.cut_grounding.content_hash == payload["body"]["cut_grounding"]["content_hash"],
         "legacy cut hash drifted",
@@ -1547,9 +1571,7 @@ def _run_task(spec: TaskSpec) -> dict[str, Any]:
             "uncertain_advice_only": _guard(
                 f"{spec.family} uncertain", lambda: _row_uncertain(spec, base / "uncertain")
             ),
-            "acl_fail_closed": _guard(
-                f"{spec.family} acl", lambda: _row_acl(spec, base / "acl")
-            ),
+            "acl_fail_closed": _guard(f"{spec.family} acl", lambda: _row_acl(spec, base / "acl")),
             "legacy_default_deny_with_audit": _guard(
                 f"{spec.family} legacy", lambda: _row_legacy(spec)
             ),
@@ -1578,14 +1600,20 @@ def _assert_public(value: Any, path: str = "$") -> None:
             _assert_public(item, f"{path}[{index}]")
         return
     if isinstance(value, str):
-        if _UUID.search(value) or value.startswith("/") or any(
-            token in value for token in ("/tmp/", "/data/", "/home/", "root-disk", "worktrees")
+        if (
+            _UUID.search(value)
+            or value.startswith("/")
+            or any(
+                token in value for token in ("/tmp/", "/data/", "/home/", "root-disk", "worktrees")
+            )
         ):
             raise SystemExit(f"report leaked a path or uuid at {path}")
 
 
 def _select_families(root: Path, requested: str | None) -> list[str]:
-    found = sorted(path.name for path in root.iterdir() if path.is_dir() and not path.name.startswith("."))
+    found = sorted(
+        path.name for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")
+    )
     if not found:
         raise SystemExit(f"no families under {root}")
     if requested is None:
@@ -1607,7 +1635,10 @@ def _done(task: dict[str, Any]) -> bool:
     rows = task.get("rows")
     if not isinstance(rows, dict):
         return False
-    return all(isinstance(rows.get(name), dict) and rows[name].get("status") == "pass" for name in ROW_NAMES)
+    return all(
+        isinstance(rows.get(name), dict) and rows[name].get("status") == "pass"
+        for name in ROW_NAMES
+    )
 
 
 def _print_table(tasks: list[dict[str, Any]]) -> None:

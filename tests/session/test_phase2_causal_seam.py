@@ -12,20 +12,21 @@ import pytest
 from openviking.server.identity import RequestContext, Role
 from openviking.service.session_service import SessionService
 from openviking.service.task_tracker import set_task_tracker
-from openviking.session.influence_projection import REMOVAL_SUPERSEDED, ProjectionRegistry
+from openviking.session.extraction_write import (
+    NATIVE_EDGE_INDEX_FILENAME,
+    NativeEdgeViewStore,
+    NativeExtractionPayload,
+)
 from openviking.session.influence_view import (
     CONSTRUCTION_MODE_FALLBACK,
-    CONSTRUCTION_MODE_NATIVE_SINGLE_PASS,
     PURPOSE_POST_RUN_INDEX,
     ViewSupersedeIndex,
 )
-from openviking.session.retrieval_wiring import build_retrieval_facade
 from openviking.session.session import Session
-from openviking.session.subgraph_forks import default_failure_grounding_position
-from openviking.session.trajectory_index_hook import PROJECTIONS_FILENAME, VIEWS_FILENAME
+from openviking.session.trajectory_index_hook import VIEWS_FILENAME
 from openviking.storage.queuefs.session_commit_msg import SessionCommitMsg
 from openviking_cli.session.user_id import UserIdentifier
-from tests.test_extraction_write import ExtractionPayload, _payload_for
+from tests.test_extraction_write import ExtractionPayload, _block, _coverage, _payload_for
 from tests.test_trajectory_index_hook import (
     SESSION_ID,
     SESSION_URI,
@@ -34,12 +35,11 @@ from tests.test_trajectory_index_hook import (
     _set_causal,
 )
 
-_OWNER_LABEL = "user:default"
 
-
-def _provider(session_id: str, task_run_id: str, outcome_status: str) -> ExtractionPayload:
+def _provider(session_id: str, task_run_id: str, outcome_status: str) -> NativeExtractionPayload:
     del task_run_id, outcome_status
-    return _payload_for(session_id)
+    blocks = [_block("b-1", [1], session_id=session_id)]
+    return NativeExtractionPayload(blocks, (), _coverage(blocks))
 
 
 async def _phase2(
@@ -130,56 +130,39 @@ async def test_phase2_without_provider_keeps_the_single_fallback_revision(
         assert len(history) == 1
         assert history[0].construction_mode == CONSTRUCTION_MODE_FALLBACK
         assert history[0].revision_id == f"post-run:{SESSION_ID}:{committed['task_id']}"
-        assert history[0].revision_id == ViewSupersedeIndex(
-            session._viking_fs.root / VIEWS_FILENAME
-        ).latest(SESSION_ID, PURPOSE_POST_RUN_INDEX).revision_id
+        assert (
+            history[0].revision_id
+            == ViewSupersedeIndex(session._viking_fs.root / VIEWS_FILENAME)
+            .latest(SESSION_ID, PURPOSE_POST_RUN_INDEX)
+            .revision_id
+        )
         assert calls == []
     finally:
         set_task_tracker(None)
 
 
 @pytest.mark.asyncio
-async def test_phase2_with_provider_registers_adaptive_beside_fallback(
+async def test_phase2_with_provider_registers_native_beside_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     try:
-        session, _message, committed = await _phase2(
-            tmp_path, monkeypatch, provider=_provider
-        )
+        session, _message, committed = await _phase2(tmp_path, monkeypatch, provider=_provider)
         task_id = committed["task_id"]
         fallback_id = f"post-run:{SESSION_ID}:{task_id}"
-        adaptive_id = f"{fallback_id}:adaptive"
         history = _history(session._viking_fs.root)
-        latest = ViewSupersedeIndex(session._viking_fs.root / VIEWS_FILENAME).latest(
-            SESSION_ID, PURPOSE_POST_RUN_INDEX
-        )
+        native = NativeEdgeViewStore(
+            session._viking_fs.root / NATIVE_EDGE_INDEX_FILENAME
+        ).revisions()
         assert _done(session, committed["archive_uri"])
-        assert [item.revision_id for item in history] == [fallback_id, adaptive_id]
-        assert [item.construction_mode for item in history] == [
-            CONSTRUCTION_MODE_FALLBACK,
-            CONSTRUCTION_MODE_NATIVE_SINGLE_PASS,
-        ]
-        assert latest is not None
-        assert latest.revision_id == adaptive_id
-        assert latest.content_hash != history[0].content_hash
-
-        facade = build_retrieval_facade(
-            session=session, ctx=session.ctx, viking_fs=session._viking_fs
-        )
-        loaded = facade.retrieval_subgraph._revision(adaptive_id)
-        assert loaded.revision_id == adaptive_id
-        assert loaded.content_hash == latest.content_hash
-
-        registry = ProjectionRegistry(session._viking_fs.root / PROJECTIONS_FILENAME)
-        active = registry.search(principal_labels=(_OWNER_LABEL,))
-        assert active
-        assert {card.source_pointer.view_revision_id for card in active} == {adaptive_id}
-        withdrawn = [
-            record.card.source_pointer.view_revision_id
-            for record in registry.removed_records()
-            if record.reason == REMOVAL_SUPERSEDED
-        ]
-        assert fallback_id in withdrawn
+        assert [item.revision_id for item in history] == [fallback_id]
+        assert history[0].construction_mode == CONSTRUCTION_MODE_FALLBACK
+        assert len(native) == 1
+        revision = native[0]
+        assert revision.revision_id == f"{fallback_id}:native"
+        assert revision.content_hash
+        assert revision.blocks[0].source_refs[0].sequence == 1
+        assert revision.blocks[0].source_refs[0].session_id == SESSION_ID
+        assert revision.coverage.inspected_refs == revision.blocks[0].source_refs
     finally:
         set_task_tracker(None)
 
@@ -223,52 +206,48 @@ async def test_phase2_replay_does_not_register_a_third_revision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     try:
-        session, message, committed = await _phase2(
-            tmp_path, monkeypatch, provider=_provider
-        )
+        session, message, committed = await _phase2(tmp_path, monkeypatch, provider=_provider)
         done_uri = f"{committed['archive_uri']}/.done"
+        native_path = session._viking_fs.root / NATIVE_EDGE_INDEX_FILENAME
+        before = native_path.read_bytes()
         del session._viking_fs.files[done_uri]
         await session.resume_queued_commit(message)
         history = _history(session._viking_fs.root)
         assert _done(session, committed["archive_uri"])
-        assert len(history) == 2
-        assert history[1].revision_id.endswith(":adaptive")
+        assert len(history) == 1
+        native = NativeEdgeViewStore(native_path).revisions()
+        assert len(native) == 1
+        assert native[0].revision_id.endswith(":native")
+        assert native_path.read_bytes() == before
     finally:
         set_task_tracker(None)
 
 
 @pytest.mark.asyncio
-async def test_phase2_completes_when_diagnosis_sink_raises(
+async def test_phase2_refuses_legacy_claims_without_emitting_diagnosis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     received: list[tuple] = []
 
+    def _legacy(session_id: str, task_run_id: str, outcome_status: str) -> ExtractionPayload:
+        del task_run_id, outcome_status
+        return _payload_for(session_id)
+
     def _sink(briefs) -> None:
         received.append(tuple(briefs))
-        raise RuntimeError("diagnosis sink failed")
+        raise RuntimeError("diagnosis sink must not receive rejected claims")
 
     try:
         session, _message, committed = await _phase2(
-            tmp_path, monkeypatch, provider=_provider, sink=_sink
-        )
-        latest = ViewSupersedeIndex(session._viking_fs.root / VIEWS_FILENAME).latest(
-            SESSION_ID, PURPOSE_POST_RUN_INDEX
+            tmp_path, monkeypatch, provider=_legacy, sink=_sink
         )
         assert _done(session, committed["archive_uri"])
-        assert latest is not None
-        failures = [item for item in latest.retrieval_subgraphs if item.is_failure]
-        assert len(received) == 1
-        assert len(received[0]) == len(failures)
-        assert len(failures) >= 1
-        for brief, subgraph in zip(received[0], failures, strict=True):
-            assert brief.view_revision_id == latest.revision_id
-            assert brief.subgraph_id == subgraph.subgraph_id
-            assert brief.grounding_position == default_failure_grounding_position(
-                latest, subgraph.subgraph_id
-            )
-            assert brief.grounding_position[0] == "block"
-            assert brief.grounding_position[1].startswith("block:")
-            assert brief.fork_idempotency_key
+        history = _history(session._viking_fs.root)
+        assert len(history) == 1
+        assert history[0].construction_mode == CONSTRUCTION_MODE_FALLBACK
+        native = NativeEdgeViewStore(session._viking_fs.root / NATIVE_EDGE_INDEX_FILENAME)
+        assert native.revisions() == ()
+        assert received == []
     finally:
         set_task_tracker(None)
 

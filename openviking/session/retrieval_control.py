@@ -17,16 +17,12 @@ from dataclasses import dataclass
 from openviking.session.memory_role_retrieval import EXACT_CAPABILITY_ABSENT, MEMORY_ROLE
 
 CONTROL_POLICY_VERSION = (
-    "memory-control-budget/Q143-A"
-    "+memory-deadline/Q144-B"
-    "+memory-cancellation/Q145-A"
+    "memory-control-budget/Q143-A+memory-deadline/Q144-B+memory-cancellation/Q145-A"
 )
 COMPLETENESS_POLICY_VERSION = "memory-partial-hint/Q146-B"
 EXACT_LANE = "current_log_exact"
 DISCOVERY_LANE = "memory_discovery"
-PARENT_CANCEL_CAUSES = frozenset(
-    {"client_abort", "orchestrator_cancel", "shutdown", "revocation"}
-)
+PARENT_CANCEL_CAUSES = frozenset({"client_abort", "orchestrator_cancel", "shutdown", "revocation"})
 
 
 class ControlError(ValueError):
@@ -232,9 +228,7 @@ class RetrievalControl:
 
 def completeness(lanes: dict[str, dict[str, object]]) -> str:
     dispatched = [
-        audit
-        for audit in lanes.values()
-        if audit.get("executionState") != "not_dispatched"
+        audit for audit in lanes.values() if audit.get("executionState") != "not_dispatched"
     ]
     if not dispatched:
         return "unavailable"
@@ -262,11 +256,15 @@ def _open_lane(
     if type(window) is not int or window < 1 or type(budget) is not int or budget < 1:
         raise ControlError("invalid_policy")
     deadline = min(parent_deadline_ms, now_ms + window)
-    digest = hashlib.sha256(f"{parent_lease_ref}|{CONTROL_POLICY_VERSION}|{name}".encode()).hexdigest()
+    digest = hashlib.sha256(
+        f"{parent_lease_ref}|{CONTROL_POLICY_VERSION}|{name}".encode()
+    ).hexdigest()
     return _Lane(name=name, lease_ref=f"child-{digest[:16]}", deadline_ms=deadline, budget=budget)
 
 
-def _expansion_binding(parent_lease_ref: str, parent_deadline_ms: int, now_ms: int) -> dict[str, object]:
+def _expansion_binding(
+    parent_lease_ref: str, parent_deadline_ms: int, now_ms: int
+) -> dict[str, object]:
     digest = hashlib.sha256(
         f"{parent_lease_ref}|expansion|{CONTROL_POLICY_VERSION}".encode()
     ).hexdigest()

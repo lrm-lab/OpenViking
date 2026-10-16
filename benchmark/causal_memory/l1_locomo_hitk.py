@@ -19,6 +19,7 @@ Metric: any-hit@{5,10} -- a question counts as hit when any gold evidence
 dia_id appears in the top-k retrieved messages; plus overall union recall and
 zero-hit share. Per LoCoMo category breakdown is reported.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -90,7 +91,14 @@ def ingest_conversation(conv: dict, work: Path) -> tuple[str, list[dict]]:
                 observation={"synopsis": m["text"]},
                 message_ref={"message_id": m["dia_id"]},
             )
-            atoms.append({"ao_id": rec.ao_id, "dia_id": m["dia_id"], "text": m["text"], "tokens": _tokens(m["text"])})
+            atoms.append(
+                {
+                    "ao_id": rec.ao_id,
+                    "dia_id": m["dia_id"],
+                    "text": m["text"],
+                    "tokens": _tokens(m["text"]),
+                }
+            )
     return session_id, atoms
 
 
@@ -102,7 +110,9 @@ def build_facade(work: Path, session_id: str) -> HybridRetrievalFacade:
     )
 
 
-def production_ranked_dias(facade: HybridRetrievalFacade, keywords: list[str], ao_to_dia: dict[str, str]) -> list[str]:
+def production_ranked_dias(
+    facade: HybridRetrievalFacade, keywords: list[str], ao_to_dia: dict[str, str]
+) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
     for kw in keywords:
@@ -204,7 +214,9 @@ def main() -> None:
         print(f"cat {cat}: n={c['n']}  P@10={c['p10'] / c['n']:.1%}  T@10={c['t10'] / c['n']:.1%}")
 
     if args.out:
-        Path(args.out).write_text(json.dumps(per_question, ensure_ascii=False, indent=1), encoding="utf-8")
+        Path(args.out).write_text(
+            json.dumps(per_question, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
         print(f"\nper-question rows -> {args.out}")
 
 

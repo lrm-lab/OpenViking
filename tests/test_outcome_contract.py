@@ -43,8 +43,8 @@ from openviking.session.outcome_contract import (
     REASON_READER_INFERENCE_ONLY,
     REASON_READER_SUCCESS,
     REASON_READER_UNCERTAIN,
-    ExternalOutcomeEvidence,
     CriticViolations,
+    ExternalOutcomeEvidence,
     OutcomeAdjudication,
     OutcomeAssessmentService,
     OutcomeContractError,
@@ -150,9 +150,7 @@ def _signal(
 
 def _frozen_run(run_id: str = "run-outcome") -> tuple[AigConstructionRun, dict[str, str], str]:
     run = AigConstructionRun(run_id)
-    sessions = {
-        role: run.session_for(role) for role in ("builder", "critic", "refiner", "reader")
-    }
+    sessions = {role: run.session_for(role) for role in ("builder", "critic", "refiner", "reader")}
     run.submit_draft(sessions["builder"], {"graph": []})
     run.critique(sessions["critic"], [{"code": "gap", "severity": "high"}])
     run.refine(sessions["refiner"], {"graph": ["n"]})
@@ -267,9 +265,7 @@ def test_critic_violations_are_not_a_task_failure() -> None:
         report_hash="b" * 64,
         author_role="critic",
         verdict="failure",
-        criterion_dispositions=(
-            CriterionDisposition("crit-error-budget", "explicit"),
-        ),
+        criterion_dispositions=(CriterionDisposition("crit-error-budget", "explicit"),),
         evidence_refs=(),
     )
     with pytest.raises(OutcomeContractError) as exc_info:
@@ -304,9 +300,7 @@ def test_reader_assessment_binds_report_hash_evidence_and_criteria(tmp_path: Pat
     )
     assert stored.author_role == "reader"
     assert stored.report_hash == report_hash
-    assert stored.criterion_dispositions == (
-        CriterionDisposition("crit-error-budget", "explicit"),
-    )
+    assert stored.criterion_dispositions == (CriterionDisposition("crit-error-budget", "explicit"),)
     assert stored.evidence_refs[0].ao_id == "ao-eval-1"
     assert stored.evidence_refs[0].evidence_content_hash == "hash-eval-1"
     assert stored.content_hash == payload["content_hash"]

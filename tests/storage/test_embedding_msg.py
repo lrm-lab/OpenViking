@@ -48,6 +48,21 @@ def test_embedding_msg_roundtrip_preserves_queue_enqueue_time():
     assert EmbeddingMsg.from_dict(msg.to_dict()).queue_enqueued_at == 123.456
 
 
+def test_embedding_msg_roundtrip_preserves_failure_requeue_count():
+    msg = EmbeddingMsg(
+        "hello",
+        {"uri": "viking://resources/demo", "account_id": "default"},
+        failure_requeue_count=1,
+    )
+
+    restored = EmbeddingMsg.from_dict(msg.to_dict())
+    legacy = msg.to_dict()
+    legacy.pop("failure_requeue_count")
+
+    assert restored.failure_requeue_count == 1
+    assert EmbeddingMsg.from_dict(legacy).failure_requeue_count == 0
+
+
 def test_legacy_embedding_msg_without_account_id_is_rejected():
     with pytest.raises(ValueError, match="account_id"):
         EmbeddingMsg.from_dict(
@@ -138,7 +153,7 @@ def test_embedding_update_fields_rejects_vector_fields():
 
 def test_field_patch_roundtrip_and_resolution():
     patch = FieldPatch(
-        values={"search_tags": ["scope=new"], "md5": "new-md5"},
+        values={"search_tags": ["scope=new", "memory_type=preferences"], "md5": "new-md5"},
         modes={"search_tags": "append"},
         seed_fields={
             "uri": "viking://resources/demo/a.py",
@@ -150,11 +165,21 @@ def test_field_patch_roundtrip_and_resolution():
 
     restored = FieldPatch.from_dict(patch.to_dict())
 
-    assert restored.resolve({"search_tags": ["env=old"], "md5": "old-md5"}) == {
-        "search_tags": ["env=old", "scope=new"],
+    existing = {
+        "context_type": "memory",
+        "search_tags": ["env=old", "memory_type=events"],
+        "md5": "old-md5",
+    }
+    assert restored.resolve(existing) == {
+        "search_tags": ["memory_type=events", "env=old", "scope=new"],
         "md5": "new-md5",
     }
     assert restored.seed_fields["vector"] == [0.1, 0.2]
+    # Ordinary replacement can clear user tags, but cannot create or overwrite a type.
+    restored.modes["search_tags"] = "replace"
+    restored.values["search_tags"] = ["memory_type=preferences"]
+    assert restored.resolve(existing)["search_tags"] == ["memory_type=events"]
+    assert restored.resolve({"context_type": "memory", "search_tags": []})["search_tags"] == []
 
 
 @pytest.mark.parametrize(
@@ -295,6 +320,7 @@ def test_legacy_upsert_discards_historically_ignored_fields():
         "id",
         "telemetry_id",
         "queue_enqueued_at",
+        "failure_requeue_count",
         "action",
         "payload",
     }

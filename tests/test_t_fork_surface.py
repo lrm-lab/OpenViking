@@ -6,8 +6,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from openviking.session.aig_role_chain import AigConstructionRun
 from openviking.session.outcome_contract import OutcomeAssessmentService, OutcomeContractStore
 from openviking.session.t_fork_surface import ACTION_VERBS, TForkError, TForkSurface
@@ -57,17 +55,16 @@ def test_action_verbs_stay_locked_until_confirmed_failure(tmp_path: Path) -> Non
         lambda: locked.submit_fork_proposal(
             world.fork_payload, [], retrieval_id="ab", recorded_at=_RECORDED
         )
-    ) == (
-        "phase_locked"
-    )
+    ) == ("phase_locked")
     opened = locked.expand_experience_links(world.fork_node_id, unresolved=("reader-gap",))
     assert opened["edges"]
     audit = (tmp_path / "t-fork-audit" / "attempts.jsonl").read_text(encoding="utf-8")
     assert "reader-gap" in audit
     assert "phase_locked" in audit
-    assert _code(
-        lambda: locked.call("expand_experience_links", {"subject_id": "x"})
-    ) == "unresolved_required"
+    assert (
+        _code(lambda: locked.call("expand_experience_links", {"subject_id": "x"}))
+        == "unresolved_required"
+    )
 
 
 def test_retrieve_proposal_guidance_idempotency_and_submit_budget(tmp_path: Path) -> None:
@@ -113,14 +110,17 @@ def test_retrieve_proposal_guidance_idempotency_and_submit_budget(tmp_path: Path
     conflict_retrieval = surface.search_precedents(
         {"proposal": conflict, "temporal_cutoff": _CUTOFF}
     )
-    assert _code(
-        lambda: surface.submit_fork_proposal(
-            conflict,
-            [],
-            retrieval_id=conflict_retrieval["retrieval_id"],
-            recorded_at=_RECORDED,
+    assert (
+        _code(
+            lambda: surface.submit_fork_proposal(
+                conflict,
+                [],
+                retrieval_id=conflict_retrieval["retrieval_id"],
+                recorded_at=_RECORDED,
+            )
         )
-    ) == "overlay_conflict"
+        == "overlay_conflict"
+    )
     fresh = _proposal(
         world.base,
         document_hash=document_hash,
@@ -147,14 +147,17 @@ def test_retrieve_proposal_guidance_idempotency_and_submit_budget(tmp_path: Path
             {"imagined_node_id": "img-budget", "step_kind": "imagined_node"},
         ],
     )
-    assert _code(
-        lambda: surface.submit_fork_proposal(
-            blocked,
-            [],
-            retrieval_id="ignored",
-            recorded_at=_RECORDED,
+    assert (
+        _code(
+            lambda: surface.submit_fork_proposal(
+                blocked,
+                [],
+                retrieval_id="ignored",
+                recorded_at=_RECORDED,
+            )
         )
-    ) == "submit_budget_exhausted"
+        == "submit_budget_exhausted"
+    )
     still = surface.submit_fork_proposal(
         world.fork_payload,
         [],

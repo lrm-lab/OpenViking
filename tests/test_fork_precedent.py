@@ -140,9 +140,7 @@ def _plant(
     pattern_rows: tuple[tuple[str, str], ...] = (),
     observe: bool = True,
 ):
-    steps = [
-        {"block_id": block_id, "step_kind": "factual_block_ref"} for block_id in factual
-    ]
+    steps = [{"block_id": block_id, "step_kind": "factual_block_ref"} for block_id in factual]
     steps.append({"imagined_node_id": imagined, "step_kind": "imagined_node"})
     payload = _proposal(
         catalog,
@@ -341,9 +339,7 @@ def test_retrieve_splits_direct_exploratory_and_negative_tiers(tmp_path: Path) -
         session_id=_PAST,
         recorded_at=_T1,
         principal=principal,
-        pattern_core=_core(
-            intervention_type="watch-only", target_boundary="unrelated-boundary"
-        ),
+        pattern_core=_core(intervention_type="watch-only", target_boundary="unrelated-boundary"),
         pattern_rows=(("analogical", "active"),),
     )
     challenged, _ = _plant(
@@ -676,48 +672,60 @@ def test_server_filters_acl_cutoff_self_and_status_before_rank(tmp_path: Path) -
         principal=principal,
         node_rows=(("analogical", "active"),),
     )
-    assert _code(
-        lambda: precedents.observe_fork(
-            overlays,
-            patterns,
-            hidden.stored.fork_node_id,
-            session_id=_READER,
-            recorded_at=_T4,
-            principal_labels=principal,
+    assert (
+        _code(
+            lambda: precedents.observe_fork(
+                overlays,
+                patterns,
+                hidden.stored.fork_node_id,
+                session_id=_READER,
+                recorded_at=_T4,
+                principal_labels=principal,
+            )
         )
-    ) == "acl_denied"
+        == "acl_denied"
+    )
     query = _query(catalog, revision, imagined="img-query")
-    assert _code(
-        lambda: precedents.retrieve(
-            overlays,
-            patterns,
-            query,
-            principal_labels="user:carol",  # type: ignore[arg-type]
-            session_id=_READER,
-            temporal_cutoff=_T4,
+    assert (
+        _code(
+            lambda: precedents.retrieve(
+                overlays,
+                patterns,
+                query,
+                principal_labels="user:carol",  # type: ignore[arg-type]
+                session_id=_READER,
+                temporal_cutoff=_T4,
+            )
         )
-    ) == "acl_denied"
+        == "acl_denied"
+    )
     assert not (tmp_path / FORK_PRECEDENT_DIRNAME / "retrievals").exists()
-    assert _code(
-        lambda: precedents.retrieve(
-            overlays,
-            patterns,
-            query,
-            principal_labels=principal,
-            session_id=_READER,
-            temporal_cutoff="2026-10-10",
+    assert (
+        _code(
+            lambda: precedents.retrieve(
+                overlays,
+                patterns,
+                query,
+                principal_labels=principal,
+                session_id=_READER,
+                temporal_cutoff="2026-10-10",
+            )
         )
-    ) == "temporal_cutoff_required"
-    assert _code(
-        lambda: precedents.retrieve(
-            overlays,
-            patterns,
-            query,
-            principal_labels=principal,
-            session_id="",
-            temporal_cutoff=_T4,
+        == "temporal_cutoff_required"
+    )
+    assert (
+        _code(
+            lambda: precedents.retrieve(
+                overlays,
+                patterns,
+                query,
+                principal_labels=principal,
+                session_id="",
+                temporal_cutoff=_T4,
+            )
         )
-    ) == "session_required"
+        == "session_required"
+    )
     record = precedents.retrieve(
         overlays,
         patterns,
@@ -759,13 +767,11 @@ def test_server_filters_acl_cutoff_self_and_status_before_rank(tmp_path: Path) -
     visible = overlays.visible_overlays(principal_labels=principal)
     assert hidden.stored.fork_node_id not in {item.fork_node_id for item in visible}
     assert rel_new.stored.fork_node_id in {item.fork_node_id for item in visible}
-    assert _code(
-        lambda: overlays.registered_catalog("rev-missing", principal_labels=principal)
-    ) == "base_revision_missing"
     assert (
-        overlays.registered_catalog(revision.revision_id, principal_labels=principal)
-        == catalog
+        _code(lambda: overlays.registered_catalog("rev-missing", principal_labels=principal))
+        == "base_revision_missing"
     )
+    assert overlays.registered_catalog(revision.revision_id, principal_labels=principal) == catalog
 
 
 def test_current_proposal_is_not_its_own_precedent(tmp_path: Path) -> None:
@@ -873,26 +879,32 @@ def test_later_evidence_stays_behind_the_cutoff_until_observed(tmp_path: Path) -
         temporal_cutoff=_T2,
     )
     assert still == early
-    assert _code(
-        lambda: precedents.observe_fork(
-            overlays,
-            patterns,
-            planted.stored.fork_node_id,
-            session_id=_OTHER,
-            recorded_at=_T2,
-            principal_labels=(_CAROL,),
+    assert (
+        _code(
+            lambda: precedents.observe_fork(
+                overlays,
+                patterns,
+                planted.stored.fork_node_id,
+                session_id=_OTHER,
+                recorded_at=_T2,
+                principal_labels=(_CAROL,),
+            )
         )
-    ) == "source_conflict"
-    assert _code(
-        lambda: precedents.observe_fork(
-            overlays,
-            patterns,
-            planted.stored.fork_node_id,
-            session_id=_PAST,
-            recorded_at=_T0,
-            principal_labels=(_CAROL,),
+        == "source_conflict"
+    )
+    assert (
+        _code(
+            lambda: precedents.observe_fork(
+                overlays,
+                patterns,
+                planted.stored.fork_node_id,
+                session_id=_PAST,
+                recorded_at=_T0,
+                principal_labels=(_CAROL,),
+            )
         )
-    ) == "source_conflict"
+        == "source_conflict"
+    )
     precedents.observe_fork(
         overlays,
         patterns,
@@ -1009,17 +1021,20 @@ def test_submit_requires_retrieval_and_persists_dispositions(tmp_path: Path) -> 
     assert f"branch:{contextual.stored.fork_node_id}" not in required_ids
     assert all(hit.fork_node_id != negative.stored.fork_node_id for hit in record.candidates)
     before_overlays = _overlay_files(tmp_path)
-    assert _code(
-        lambda: precedents.submit_proposal(
-            overlays,
-            query,
-            retrieval_id=record.retrieval_id,
-            dispositions=[],
-            principal_labels=principal,
-            session_id=_READER,
-            recorded_at=_T2,
+    assert (
+        _code(
+            lambda: precedents.submit_proposal(
+                overlays,
+                query,
+                retrieval_id=record.retrieval_id,
+                dispositions=[],
+                principal_labels=principal,
+                session_id=_READER,
+                recorded_at=_T2,
+            )
         )
-    ) == "disposition_required"
+        == "disposition_required"
+    )
     assert _overlay_files(tmp_path) == before_overlays
     assert _disposition_files(tmp_path) == []
     adopted = {
@@ -1097,17 +1112,20 @@ def test_submit_requires_retrieval_and_persists_dispositions(tmp_path: Path) -> 
     assert len(_overlay_files(tmp_path)) == len(before_overlays) + 1
     assert len(_disposition_files(tmp_path)) == 1
     changed = {**adopted, "reason": "a different reason"}
-    assert _code(
-        lambda: precedents.submit_proposal(
-            overlays,
-            query,
-            retrieval_id=record.retrieval_id,
-            dispositions=[changed, rejected, optional],
-            principal_labels=principal,
-            session_id=_READER,
-            recorded_at=_T2,
+    assert (
+        _code(
+            lambda: precedents.submit_proposal(
+                overlays,
+                query,
+                retrieval_id=record.retrieval_id,
+                dispositions=[changed, rejected, optional],
+                principal_labels=principal,
+                session_id=_READER,
+                recorded_at=_T2,
+            )
         )
-    ) == "disposition_conflict"
+        == "disposition_conflict"
+    )
     assert precedents.read_dispositions(query["content_hash"]) == commit.disposition
     assert len(_overlay_files(tmp_path)) == len(before_overlays) + 1
 
@@ -1145,127 +1163,157 @@ def test_submit_rejects_a_bad_retrieval_without_writing(tmp_path: Path) -> None:
         "disposition": "adopted",
         "reason": "use it",
     }
-    assert _code(
-        lambda: precedents.submit_proposal(
-            overlays,
-            query,
-            retrieval_id="",
-            dispositions=[adopted],
-            principal_labels=(_CAROL,),
-            session_id=_READER,
-            recorded_at=_T2,
+    assert (
+        _code(
+            lambda: precedents.submit_proposal(
+                overlays,
+                query,
+                retrieval_id="",
+                dispositions=[adopted],
+                principal_labels=(_CAROL,),
+                session_id=_READER,
+                recorded_at=_T2,
+            )
         )
-    ) == "retrieval_required"
-    assert _code(
-        lambda: precedents.submit_proposal(
-            overlays,
-            query,
-            retrieval_id="c" * 64,
-            dispositions=[adopted],
-            principal_labels=(_CAROL,),
-            session_id=_READER,
-            recorded_at=_T2,
+        == "retrieval_required"
+    )
+    assert (
+        _code(
+            lambda: precedents.submit_proposal(
+                overlays,
+                query,
+                retrieval_id="c" * 64,
+                dispositions=[adopted],
+                principal_labels=(_CAROL,),
+                session_id=_READER,
+                recorded_at=_T2,
+            )
         )
-    ) == "retrieval_not_found"
-    assert _code(
-        lambda: precedents.submit_proposal(
-            overlays,
-            query,
-            retrieval_id=record.retrieval_id,
-            dispositions=[{**adopted, "reason": "   "}],
-            principal_labels=(_CAROL,),
-            session_id=_READER,
-            recorded_at=_T2,
+        == "retrieval_not_found"
+    )
+    assert (
+        _code(
+            lambda: precedents.submit_proposal(
+                overlays,
+                query,
+                retrieval_id=record.retrieval_id,
+                dispositions=[{**adopted, "reason": "   "}],
+                principal_labels=(_CAROL,),
+                session_id=_READER,
+                recorded_at=_T2,
+            )
         )
-    ) == "disposition_reason_required"
-    assert _code(
-        lambda: precedents.submit_proposal(
-            overlays,
-            query,
-            retrieval_id=record.retrieval_id,
-            dispositions=[{**adopted, "disposition": "accepted"}],
-            principal_labels=(_CAROL,),
-            session_id=_READER,
-            recorded_at=_T2,
+        == "disposition_reason_required"
+    )
+    assert (
+        _code(
+            lambda: precedents.submit_proposal(
+                overlays,
+                query,
+                retrieval_id=record.retrieval_id,
+                dispositions=[{**adopted, "disposition": "accepted"}],
+                principal_labels=(_CAROL,),
+                session_id=_READER,
+                recorded_at=_T2,
+            )
         )
-    ) == "disposition_invalid"
-    assert _code(
-        lambda: precedents.submit_proposal(
-            overlays,
-            query,
-            retrieval_id=record.retrieval_id,
-            dispositions=[adopted, adopted],
-            principal_labels=(_CAROL,),
-            session_id=_READER,
-            recorded_at=_T2,
+        == "disposition_invalid"
+    )
+    assert (
+        _code(
+            lambda: precedents.submit_proposal(
+                overlays,
+                query,
+                retrieval_id=record.retrieval_id,
+                dispositions=[adopted, adopted],
+                principal_labels=(_CAROL,),
+                session_id=_READER,
+                recorded_at=_T2,
+            )
         )
-    ) == "disposition_duplicate"
-    assert _code(
-        lambda: precedents.submit_proposal(
-            overlays,
-            query,
-            retrieval_id=record.retrieval_id,
-            dispositions=[
-                {
-                    "precedent_id": "branch:missing",
-                    "disposition": "adopted",
-                    "reason": "no such precedent",
-                }
-            ],
-            principal_labels=(_CAROL,),
-            session_id=_READER,
-            recorded_at=_T2,
+        == "disposition_duplicate"
+    )
+    assert (
+        _code(
+            lambda: precedents.submit_proposal(
+                overlays,
+                query,
+                retrieval_id=record.retrieval_id,
+                dispositions=[
+                    {
+                        "precedent_id": "branch:missing",
+                        "disposition": "adopted",
+                        "reason": "no such precedent",
+                    }
+                ],
+                principal_labels=(_CAROL,),
+                session_id=_READER,
+                recorded_at=_T2,
+            )
         )
-    ) == "disposition_unknown_precedent"
+        == "disposition_unknown_precedent"
+    )
     other_query = _query(catalog, revision, imagined="img-other-query")
-    assert _code(
-        lambda: precedents.submit_proposal(
-            overlays,
-            other_query,
-            retrieval_id=record.retrieval_id,
-            dispositions=[adopted],
-            principal_labels=(_CAROL,),
-            session_id=_READER,
-            recorded_at=_T2,
+    assert (
+        _code(
+            lambda: precedents.submit_proposal(
+                overlays,
+                other_query,
+                retrieval_id=record.retrieval_id,
+                dispositions=[adopted],
+                principal_labels=(_CAROL,),
+                session_id=_READER,
+                recorded_at=_T2,
+            )
         )
-    ) == "retrieval_mismatch"
-    assert _code(
-        lambda: precedents.submit_proposal(
-            overlays,
-            query,
-            retrieval_id=record.retrieval_id,
-            dispositions=[adopted],
-            principal_labels=(_ALICE,),
-            session_id=_READER,
-            recorded_at=_T2,
+        == "retrieval_mismatch"
+    )
+    assert (
+        _code(
+            lambda: precedents.submit_proposal(
+                overlays,
+                query,
+                retrieval_id=record.retrieval_id,
+                dispositions=[adopted],
+                principal_labels=(_ALICE,),
+                session_id=_READER,
+                recorded_at=_T2,
+            )
         )
-    ) == "retrieval_mismatch"
-    assert _code(
-        lambda: precedents.submit_proposal(
-            overlays,
-            query,
-            retrieval_id=record.retrieval_id,
-            dispositions=[adopted],
-            principal_labels=(_CAROL,),
-            session_id=_OTHER,
-            recorded_at=_T2,
+        == "retrieval_mismatch"
+    )
+    assert (
+        _code(
+            lambda: precedents.submit_proposal(
+                overlays,
+                query,
+                retrieval_id=record.retrieval_id,
+                dispositions=[adopted],
+                principal_labels=(_CAROL,),
+                session_id=_OTHER,
+                recorded_at=_T2,
+            )
         )
-    ) == "retrieval_mismatch"
+        == "retrieval_mismatch"
+    )
     path = _retrieval_path(tmp_path, record.retrieval_id)
     tampered = json.loads(path.read_text(encoding="utf-8"))
     tampered["body"]["exploratory"][0]["rank"] = 9
     path.write_text(json.dumps(tampered), encoding="utf-8")
-    assert _code(
-        lambda: precedents.submit_proposal(
-            overlays,
-            query,
-            retrieval_id=record.retrieval_id,
-            dispositions=[adopted],
-            principal_labels=(_CAROL,),
-            session_id=_READER,
-            recorded_at=_T2,
+    assert (
+        _code(
+            lambda: precedents.submit_proposal(
+                overlays,
+                query,
+                retrieval_id=record.retrieval_id,
+                dispositions=[adopted],
+                principal_labels=(_CAROL,),
+                session_id=_READER,
+                recorded_at=_T2,
+            )
         )
-    ) == "retrieval_tampered"
+        == "retrieval_tampered"
+    )
     assert len(_overlay_files(tmp_path)) == 1
     assert _disposition_files(tmp_path) == []
     assert len(_evaluation_files(tmp_path)) == 1
@@ -1276,17 +1324,20 @@ def test_empty_retrieval_still_gates_the_proposal(tmp_path: Path) -> None:
     revision = _native_revision("rev-empty")
     catalog = overlays.register_base_revision(revision, acl_labels=(_CAROL,))
     payload = _proposal(catalog, document_hash=revision.content_hash)
-    assert _code(
-        lambda: precedents.submit_proposal(
-            overlays,
-            payload,
-            retrieval_id="d" * 64,
-            dispositions=[],
-            principal_labels=(_CAROL,),
-            session_id=_READER,
-            recorded_at=_T1,
+    assert (
+        _code(
+            lambda: precedents.submit_proposal(
+                overlays,
+                payload,
+                retrieval_id="d" * 64,
+                dispositions=[],
+                principal_labels=(_CAROL,),
+                session_id=_READER,
+                recorded_at=_T1,
+            )
         )
-    ) == "retrieval_not_found"
+        == "retrieval_not_found"
+    )
     assert _overlay_files(tmp_path) == []
     record = precedents.retrieve(
         overlays,
@@ -1340,16 +1391,19 @@ def test_legacy_claim_and_cut_forks_stay_out_of_candidates(tmp_path: Path) -> No
         _legacy_payload("legacy-edge-fork", position_kind="edge", position_ref="edge:claim-9"),
         idempotency_key="legacy-edge-once",
     )
-    assert _code(
-        lambda: precedents.observe_fork(
-            overlays,
-            patterns,
-            "legacy-cut-fork",
-            session_id=_PAST,
-            recorded_at=_T1,
-            principal_labels=(_CAROL,),
+    assert (
+        _code(
+            lambda: precedents.observe_fork(
+                overlays,
+                patterns,
+                "legacy-cut-fork",
+                session_id=_PAST,
+                recorded_at=_T1,
+                principal_labels=(_CAROL,),
+            )
         )
-    ) == "source_unknown"
+        == "source_unknown"
+    )
     query = _proposal(
         catalog,
         document_hash=revision.content_hash,
@@ -1381,9 +1435,7 @@ def test_legacy_claim_and_cut_forks_stay_out_of_candidates(tmp_path: Path) -> No
     assert "claim_id" not in dumped
     assert "position_kind" not in dumped
     assert "influence_grounding" not in dumped
-    source = inspect.getsource(
-        __import__("openviking.session.fork_precedent", fromlist=["x"])
-    )
+    source = inspect.getsource(__import__("openviking.session.fork_precedent", fromlist=["x"]))
     assert "CausalExperiencesStore" not in source
     assert "InfluenceClaim(" not in source
     assert "append_evaluation" not in source

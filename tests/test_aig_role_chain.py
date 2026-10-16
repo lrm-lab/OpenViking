@@ -379,11 +379,15 @@ def test_evidence_exposure_climbs_one_tier_and_never_returns_raw_ao():
     assert diagnosis == reader
 
     for skipped in ("summary", "synopsis", "selected_raw"):
-        _assert_code(lambda skipped=skipped: run.escalate_evidence(reader, skipped), "evidence_tier_skip")
+        _assert_code(
+            lambda skipped=skipped: run.escalate_evidence(reader, skipped), "evidence_tier_skip"
+        )
         assert run.evidence_tier is None
     _assert_code(lambda: run.escalate_evidence(diagnosis, "selected_raw"), "evidence_tier_skip")
     _assert_code(lambda: run.escalate_evidence(reader, "raw-ao-body"), "invalid_evidence_tier")
-    _assert_code(lambda: run.escalate_evidence(reader, "selected raw evidence"), "invalid_evidence_tier")
+    _assert_code(
+        lambda: run.escalate_evidence(reader, "selected raw evidence"), "invalid_evidence_tier"
+    )
     secret = "ao-secret-body-should-not-leak"
     with pytest.raises(AigContractError) as exc_info:
         run.escalate_evidence(reader, secret)
@@ -513,8 +517,12 @@ def test_evidence_escalation_only_reader_during_read_verify():
     provisional_sessions = _sessions(provisional)
     provisional.submit_draft(provisional_sessions["builder"], {"graph": []})
     provisional.read_verify(provisional_sessions["reader"], {"verdict": "ok"})
-    assert provisional.escalate_evidence(provisional_sessions["reader"], "projection") == "projection"
-    assert provisional.escalate_evidence(provisional.session_for("diagnosis"), "summary") == "summary"
+    assert (
+        provisional.escalate_evidence(provisional_sessions["reader"], "projection") == "projection"
+    )
+    assert (
+        provisional.escalate_evidence(provisional.session_for("diagnosis"), "summary") == "summary"
+    )
     assert provisional.fail() == {"constructionMode": "fallback", "trust": "provisional"}
     _assert_code(
         lambda: provisional.escalate_evidence(provisional_sessions["reader"], "synopsis"),

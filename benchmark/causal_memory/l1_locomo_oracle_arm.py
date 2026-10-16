@@ -89,9 +89,7 @@ from openviking.session.retrieval_facade import (
 
 SCHEMA = "r7c-oracle-v1"
 FROZEN_AT = "2026-09-30T00:00:00.000Z"
-FROZEN_RULES = (
-    "legacy write is an explicit offline-audit opt-in only (P11).",
-)
+FROZEN_RULES = ("legacy write is an explicit offline-audit opt-in only (P11).",)
 METRICS = ("legacy", "ranked")
 VARIANTS = ("oracle", "oracle_only", "placeholder")
 CONFIGS = ("no_resolver", "with_resolver")

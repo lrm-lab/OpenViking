@@ -160,7 +160,9 @@ def test_active_retrieve_excludes_legacy_objects_and_ranks_new_projections(tmp_p
     registry.register(claim_view, acl_labels=_PRINCIPAL)
     legacy_root = tmp_path / "legacy"
     legacy = CausalExperiencesStore(legacy_root, config=_CAUSAL)
-    legacy_body = _legacy_payload("legacy-cut-fork", position_kind="cut", position_ref="cut:claim-9")
+    legacy_body = _legacy_payload(
+        "legacy-cut-fork", position_kind="cut", position_ref="cut:claim-9"
+    )
     legacy_body["workspace_id"] = "user:alice"
     legacy.upsert_fork_node(legacy_body, idempotency_key="legacy-once")
     facade = _facade(
@@ -206,15 +208,16 @@ def test_active_retrieve_excludes_legacy_objects_and_ranks_new_projections(tmp_p
         ],
     )
     prompted = {
-        card["kind"]
-        for card in envelope["memoryCandidateCards"] + envelope["analogicalPriorCards"]
+        card["kind"] for card in envelope["memoryCandidateCards"] + envelope["analogicalPriorCards"]
     }
     assert prompted.isdisjoint(LEGACY_ACTIVITY_KINDS)
     assert "native_block" in prompted
     assert "guidance" in prompted
 
 
-def test_commit_native_provider_writes_edges_and_claim_provider_writes_nothing(tmp_path: Path) -> None:
+def test_commit_native_provider_writes_edges_and_claim_provider_writes_nothing(
+    tmp_path: Path,
+) -> None:
     from tests.test_extraction_write import _block, _coverage
 
     blocks = [

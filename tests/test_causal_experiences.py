@@ -140,9 +140,7 @@ def test_validate_anchor_accepts_three_kinds_and_rejects_invalid() -> None:
     with pytest.raises(ValueError, match="anchor_kind"):
         validate_anchor({"anchor_kind": "memory", "ao_id": "x", "source_session_id": "s"})
     with pytest.raises(ValueError, match="ao_id"):
-        validate_anchor(
-            {"anchor_kind": "ao", "source_session_id": "s", "anchor_sequence": 1}
-        )
+        validate_anchor({"anchor_kind": "ao", "source_session_id": "s", "anchor_sequence": 1})
     with pytest.raises(ValueError, match="session_id"):
         validate_anchor(
             {
@@ -173,18 +171,14 @@ def test_seven_sections_and_causal_context_isolation() -> None:
     with pytest.raises(ValueError, match="contemporaneous_basis source_sequence"):
         ForkNodeRevision.from_dict(
             _payload(
-                contemporaneous_basis=[
-                    _evidence_ref(sequence=10, role="contemporaneous_basis")
-                ],
+                contemporaneous_basis=[_evidence_ref(sequence=10, role="contemporaneous_basis")],
                 content_hash="",
             )
         )
     with pytest.raises(ValueError, match="contemporaneous_basis source_sequence"):
         ForkNodeRevision.from_dict(
             _payload(
-                contemporaneous_basis=[
-                    _evidence_ref(sequence=11, role="contemporaneous_basis")
-                ],
+                contemporaneous_basis=[_evidence_ref(sequence=11, role="contemporaneous_basis")],
                 content_hash="",
             )
         )
@@ -201,9 +195,7 @@ def test_seven_sections_and_causal_context_isolation() -> None:
 
     session_state_payload = _payload(
         anchor=_session_state_anchor(),
-        contemporaneous_basis=[
-            _evidence_ref(sequence=99, role="contemporaneous_basis")
-        ],
+        contemporaneous_basis=[_evidence_ref(sequence=99, role="contemporaneous_basis")],
         content_hash="",
     )
     skipped = ForkNodeRevision.from_dict(session_state_payload)
@@ -271,9 +263,7 @@ def test_same_anchor_reuses_fork_node_and_appends_revision(tmp_path: Path) -> No
     assert second["fork_node_id"] == first["fork_node_id"]
     assert second["revision_id"] != first["revision_id"]
 
-    rev_dir = (
-        tmp_path / NAMESPACE_DIRNAME / "forks" / first["fork_node_id"] / "revisions"
-    )
+    rev_dir = tmp_path / NAMESPACE_DIRNAME / "forks" / first["fork_node_id"] / "revisions"
     assert (rev_dir / f"{first['revision_id']}.json").is_file()
     assert (rev_dir / f"{second['revision_id']}.json").is_file()
     assert len(list(rev_dir.glob("*.json"))) == 2
@@ -297,9 +287,9 @@ def test_content_hash_roundtrip_and_tamper_detection() -> None:
 
     tampered = revision.to_dict()
     tampered["model_version"] = "tampered-model"
-    assert ForkNodeRevision.from_dict({**tampered, "content_hash": ""}).recompute_content_hash() != (
-        revision.content_hash
-    )
+    assert ForkNodeRevision.from_dict(
+        {**tampered, "content_hash": ""}
+    ).recompute_content_hash() != (revision.content_hash)
     with pytest.raises(ValueError, match="content_hash mismatch"):
         ForkNodeRevision.from_dict(tampered)
 

@@ -17,7 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from openviking.session.aig_native_protocol import SCHEMA_VERSION_AIG_NATIVE_V2, protocol_content_hash
+from openviking.session.aig_native_protocol import (
+    SCHEMA_VERSION_AIG_NATIVE_V2,
+    protocol_content_hash,
+)
 from openviking.session.aig_role_chain import AigConstructionRun, AigContractError
 from openviking.session.coordinator_boundary import (
     TRIGGER_COMMIT,
@@ -26,16 +29,16 @@ from openviking.session.coordinator_boundary import (
 )
 from openviking.session.extraction_write import freeze_native_edge_view
 from openviking.session.failure_gate import (
-    AIG_CONSTRUCTION_PIPELINE_VERSION,
-    FRESHNESS_RECORD_VERSION,
     ACTION_ADVICE,
     ACTION_DISPATCHED,
     ACTION_RETAINED,
+    AIG_CONSTRUCTION_PIPELINE_VERSION,
     AUDIT_DIAGNOSE_REQUESTED,
-    AUDIT_REPLAYED,
     AUDIT_REFUSED,
+    AUDIT_REPLAYED,
     AUDIT_VIEW_CONSTRUCTED,
     AUDIT_VIEW_REUSED,
+    FRESHNESS_RECORD_VERSION,
     FailureGateDelivery,
     FailureGateError,
     FailureGateOrchestrator,
@@ -46,8 +49,8 @@ from openviking.session.fork_node_overlay import FORK_NODE_OVERLAY_DIRNAME
 from openviking.session.guidance_approval import GUIDANCE_APPROVAL_DIRNAME, GuidanceApprovalService
 from openviking.session.influence_view import (
     PURPOSE_POST_RUN_INDEX,
-    AORange,
     AigNativeEdge,
+    AORange,
     CoverageManifest,
     InfluenceBlock,
     SegmentRef,
@@ -298,11 +301,16 @@ def _delivery(
             if script
             else ()
         ),
-        guidance_plan=guidance_plan if guidance_plan is not None else (_plan() if script else {"ignored": True}),
+        guidance_plan=guidance_plan
+        if guidance_plan is not None
+        else (_plan() if script else {"ignored": True}),
         catalog=_catalog() if script else None,
         dispatch_controls=_controls() if controls is None and script else controls,
         dispatch_outputs=(
-            ({"output_id": "ao-child-1", "output_kind": "ao"}, {"output_id": "blk-child-1", "output_kind": "block"})
+            (
+                {"output_id": "ao-child-1", "output_kind": "ao"},
+                {"output_id": "blk-child-1", "output_kind": "block"},
+            )
             if script
             else ()
         ),
@@ -648,20 +656,26 @@ def test_a_tampered_freshness_record_fails_closed(tmp_path: Path) -> None:
     assert record["pipeline_version"] == AIG_CONSTRUCTION_PIPELINE_VERSION
     stale = json.loads(json.dumps(record))
     stale["trust"] = "provisional"
-    assert view_is_fresh(
-        stale,
-        session_id="sess-task-fresh",
-        task_id="task-fresh",
-        source_digest="ee" * 32,
-    ) is False
+    assert (
+        view_is_fresh(
+            stale,
+            session_id="sess-task-fresh",
+            task_id="task-fresh",
+            source_digest="ee" * 32,
+        )
+        is False
+    )
     other_digest = json.loads(json.dumps(record))
     other_digest["source_digest"] = "ff" * 32
-    assert view_is_fresh(
-        other_digest,
-        session_id="sess-task-fresh",
-        task_id="task-fresh",
-        source_digest="ee" * 32,
-    ) is False
+    assert (
+        view_is_fresh(
+            other_digest,
+            session_id="sess-task-fresh",
+            task_id="task-fresh",
+            source_digest="ee" * 32,
+        )
+        is False
+    )
     record["trust"] = "provisional"
     stored.write_text(json.dumps(record), encoding="utf-8")
     with pytest.raises(FailureGateError) as tampered:

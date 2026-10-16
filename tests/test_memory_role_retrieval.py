@@ -256,7 +256,9 @@ def assert_public_envelope(
         assert token not in encoded
 
 
-def facade_card(kind: str, payload_ref: str, *, channel: str = "verified", rank: int = 0) -> RetrievalCard:
+def facade_card(
+    kind: str, payload_ref: str, *, channel: str = "verified", rank: int = 0
+) -> RetrievalCard:
     return RetrievalCard(
         kind=kind,  # type: ignore[arg-type]
         channel=channel,  # type: ignore[arg-type]
@@ -278,7 +280,9 @@ def test_contract_codes_are_stable() -> None:
 
 @pytest.mark.parametrize("role,code", ROLE_CODES)
 @pytest.mark.parametrize("key", EXACT_KEYS)
-def test_exact_keys_rejected_before_discover(harness: Harness, role: str, code: str, key: str) -> None:
+def test_exact_keys_rejected_before_discover(
+    harness: Harness, role: str, code: str, key: str
+) -> None:
     assert_rejected(
         harness,
         role,
@@ -964,10 +968,14 @@ def test_wiring_projects_cards_and_dedupes_on_the_same_service() -> None:
         facade,
         service,
         role="memory",
-        request={"operationId": "op-wire", "intentText": "INTENT-SENTINEL", "dependencyPattern": {
-            "wantedArtifact": "ARTIFACT-MARKER",
-            "wantedEffect": "keep",
-        }},
+        request={
+            "operationId": "op-wire",
+            "intentText": "INTENT-SENTINEL",
+            "dependencyPattern": {
+                "wantedArtifact": "ARTIFACT-MARKER",
+                "wantedEffect": "keep",
+            },
+        },
         authority=authority,
         principal_labels=labels,
     )

@@ -312,9 +312,8 @@ class ExperienceLinkService:
                             "active",
                         )
                     )
-                elif (
-                    isinstance(step.imagined_node_id, str)
-                    and not _replay_identity(step.imagined_node_id)
+                elif isinstance(step.imagined_node_id, str) and not _replay_identity(
+                    step.imagined_node_id
                 ):
                     imagined_fork[step.imagined_node_id] = stored.fork_node_id
             anchor = stored.overlay.anchor_block_id
@@ -555,9 +554,8 @@ def _visible_patterns(store: StrategyPatternStore, imagined_fork: Mapping[str, s
         if _replay_identity(pattern.pattern_id):
             continue
         for member in store.memberships(pattern.pattern_id):
-            if (
-                member.imagined_node_id in imagined_fork
-                and not _replay_identity(member.imagined_node_id)
+            if member.imagined_node_id in imagined_fork and not _replay_identity(
+                member.imagined_node_id
             ):
                 found.add(pattern.pattern_id)
                 break

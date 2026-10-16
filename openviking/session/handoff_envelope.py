@@ -138,7 +138,12 @@ def _freeze_map(value: Any, field: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{field} must be a mapping")
     _reject_credential_fields(value, field)
-    return MappingProxyType({_require_str(key, field): _freeze_value(item, f"{field}.{key}") for key, item in value.items()})
+    return MappingProxyType(
+        {
+            _require_str(key, field): _freeze_value(item, f"{field}.{key}")
+            for key, item in value.items()
+        }
+    )
 
 
 def _freeze_value(value: Any, field: str) -> Any:
@@ -246,9 +251,13 @@ class DiagnosisBrief:
             task_id=_require_str(data["task_id"], "task_id"),
             source_run_id=_require_str(data["source_run_id"], "source_run_id"),
             iteration_id=_require_str(data["iteration_id"], "iteration_id"),
-            memory_task_state_hash=_require_str(data["memory_task_state_hash"], "memory_task_state_hash"),
+            memory_task_state_hash=_require_str(
+                data["memory_task_state_hash"], "memory_task_state_hash"
+            ),
             selected_refs=_freeze_strs(data.get("selected_refs", []), "selected_refs"),
-            snapshot_watermarks=_freeze_map(data.get("snapshot_watermarks", {}), "snapshot_watermarks"),
+            snapshot_watermarks=_freeze_map(
+                data.get("snapshot_watermarks", {}), "snapshot_watermarks"
+            ),
             policy_versions=_freeze_map(data.get("policy_versions", {}), "policy_versions"),
             sub_budgets=_freeze_map(data.get("sub_budgets", {}), "sub_budgets"),
             input_manifest_hash=_require_str(data["input_manifest_hash"], "input_manifest_hash"),
@@ -305,10 +314,16 @@ class DiagnosisOutcome:
         return cls(
             diagnosis_run_id=_require_str(data["diagnosis_run_id"], "diagnosis_run_id"),
             input_brief_hash=_require_str(data["input_brief_hash"], "input_brief_hash"),
-            fork_revision_refs=_freeze_strs(data.get("fork_revision_refs", []), "fork_revision_refs"),
-            bridge_judgment_refs=_freeze_strs(data.get("bridge_judgment_refs", []), "bridge_judgment_refs"),
+            fork_revision_refs=_freeze_strs(
+                data.get("fork_revision_refs", []), "fork_revision_refs"
+            ),
+            bridge_judgment_refs=_freeze_strs(
+                data.get("bridge_judgment_refs", []), "bridge_judgment_refs"
+            ),
             open_questions=_freeze_strs(data.get("open_questions", []), "open_questions"),
-            waiting_conditions=_freeze_strs(data.get("waiting_conditions", []), "waiting_conditions"),
+            waiting_conditions=_freeze_strs(
+                data.get("waiting_conditions", []), "waiting_conditions"
+            ),
             budget_spent=_freeze_map(data.get("budget_spent", {}), "budget_spent"),
             versions=_freeze_map(data.get("versions", {}), "versions"),
         )
@@ -379,7 +394,9 @@ class HandoffEnvelope:
         )
 
     @classmethod
-    def from_brief(cls, brief: DiagnosisBrief, *, delivered_at: str | None = None) -> HandoffEnvelope:
+    def from_brief(
+        cls, brief: DiagnosisBrief, *, delivered_at: str | None = None
+    ) -> HandoffEnvelope:
         return cls.from_dict(
             {
                 "handoff_kind": HANDOFF_KIND_BRIEF,
@@ -517,8 +534,12 @@ class HandoffEnvelopeService:
         A repeat with a different body raises ``EnvelopeConflict``.
         """
         with self._lock:
-            sealed = self._seal(envelope, iteration_id=iteration_id, input_manifest_hash=input_manifest_hash)
-            key = idempotency_key(sealed.iteration_id, sealed.handoff_kind, sealed.input_manifest_hash)
+            sealed = self._seal(
+                envelope, iteration_id=iteration_id, input_manifest_hash=input_manifest_hash
+            )
+            key = idempotency_key(
+                sealed.iteration_id, sealed.handoff_kind, sealed.input_manifest_hash
+            )
             existing = self._by_key.get(key)
             if existing is not None:
                 if existing.envelope_id != sealed.envelope_id:
@@ -618,7 +639,9 @@ class HandoffEnvelopeService:
         if isinstance(envelope, Mapping):
             _reject_credential_fields(envelope, "envelope")
             return HandoffEnvelope.from_dict(envelope)
-        raise TypeError("envelope must be a HandoffEnvelope, DiagnosisBrief, DiagnosisOutcome, or mapping")
+        raise TypeError(
+            "envelope must be a HandoffEnvelope, DiagnosisBrief, DiagnosisOutcome, or mapping"
+        )
 
     def _persist(self) -> None:
         if self._path is None:

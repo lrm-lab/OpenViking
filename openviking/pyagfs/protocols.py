@@ -104,6 +104,7 @@ class AGFSSyncClientProtocol(Protocol):
         offset: int = 0,
         sort_by: str | None = None,
         sort_order: str = "asc",
+        directories_only: bool = False,
     ) -> list[Dict[str, Any]]:
         """Return a sorted range from a directory tree."""
 
@@ -117,9 +118,3 @@ class AGFSSyncClientProtocol(Protocol):
         continuation_token: str | None = None,
     ) -> Dict[str, Any]:
         """Return one page of flat glob matches for the given AGFS directory."""
-
-    def system_sync_status(self, path: str) -> Dict[str, Any]:
-        """Return multi-write sync status for a file or directory path."""
-
-    def system_sync_retry(self, path: str) -> Dict[str, Any]:
-        """Retry pending multi-write sync work for a file or directory path."""

@@ -48,7 +48,9 @@ def fuse_corpora(corpora: Mapping[str, Mapping[str, Any]]) -> tuple[CorpusFusion
 
 def _fuse_one(corpus: str, payload: Mapping[str, Any]) -> CorpusFusion:
     bm25 = _channel(payload.get("bm25"))
-    vector_ok = _proof_is_complete(payload.get("proof")) and payload.get("vector_failed") is not True
+    vector_ok = (
+        _proof_is_complete(payload.get("proof")) and payload.get("vector_failed") is not True
+    )
     if not vector_ok:
         return CorpusFusion(
             corpus=corpus,
@@ -64,9 +66,7 @@ def _fuse_one(corpus: str, payload: Mapping[str, Any]) -> CorpusFusion:
         slot = ranks.setdefault(identity, [None, None])
         if slot[1] is None:
             slot[1] = rank
-    ordered = tuple(
-        sorted(ranks, key=lambda identity: (-_rrf(ranks[identity]), identity))
-    )
+    ordered = tuple(sorted(ranks, key=lambda identity: (-_rrf(ranks[identity]), identity)))
     return CorpusFusion(
         corpus=corpus,
         ids=ordered,

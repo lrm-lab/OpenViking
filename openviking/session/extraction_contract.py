@@ -41,8 +41,8 @@ from openviking.session.influence_view import (
     RELATION_INFLUENCE,
     RELATION_SKIP,
     SYNTHETIC_ROOT_SINK_REASON,
-    AORange,
     AigNativeEdge,
+    AORange,
     CoverageManifest,
     InfluenceBlock,
     InfluenceClaim,
@@ -477,7 +477,9 @@ def render_native_edge_prompt(model_input: Mapping[str, Any]) -> str:
     )
 
 
-def parse_native_edge_response(text: str, model_input: Mapping[str, Any]) -> NativeExtractionPayload:
+def parse_native_edge_response(
+    text: str, model_input: Mapping[str, Any]
+) -> NativeExtractionPayload:
     """Parse a native-edge extraction. Claim fields are rejected, not dropped."""
     if not isinstance(model_input, Mapping):
         raise ExtractionContractError("model_input must be a mapping")
@@ -545,9 +547,7 @@ def parse_native_edge_response(text: str, model_input: Mapping[str, Any]) -> Nat
             raise ExtractionContractError(f"duplicate edge_id {edge.edge_id}")
         pair = (edge.source_block_id, edge.target_block_id)
         if pair in seen_pairs:
-            raise ExtractionContractError(
-                f"duplicate native edge {pair[0]}->{pair[1]}"
-            )
+            raise ExtractionContractError(f"duplicate native edge {pair[0]}->{pair[1]}")
         seen_edge_ids.add(edge.edge_id)
         seen_pairs.add(pair)
         edges.append(edge)

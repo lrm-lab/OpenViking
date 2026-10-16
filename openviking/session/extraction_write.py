@@ -40,7 +40,6 @@ from openviking.session.aig_native_protocol import (
     protocol_content_hash,
     read_native_edge_index,
 )
-from openviking.session.legacy_write_gate import require_legacy_audit_opt_in
 from openviking.session.influence_view import (
     CONSTRUCTION_MODE_NATIVE_SINGLE_PASS,
     PURPOSE_FAILURE_DIAGNOSIS,
@@ -58,6 +57,7 @@ from openviking.session.influence_view import (
     ViewSupersedeIndex,
     build_minimal_fallback_view,
 )
+from openviking.session.legacy_write_gate import require_legacy_audit_opt_in
 
 # Production commit writes native-edge revisions here, not into the claim index.
 NATIVE_EDGE_INDEX_FILENAME = "native-edges.json"
@@ -357,7 +357,8 @@ class NativeEdgeViewStore:
         for purpose in (PURPOSE_POST_RUN_INDEX, PURPOSE_FAILURE_DIAGNOSIS):
             for existing in legacy.revisions_for_purpose(purpose):
                 same_view = (
-                    existing.session_id == revision.session_id and existing.purpose == revision.purpose
+                    existing.session_id == revision.session_id
+                    and existing.purpose == revision.purpose
                 )
                 if existing.revision_id == revision.revision_id or same_view:
                     raise NativeEdgeWriteError(

@@ -9,8 +9,8 @@ from openviking.server.routers.bot import router as bot_router
 from openviking.server.routers.bot_studio import router as bot_studio_router
 from openviking.server.routers.compile import router as compile_router
 from openviking.server.routers.console import router as console_router
-from openviking.server.routers.coordinator import router as coordinator_router
 from openviking.server.routers.content import router as content_router
+from openviking.server.routers.coordinator import router as coordinator_router
 from openviking.server.routers.debug import router as debug_router
 from openviking.server.routers.filesystem import router as filesystem_router
 from openviking.server.routers.lexical_memory import router as lexical_memory_router

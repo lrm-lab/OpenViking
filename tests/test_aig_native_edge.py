@@ -40,10 +40,10 @@ from openviking.session.influence_projection import ProjectionRegistry
 from openviking.session.influence_view import (
     PURPOSE_FAILURE_DIAGNOSIS,
     PURPOSE_POST_RUN_INDEX,
-    AORange,
     AigNativeEdge,
     AigNativeViewDraft,
     AigNativeViewRevision,
+    AORange,
     CoverageManifest,
     HighSeverityViolation,
     InfluenceBlock,
@@ -253,7 +253,9 @@ def _edge(
     )
 
 
-def _freeze_pair(*, relation_type: str = "influence", omitted: tuple[OmittedRange, ...] = ()) -> AigNativeViewRevision:
+def _freeze_pair(
+    *, relation_type: str = "influence", omitted: tuple[OmittedRange, ...] = ()
+) -> AigNativeViewRevision:
     blocks = [_block("b-1", 1), _block("b-2", 2 if not omitted else 3)]
     return freeze_native_edge_view(
         session_id=SESSION,
@@ -465,7 +467,9 @@ def test_dangling_edge_refuses_freeze() -> None:
     assert any(item.code == "dangling_edge" for item in raised.value.violations)
 
 
-def test_legacy_claim_view_stays_readable_and_native_writer_cannot_update_it(tmp_path: Path) -> None:
+def test_legacy_claim_view_stays_readable_and_native_writer_cannot_update_it(
+    tmp_path: Path,
+) -> None:
     claim = _claim_revision()
     legacy_path = tmp_path / "claim-views.json"
     legacy = ViewSupersedeIndex(legacy_path)

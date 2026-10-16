@@ -266,12 +266,8 @@ def diagnose_coordinator_request(
     if revision is None:
         raise FailureGateError("view_required")
     builder = build_revision or session_frozen_view_builder(session_dir)
-    delivery = build_diagnose_delivery(
-        session, revision, parsed, session_dir=session_dir
-    )
-    return FailureGateOrchestrator(session_dir, builder).diagnose(
-        request_document, delivery
-    )
+    delivery = build_diagnose_delivery(session, revision, parsed, session_dir=session_dir)
+    return FailureGateOrchestrator(session_dir, builder).diagnose(request_document, delivery)
 
 
 def build_failure_gate_delivery(
@@ -428,12 +424,12 @@ def _derived_assessment(
     unanimous = bool(signals) and all(item == signals[0] for item in signals)
     if unanimous and signals[0] in {"pass", "fail"} and ids:
         return {
-            "criteria_dispositions": {key: "explicit" for key in ids},
+            "criteria_dispositions": dict.fromkeys(ids, "explicit"),
             "evidence_refs": [_evidence_from_revision(revision)],
             "verdict": "success" if signals[0] == "pass" else "failure",
         }
     return {
-        "criteria_dispositions": {key: "provisional" for key in ids},
+        "criteria_dispositions": dict.fromkeys(ids, "provisional"),
         "evidence_refs": [],
         "verdict": "uncertain",
     }

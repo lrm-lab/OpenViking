@@ -1,6 +1,6 @@
 # Metrics
 
-OpenViking provides a machine-oriented metrics system for exposing runtime health, request quality, model usage, resource processing throughput, and probe health states.
+OpenViking provides a machine-oriented metrics system for exposing runtime health, request status, model usage, resource processing throughput, and probe health states.
 
 Unlike the human-facing `/api/v1/observer/*` endpoints and the analytics-oriented `/api/v1/stats/*` endpoints, Metrics are designed for:
 
@@ -94,7 +94,7 @@ The first exporter implementation is the Prometheus exporter, which renders regi
 
 ### Accessing `/metrics`
 
-In the current implementation, `/metrics` is not wired to `get_request_context` or other auth dependencies, so from the code-path perspective it currently behaves as a public scrape endpoint.
+`/metrics` does not require an OpenViking API key. Restrict access at the gateway or reverse proxy when needed.
 
 ```bash
 curl http://localhost:1933/metrics
@@ -124,7 +124,7 @@ scrape_configs:
 | `context_type` | retrieval context type | `resource` |
 | `provider` | model or external service provider | `volcengine` |
 | `model_name` | model name | `doubao-seed-1-8-251228` |
-| `stage` | stage label (defined by each metric family) | resource stage: `parse`; token attribution stage: `embed_query` |
+| `stage` | stage label (defined by each metric family) | resource stage: `parse_artifact`; token attribution stage: `embed_query` |
 | `valid` | whether the current sample is fresh and valid | `1` / `0` |
 
 Notes:
@@ -132,12 +132,12 @@ Notes:
 - `account_id` is only enabled on controlled allowlisted metric families to prevent high-cardinality growth
 - `valid=0` means the current state/probe sample is a fallback or stale value, not that the label itself is malformed
 - `stage` semantics depend on the metric family:
-  - `openviking_resource_stage_*`: resource ingestion pipeline stages (for example `parse/persist/process`)
+  - `openviking_resource_stage_*`: resource ingestion pipeline stages (for example `parse_artifact/target_resolve/content_commit`)
   - `openviking_operation_tokens_total`: token attribution stages (for example `embed_query/rerank/vlm`)
 
 ## Key Metric Families
 
-The metric summaries below are based on representative metrics currently exposed by the collectors in `openviking/metrics/collectors/`.
+The tables list representative metrics defined by the collectors. A series appears only when its feature is enabled, the relevant event occurs, and collection succeeds. An absent series does not necessarily mean zero.
 
 ### Requests and Operations
 
@@ -168,14 +168,20 @@ Typical usage:
 | `openviking_resource_stage_duration_seconds` | Histogram | `account_id, stage, status` | duration distribution of ingestion stages |
 | `openviking_resource_wait_duration_seconds` | Histogram | `account_id, operation` | resource ingestion wait duration distribution (for example queue waiting) |
 
-Typical `stage` values include:
+Current built-in resource event producers emit these `stage` values, depending on the path taken:
 
-- `request`
-- `parse`
-- `summarize`
-- `persist`
-- `finalize`
-- `process`
+- `source_prepare`
+- `parse_artifact`
+- `target_resolve`
+- `update_plan`
+- `content_commit`
+- `derived_enqueue`
+- `semantic_queue_wait`
+- `semantic_execute`
+- `embedding_queue_wait`
+- `embedding_execute`
+
+The telemetry bridge also recognizes legacy summary keys for `request`, `process`, `parse`, `finalize`, `summarize`, `wait`, and `watch`. The current resource summary builder does not produce those keys, so they are not additional stages emitted by the current import pipeline. `persist` is not in that bridge map.
 
 ### Vector, Memory, and Semantic Metrics
 
@@ -219,6 +225,8 @@ Notes:
 
 - `openviking_model_*` gives a unified cross-model view for embedding and VLM usage
 - `openviking_vlm_*` and `openviking_embedding_*` are better suited for workload-specific dashboards
+- `*_requests_*` represents business requests; `*_calls_*`, call duration, and token families represent provider calls
+- `openviking_operation_tokens_total` has no pre-aggregated `token_type="all/total"`; aggregate totals in TSDB queries
 
 ### Queues, Locks, and Runtime State
 
@@ -281,14 +289,22 @@ seconds, for example `123 ns = 0.000000123 seconds`.
 | `openviking_ragfs_cache_bytes_total` | Counter | `source` | bytes from backend/cache |
 | `openviking_ragfs_cache_operation_duration_seconds_total` | Counter | `operation` | cumulative get/put/delete duration |
 | `openviking_ragfs_cache_inflight_events_total` | Counter | `event` | leader/follower/backend_saved counts |
-| `openviking_ragfs_multiwrite_background_tasks` | Gauge | none | background tasks, including the retry loop |
-| `openviking_ragfs_multiwrite_read_routes_total` | Counter | `route` | primary/backup/redirect/miss selections |
+| `openviking_ragfs_multiwrite_background_tasks` | Gauge | none | active flush runtime, `0` or `1` per mount |
+| `openviking_ragfs_multiwrite_pending_events` | Gauge | none | submitted events that are queued, executing, or awaiting retry |
+| `openviking_ragfs_multiwrite_errors_total` | Counter | `worker` | final failures for `flush`, `checkpoint`, `catch_up`, or `gc` |
+| `openviking_ragfs_multiwrite_backend_lag_events` | Gauge | `backend, partition` | sum of `tail - synced_seq` across accounts |
+| `openviking_ragfs_multiwrite_protocol_version` | Gauge | `version` | mount count for the closed label `v2` |
+| `openviking_ragfs_multiwrite_protocol_status` | Gauge | `status` | mount count for closed labels `migrating` and `stable` |
 
 These metrics have no `mount` or `account_id` label. Cache and multi-backend
 families are absent when those capabilities are not enabled. `status` is
 `success` or `error`; `exists=false` is successful and `replace` uses `rename`.
 Histogram buckets cover all outcomes, with finite bounds from 0.0001 to 10 seconds.
 Python `get_stats()` retains its microsecond fields.
+
+The protocol family always contains both closed-label series. One unreadable
+or invalid protocol, account, or segment manifest rejects the
+whole scrape snapshot instead of publishing partial zero lag.
 
 ### Tasks and Task Tracker
 
@@ -298,6 +314,8 @@ Python `get_stats()` retains its microsecond fields.
 | `openviking_task_running` | Gauge | `task_type` | running tasks tracked by task tracker |
 | `openviking_task_completed` | Gauge | `task_type` | completed tasks tracked by task tracker |
 | `openviking_task_failed` | Gauge | `task_type` | failed tasks tracked by task tracker |
+| `openviking_task_cancelling` | Gauge | `task_type` | tasks being cancelled |
+| `openviking_task_cancelled` | Gauge | `task_type` | cancelled tasks |
 
 ### Cache
 
@@ -395,7 +413,7 @@ For `/metrics` endpoint behavior and scrape usage, see [Metrics API](../api/09-m
 | `openviking_service_readiness` | Gauge | may include `valid` | main service readiness |
 | `openviking_api_key_manager_readiness` | Gauge | may include `valid` | API key manager readiness |
 | `openviking_storage_readiness` | Gauge | `probe, valid` | storage probe, for example `agfs` |
-| `openviking_model_provider_readiness` | Gauge | `provider, valid` | model provider readiness |
+| `openviking_model_provider_readiness` | Gauge | `provider, valid` | whether a VLM client can be created from configuration; no model request is sent |
 | `openviking_async_system_readiness` | Gauge | `probe, valid` | async system readiness |
 | `openviking_retrieval_backend_readiness` | Gauge | `probe, valid` | retrieval backend readiness |
 | `openviking_encryption_component_health` | Gauge | `valid` | overall encryption component health |
@@ -408,6 +426,8 @@ Meaning of `valid`:
 - `valid="0"`: the sample is a fallback or stale value and should be treated with caution
 
 ### Encryption (Operational Metrics)
+
+These metrics are driven by Python encryption events and are not complete counts of all encrypted RAGFS file I/O. Assess file throughput together with RAGFS metrics and the enabled backends.
 
 | Metric Family | Type | Common Labels | Meaning |
 |---------------|------|---------------|---------|
@@ -456,6 +476,8 @@ Possible `model_type` values include:
 - `embedding`
 - `rerank`
 
+`openviking_model_provider_readiness=1` does not verify credentials, quota, or remote inference. It only checks client construction. Use actual model-call errors and latency to assess requests.
+
 ## Configuration Example
 
 ### Enabling Metrics
@@ -478,8 +500,8 @@ In `ov.conf`, the metrics subsystem can be explicitly enabled through `server.ob
             "openviking_operation_requests_total",
             "openviking_operation_duration_seconds",
             "openviking_vlm_calls_total",
-          "openviking_vlm_call_duration_seconds",
-          "openviking_rerank_*"
+            "openviking_vlm_call_duration_seconds",
+            "openviking_rerank_*"
           ]
         }
       }
@@ -555,4 +577,3 @@ Example:
 - [Data Encryption](./10-encryption.md) - storage-layer encryption and isolation
 - [Metrics API](../api/09-metrics.md) - `/metrics` endpoint usage
 - [VikingBot Feedback Observability Design](https://github.com/volcengine/OpenViking/blob/main/bot/docs/zh/design/vikingbot-feedback-observability-design.md) - feedback observability design background and rollout plan (Chinese)
-- [Metrics Design](../../design/metric-design.md) - metrics system design details

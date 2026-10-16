@@ -24,13 +24,13 @@ from openviking.session.aig_role_chain import AigConstructionRun
 from openviking.session.corpus_hybrid_fusion import fuse_corpora
 from openviking.session.influence_projection import ProjectionRegistry
 from openviking.session.influence_view import (
+    PURPOSE_FAILURE_DIAGNOSIS,
+    PURPOSE_POST_RUN_INDEX,
     AORange,
     CoverageManifest,
     InfluenceBlock,
     InfluenceClaim,
     InfluenceViewDraft,
-    PURPOSE_FAILURE_DIAGNOSIS,
-    PURPOSE_POST_RUN_INDEX,
     RetrievalSubgraph,
     SegmentRef,
     SourceRef,
@@ -175,7 +175,10 @@ def test_accepted_retrieval_aig_and_skill_path(tmp_path) -> None:
     diagnosis = _fallback("sess-1", "rev-diag", PURPOSE_FAILURE_DIAGNOSIS)
     registry.register(diagnosis, acl_labels=("team-a",))
     registry.register(_fallback("sess-1", "rev-2"), acl_labels=("team-a",))
-    visible = {card.source_pointer.view_revision_id for card in registry.search(principal_labels=("team-a",))}
+    visible = {
+        card.source_pointer.view_revision_id
+        for card in registry.search(principal_labels=("team-a",))
+    }
     assert "rev-1" not in visible
     assert "rev-2" in visible
     assert "rev-diag" in visible
@@ -266,7 +269,13 @@ def test_accepted_retrieval_aig_and_skill_path(tmp_path) -> None:
 
     allocated = allocate_discovery(
         [
-            {"id": "skill-1", "kind": "skill_revision", "corpus": "skill", "use_class": "memory_candidate", "corpus_rank": 1},
+            {
+                "id": "skill-1",
+                "kind": "skill_revision",
+                "corpus": "skill",
+                "use_class": "memory_candidate",
+                "corpus_rank": 1,
+            },
             {
                 "id": "cold-1",
                 "kind": "skill",
@@ -275,9 +284,27 @@ def test_accepted_retrieval_aig_and_skill_path(tmp_path) -> None:
                 "corpus_rank": 2,
                 "exploration_stratum": "cold_start_skill",
             },
-            {"id": "ep-1", "kind": "episode", "corpus": "episode", "use_class": "memory_candidate", "corpus_rank": 1},
-            {"id": "in-1", "kind": "insight", "corpus": "insight", "use_class": "memory_candidate", "corpus_rank": 1},
-            {"id": "prior-1", "kind": "block_projection", "corpus": "projection", "use_class": "analogical_prior", "corpus_rank": 1},
+            {
+                "id": "ep-1",
+                "kind": "episode",
+                "corpus": "episode",
+                "use_class": "memory_candidate",
+                "corpus_rank": 1,
+            },
+            {
+                "id": "in-1",
+                "kind": "insight",
+                "corpus": "insight",
+                "use_class": "memory_candidate",
+                "corpus_rank": 1,
+            },
+            {
+                "id": "prior-1",
+                "kind": "block_projection",
+                "corpus": "projection",
+                "use_class": "analogical_prior",
+                "corpus_rank": 1,
+            },
         ],
         plan_hash=_PLAN,
         skill_explorations=0,
@@ -295,10 +322,20 @@ def test_accepted_retrieval_aig_and_skill_path(tmp_path) -> None:
         "model_version": "model",
         "policy_version": "policy",
     }
-    fused = {item.corpus: item for item in fuse_corpora({
-        "skill": {"bm25": ["skill-1"], "vector": ["other"], "proof": proof, "vector_failed": True},
-        "projection": {"bm25": ["prior-1"], "vector": ["prior-1"], "proof": proof},
-    })}
+    fused = {
+        item.corpus: item
+        for item in fuse_corpora(
+            {
+                "skill": {
+                    "bm25": ["skill-1"],
+                    "vector": ["other"],
+                    "proof": proof,
+                    "vector_failed": True,
+                },
+                "projection": {"bm25": ["prior-1"], "vector": ["prior-1"], "proof": proof},
+            }
+        )
+    }
     assert fused["skill"].degraded is True and fused["skill"].ids == ("skill-1",)
     assert fused["projection"].degraded is False and fused["projection"].ids == ("prior-1",)
     assert HYBRID_FUSION_POLICY_VERSION == "hybrid-fusion-pending-v0"
@@ -307,7 +344,10 @@ def test_accepted_retrieval_aig_and_skill_path(tmp_path) -> None:
     skip = _revision("sess-skip", "rev-skip", "skip", False)
     influence_text = _subgraph_retrieval_text(influence, influence.retrieval_subgraphs[0])
     skip_text = _subgraph_retrieval_text(skip, skip.retrieval_subgraphs[0])
-    assert influence_text.split("\nsubgraph_failure:", 1)[0] == skip_text.split("\nsubgraph_failure:", 1)[0]
+    assert (
+        influence_text.split("\nsubgraph_failure:", 1)[0]
+        == skip_text.split("\nsubgraph_failure:", 1)[0]
+    )
     assert "claim_relation:influence" in influence_text
     assert "claim_relation:skip" in skip_text
     assert SUBGRAPH_TEXT_POLICY_VERSION == "diagnostic-subgraph-text-v1"
@@ -316,8 +356,24 @@ def test_accepted_retrieval_aig_and_skill_path(tmp_path) -> None:
         operation_id="op-e0",
         plan_hash=envelope["planHash"],
         final_order_hash=allocated.final_order_hash,
-        memory_candidates=[{"id": "skill-1", "kind": "skill_revision", "corpus": "skill", "use_class": "memory_candidate", "public_rank": 1}],
-        analogical_priors=[{"id": "prior-1", "kind": "block_projection", "corpus": "projection", "use_class": "analogical_prior", "public_rank": 1}],
+        memory_candidates=[
+            {
+                "id": "skill-1",
+                "kind": "skill_revision",
+                "corpus": "skill",
+                "use_class": "memory_candidate",
+                "public_rank": 1,
+            }
+        ],
+        analogical_priors=[
+            {
+                "id": "prior-1",
+                "kind": "block_projection",
+                "corpus": "projection",
+                "use_class": "analogical_prior",
+                "public_rank": 1,
+            }
+        ],
     )
     chain = ExpansionChain(parent, opened_at=1_000.0, clock=lambda: 1_000.0)
 

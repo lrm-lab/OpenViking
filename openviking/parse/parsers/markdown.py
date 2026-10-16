@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
+import yaml
+
 from openviking.parse.accessors.mime_types import IANA_MEDIA_TYPE_TO_EXTENSION
 from openviking.parse.base import NodeType, ParseResult, ResourceNode, create_parse_result
 from openviking.parse.image_validation import is_valid_image
@@ -417,13 +419,12 @@ class MarkdownParser(BaseParser):
 
         # Preserve the original uploaded filename when available instead of the temp
         # upload name (e.g. upload_<uuid>.txt).
-        doc_title = meta.get("frontmatter", {}).get(
-            "title",
-            explicit_name
-            if explicit_name
-            else _smart_stem(source_path)
-            if source_path
-            else "Document",
+        fallback_title = explicit_name or (_smart_stem(source_path) if source_path else "Document")
+        frontmatter_title = meta.get("frontmatter", {}).get("title")
+        doc_title = (
+            frontmatter_title
+            if isinstance(frontmatter_title, str) and frontmatter_title.strip()
+            else fallback_title
         )
         doc_name = self._sanitize_for_path(doc_title)
         # Preserve code source filenames as the temp document directory.
@@ -604,13 +605,16 @@ class MarkdownParser(BaseParser):
         frontmatter_text = match.group(1)
         content_without_frontmatter = content[match.end() :]
 
-        # Parse YAML (simple key: value parsing)
-        frontmatter = {}
-        for line in frontmatter_text.split("\n"):
-            line = line.strip()
-            if ":" in line:
-                key, value = line.split(":", 1)
-                frontmatter[key.strip()] = value.strip()
+        try:
+            # Keep scalar values as strings, matching the previous parser and keeping
+            # ParseResult metadata JSON-serializable, while honoring YAML nesting.
+            frontmatter = yaml.load(frontmatter_text, Loader=yaml.BaseLoader)
+        except yaml.YAMLError:
+            logger.warning("Ignoring malformed YAML frontmatter")
+            return content_without_frontmatter, None
+
+        if not isinstance(frontmatter, dict):
+            return content_without_frontmatter, None
 
         return content_without_frontmatter, frontmatter
 
@@ -1449,9 +1453,11 @@ class MarkdownParser(BaseParser):
                 ops.append(_LayoutOp("write", f"{root_dir}/{doc_name}_{part_idx}.md", part))
             return
 
-        # Build virtual section list (pre-heading content as first virtual section)
+        # Build virtual section list (content before the first top-level heading,
+        # including any lower-level headings there, is the first virtual section)
         sections = []
-        first_heading_start = headings[0][0]
+        min_level = min(h[3] for h in headings)
+        first_heading_start = next(h[0] for h in headings if h[3] == min_level)
         if first_heading_start > 0:
             pre_content = content[:first_heading_start].strip()
             if pre_content:
@@ -1467,7 +1473,6 @@ class MarkdownParser(BaseParser):
                 )
 
         # Add real sections (top-level only for this pass)
-        min_level = min(h[3] for h in headings)
         i = 0
         while i < len(headings):
             if headings[i][3] == min_level:

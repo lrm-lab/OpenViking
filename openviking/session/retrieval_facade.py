@@ -67,7 +67,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from openviking.session.ao_ledger import AOLedger, LEDGER_FILENAME
+from openviking.session.ao_ledger import LEDGER_FILENAME, AOLedger
 from openviking.session.ao_ledger_reader import list_ao_ledger
 from openviking.session.bm25 import BM25Index
 from openviking.session.causal_bridges import (
@@ -268,7 +268,9 @@ class RetrievalCard:
         object.__setattr__(self, "in_channel_rank", _require_rank(self.in_channel_rank))
         object.__setattr__(self, "status_label", _require_str(self.status_label, "status_label"))
         object.__setattr__(self, "payload_ref", _require_str(self.payload_ref, "payload_ref"))
-        pointer = _json_copy(_require_mapping(self.source_pointer, "source_pointer"), "source_pointer")
+        pointer = _json_copy(
+            _require_mapping(self.source_pointer, "source_pointer"), "source_pointer"
+        )
         if not isinstance(pointer, dict):
             raise ValueError("source_pointer must be a dict")
         breakdown = _json_copy(
@@ -410,8 +412,12 @@ def coerce_profile(value: RetrievalProfile | Mapping[str, Any] | None) -> Retrie
     else:
         payload = _require_mapping(value, "profile")
         profile = RetrievalProfile(
-            fork_branch=_quota_int(payload.get("fork_branch", DEFAULT_FORK_BRANCH_QUOTA), "fork_branch"),
-            projection=_quota_int(payload.get("projection", DEFAULT_PROJECTION_QUOTA), "projection"),
+            fork_branch=_quota_int(
+                payload.get("fork_branch", DEFAULT_FORK_BRANCH_QUOTA), "fork_branch"
+            ),
+            projection=_quota_int(
+                payload.get("projection", DEFAULT_PROJECTION_QUOTA), "projection"
+            ),
             segment_atom=_quota_int(
                 payload.get("segment_atom", DEFAULT_SEGMENT_ATOM_QUOTA), "segment_atom"
             ),
@@ -1057,9 +1063,7 @@ def _remember_ao_id(ao_id: str, ordered: list[str], seen: set[str]) -> None:
         ordered.append(ao_id)
 
 
-def _projection_source_ao_ids(
-    view: InfluenceViewRevision, kind: str, entity_id: str
-) -> list[str]:
+def _projection_source_ao_ids(view: InfluenceViewRevision, kind: str, entity_id: str) -> list[str]:
     """AO ids behind one block or claim. Used only to resolve match text."""
     if kind == "block":
         for block in view.blocks:
@@ -1233,12 +1237,8 @@ class InfluenceProjectionAdapter:
         """
         if card_id is not None:
             if view_revision_id is not None or claim_id is not None:
-                raise ValueError(
-                    "card_id cannot be combined with view_revision_id or claim_id"
-                )
-            view_revision_id, claim_id = self._resolve_claim_card(
-                card_id, principal_labels
-            )
+                raise ValueError("card_id cannot be combined with view_revision_id or claim_id")
+            view_revision_id, claim_id = self._resolve_claim_card(card_id, principal_labels)
         elif not view_revision_id or not claim_id:
             raise ValueError("pass card_id, or both view_revision_id and claim_id")
         if isinstance(max_entities, bool) or not isinstance(max_entities, int):
@@ -1246,9 +1246,7 @@ class InfluenceProjectionAdapter:
         if max_entities < 1:
             raise ValueError("max_entities must be >= 1")
         if max_entities > PATH_MAX_ENTITIES:
-            raise ValueError(
-                f"max_entities cannot exceed the global ceiling {PATH_MAX_ENTITIES}"
-            )
+            raise ValueError(f"max_entities cannot exceed the global ceiling {PATH_MAX_ENTITIES}")
         revision_id = _require_str(view_revision_id, "view_revision_id")
         seed_id = _require_str(claim_id, "claim_id")
         view = self._views.get(revision_id)
@@ -1301,7 +1299,9 @@ class InfluenceProjectionAdapter:
                 if claim.claim_id in visited_claims:
                     continue
                 other = (
-                    claim.target_block_id if claim.source_block_id == node else claim.source_block_id
+                    claim.target_block_id
+                    if claim.source_block_id == node
+                    else claim.source_block_id
                 )
                 if other in seen:
                     visited_claims.add(claim.claim_id)
@@ -1403,7 +1403,9 @@ class SegmentAtomAdapter:
         documents: list[str] = []
         for item in self._items():
             action = item.get("action") if isinstance(item.get("action"), dict) else {}
-            observation = item.get("observation") if isinstance(item.get("observation"), dict) else {}
+            observation = (
+                item.get("observation") if isinstance(item.get("observation"), dict) else {}
+            )
             record_kind = action.get("record_kind")
             kind: CardKind = "segment" if record_kind == "segment" else "atom"
             raw_labels = action.get("acl_labels")
@@ -1507,18 +1509,12 @@ def _subgraph_members(
     """
     blocks = {block.block_id: block for block in revision.blocks}
     claims = {claim.claim_id: claim for claim in revision.claims}
-    chosen_blocks = tuple(
-        blocks[block_id] for block_id in subgraph.block_ids if block_id in blocks
-    )
-    chosen_claims = tuple(
-        claims[claim_id] for claim_id in subgraph.claim_ids if claim_id in claims
-    )
+    chosen_blocks = tuple(blocks[block_id] for block_id in subgraph.block_ids if block_id in blocks)
+    chosen_claims = tuple(claims[claim_id] for claim_id in subgraph.claim_ids if claim_id in claims)
     return chosen_blocks, chosen_claims
 
 
-def _subgraph_retrieval_text(
-    revision: InfluenceViewRevision, subgraph: RetrievalSubgraph
-) -> str:
+def _subgraph_retrieval_text(revision: InfluenceViewRevision, subgraph: RetrievalSubgraph) -> str:
     """Shared diagnostic document. See ``SUBGRAPH_TEXT_POLICY_VERSION``.
 
     Query and candidate both use this string. Prose stays in stored member
@@ -1556,9 +1552,7 @@ def _subgraph_retrieval_text(
     return "\n".join(parts)
 
 
-def _position_inside_subgraph(
-    grounding: InfluenceGrounding, subgraph: RetrievalSubgraph
-) -> bool:
+def _position_inside_subgraph(grounding: InfluenceGrounding, subgraph: RetrievalSubgraph) -> bool:
     """Stand-in position parser. Never raises.
 
     ``block`` matches only ``block:<id>`` against ``block_ids``.
@@ -1745,9 +1739,7 @@ class RetrievalSubgraphAdapter:
         if not matches:
             raise ValueError(f"view revision {identity!r} is not in the supersede index")
         if len(matches) != 1:
-            raise ValueError(
-                f"view revision {identity!r} is not unique in the supersede index"
-            )
+            raise ValueError(f"view revision {identity!r} is not unique in the supersede index")
         return matches[0]
 
     def _require_query_session_visible(self, session_id: str, principal: set[str]) -> None:
@@ -1761,9 +1753,7 @@ class RetrievalSubgraphAdapter:
         if not labels:
             raise ValueError(f"querying session {session_id!r} has no ACL labels")
         if not _labels_visible(labels, principal):
-            raise ValueError(
-                f"querying session {session_id!r} is not visible to the principal"
-            )
+            raise ValueError(f"querying session {session_id!r} is not visible to the principal")
 
     def _require_failure_subgraph(
         self, revision: InfluenceViewRevision, subgraph_id: str
@@ -1775,9 +1765,7 @@ class RetrievalSubgraphAdapter:
             if not subgraph.is_failure:
                 raise ValueError(f"subgraph {identity!r} is not failure-marked")
             return subgraph
-        raise ValueError(
-            f"subgraph {identity!r} is not on view revision {revision.revision_id!r}"
-        )
+        raise ValueError(f"subgraph {identity!r} is not on view revision {revision.revision_id!r}")
 
     def _session_labels(self, session_id: str) -> tuple[str, ...]:
         if self._session_acl is None:
@@ -2140,15 +2128,11 @@ class HybridRetrievalFacade:
         plan: _RankPlan,
     ) -> tuple[list[RetrievalCard], list[RetrievalCard], list[RetrievalCard]]:
         fork_cards = self._visible(
-            self.fork_branch.search(
-                query, budgets.fork_branch, principal_labels, rank_plan=plan
-            ),
+            self.fork_branch.search(query, budgets.fork_branch, principal_labels, rank_plan=plan),
             principal_labels,
         )
         projection_cards = self._visible(
-            self.projection.search(
-                query, budgets.projection, principal_labels, rank_plan=plan
-            ),
+            self.projection.search(query, budgets.projection, principal_labels, rank_plan=plan),
             principal_labels,
         )
         if self.fact_lane_paused:
@@ -2243,4 +2227,7 @@ class HybridRetrievalFacade:
             reranked = hook.rerank(cards, context)  # type: ignore[union-attr]
         else:
             reranked = hook(cards, context)  # type: ignore[operator]
-        return [card if isinstance(card, RetrievalCard) else RetrievalCard.from_dict(card) for card in reranked]
+        return [
+            card if isinstance(card, RetrievalCard) else RetrievalCard.from_dict(card)
+            for card in reranked
+        ]

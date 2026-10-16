@@ -57,12 +57,8 @@ from openviking.session.retrieval_facade import (
 _CAUSAL = {"skill_trajectory_mode": "causal"}
 _CHECKS = ServerChecks(anchor_exists=True, refs_exist=True, provenance_valid=True)
 _EVIDENCE = {
-    "observed_branch_refs": [
-        {"branch_id": "br-obs", "evidence_status": "real", "ref": "run-1"}
-    ],
-    "independent_control_refs": [
-        {"ref_kind": "independent_control", "ref_id": "ctrl-1"}
-    ],
+    "observed_branch_refs": [{"branch_id": "br-obs", "evidence_status": "real", "ref": "run-1"}],
+    "independent_control_refs": [{"ref_kind": "independent_control", "ref_id": "ctrl-1"}],
     "anchor_valid": {"valid": True, "checked_at": "2026-01-02T00:00:00.000Z"},
     "applicability_check": {
         "task_decision_type": "applicable",
@@ -438,7 +434,9 @@ def test_branch_cards_follow_parent_channel(tmp_path: Path) -> None:
     session_dir = root / "sess"
     AOLedger(session_dir, "sess")
     facade = _facade(root, store, registry, session_dir, "sess")
-    result = facade.audit_legacy({}, _PRINCIPAL, RetrievalProfile(fork_branch=4, projection=0, segment_atom=0))
+    result = facade.audit_legacy(
+        {}, _PRINCIPAL, RetrievalProfile(fork_branch=4, projection=0, segment_atom=0)
+    )
     assert [(card.kind, card.channel, card.status_label) for card in result.cards] == [
         ("fork", "verified", "validated"),
         ("branch", "verified", "validated"),
@@ -520,7 +518,12 @@ def test_acl_filters_non_intersecting_labels(tmp_path: Path) -> None:
     store = _store(root)
     visible_fork = _commit_fork(store, ao_id="ao-visible", workspace="team-a", status="validated")
     hidden_fork = _commit_fork(store, ao_id="ao-hidden", workspace="secret", status="validated")
-    visible_rev = _freeze([_block("b-vis", 1, session_id="sess-vis")], [], revision_id="rev-vis", session_id="sess-vis")
+    visible_rev = _freeze(
+        [_block("b-vis", 1, session_id="sess-vis")],
+        [],
+        revision_id="rev-vis",
+        session_id="sess-vis",
+    )
     hidden_rev = _freeze(
         [_block("b-hid", 1, session_id="sess-hid")],
         [],
@@ -535,7 +538,9 @@ def test_acl_filters_non_intersecting_labels(tmp_path: Path) -> None:
     visible_ao = _append_ao(ledger, labels=["team-a"])
     hidden_ao = _append_ao(ledger, labels=["secret"])
 
-    facade = _facade(root, store, registry, session_dir, "sess-acl", views=[visible_rev, hidden_rev])
+    facade = _facade(
+        root, store, registry, session_dir, "sess-acl", views=[visible_rev, hidden_rev]
+    )
     result = facade.audit_legacy({}, _PRINCIPAL)
     pointers = [card.source_pointer for card in result.cards]
     assert any(item.get("fork_node_id") == visible_fork for item in pointers)
@@ -666,20 +671,23 @@ def test_dependency_pattern_and_bounded_neighborhood(tmp_path: Path) -> None:
     assert len(neighborhood.entities) == len(set(neighborhood.entities))
     assert neighborhood.truncated is True
     assert neighborhood.entities[0] == "n1"
-    assert check_path_budget(
-        list(neighborhood.entities),
-        [
-            {
-                "kind": "evidence",
-                "bridge_id": claim_id,
-                "source_ref": {"type": "block", "id": source},
-                "target_ref": {"type": "block", "id": target},
-                "relation_type": "claim",
-            }
-            for claim_id, source, target in neighborhood.edges
-        ],
-        max_entities=12,
-    ) == []
+    assert (
+        check_path_budget(
+            list(neighborhood.entities),
+            [
+                {
+                    "kind": "evidence",
+                    "bridge_id": claim_id,
+                    "source_ref": {"type": "block", "id": source},
+                    "target_ref": {"type": "block", "id": target},
+                    "relation_type": "claim",
+                }
+                for claim_id, source, target in neighborhood.edges
+            ],
+            max_entities=12,
+        )
+        == []
+    )
 
     cycled = facade.expand_claim_neighborhood("rev-cycle", "cy-1")
     assert cycled.truncated is True
@@ -742,7 +750,10 @@ def test_acl_does_not_consume_quota(tmp_path: Path) -> None:
     )
     fork_ids = [card.source_pointer["fork_node_id"] for card in result.cards if card.kind == "fork"]
     assert visible in fork_ids
-    assert all(card.source_pointer.get("fork_node_id") != visible or card.acl_labels == _PRINCIPAL for card in result.cards)
+    assert all(
+        card.source_pointer.get("fork_node_id") != visible or card.acl_labels == _PRINCIPAL
+        for card in result.cards
+    )
     assert all(set(card.acl_labels) & set(_PRINCIPAL) for card in result.cards)
 
 
@@ -810,7 +821,9 @@ def test_branch_channel_follows_own_evidence(tmp_path: Path) -> None:
         _PRINCIPAL,
         RetrievalProfile(fork_branch=6, projection=0, segment_atom=0),
     )
-    branches = {card.source_pointer["branch_id"]: card for card in result.cards if card.kind == "branch"}
+    branches = {
+        card.source_pointer["branch_id"]: card for card in result.cards if card.kind == "branch"
+    }
     assert branches["br-imag"].channel == "provisional"
     assert branches["br-real"].channel == "verified"
 
@@ -898,7 +911,9 @@ def test_exploration_selection_is_seeded_and_audited(tmp_path: Path) -> None:
     profile = RetrievalProfile(fork_branch=8, projection=0, segment_atom=0)
 
     def explore(seed: str) -> RetrievalCard:
-        result = _open_lane(root, store, session_dir, seed=seed).audit_legacy({}, _PRINCIPAL, profile)
+        result = _open_lane(root, store, session_dir, seed=seed).audit_legacy(
+            {}, _PRINCIPAL, profile
+        )
         assert len(result.cards) <= 12
         explored = [card for card in result.cards if card.selection_mode == "exploration"]
         assert len(explored) == 1
@@ -1199,7 +1214,11 @@ def test_content_resolver_matches_claim_via_linked_block_refs(tmp_path: Path) ->
         return ""
 
     adapter = InfluenceProjectionAdapter(registry, views=[revision], content_resolver=resolve)
-    claims = [card for card in adapter.search("caroline", 10, _PRINCIPAL) if card.kind == "claim_projection"]
+    claims = [
+        card
+        for card in adapter.search("caroline", 10, _PRINCIPAL)
+        if card.kind == "claim_projection"
+    ]
     assert len(claims) == 1
     assert claims[0].source_pointer["block_or_claim_id"] == "c-link"
     assert "patch" not in json.dumps(claims[0].to_dict(), ensure_ascii=False)
@@ -1257,11 +1276,15 @@ def test_bm25_term_and_document_frequency_change_rank() -> None:
     assert DEFAULT_B == 0.75
     frequency = BM25Index(["apple apple apple", "apple"], k1=1.2, b=0.75)
     scores = frequency.scores("apple")
-    heavy = math.log(1 + (2 - 2 + 0.5) / (2 + 0.5)) * (3 * 2.2) / (
-        3 + 1.2 * (1 - 0.75 + 0.75 * (3 / 2))
+    heavy = (
+        math.log(1 + (2 - 2 + 0.5) / (2 + 0.5))
+        * (3 * 2.2)
+        / (3 + 1.2 * (1 - 0.75 + 0.75 * (3 / 2)))
     )
-    light = math.log(1 + (2 - 2 + 0.5) / (2 + 0.5)) * (1 * 2.2) / (
-        1 + 1.2 * (1 - 0.75 + 0.75 * (1 / 2))
+    light = (
+        math.log(1 + (2 - 2 + 0.5) / (2 + 0.5))
+        * (1 * 2.2)
+        / (1 + 1.2 * (1 - 0.75 + 0.75 * (1 / 2)))
     )
     assert scores[0] == pytest.approx(heavy)
     assert scores[1] == pytest.approx(light)
@@ -1557,7 +1580,9 @@ def test_rank_mode_has_no_vector_only_tier(tmp_path: Path) -> None:
     store = _store(root)
     session_dir = root / "sess"
     AOLedger(session_dir, "sess")
-    facade = _facade(root, store, ProjectionRegistry(root / "projections.json"), session_dir, "sess")
+    facade = _facade(
+        root, store, ProjectionRegistry(root / "projections.json"), session_dir, "sess"
+    )
     with pytest.raises(ValueError, match="rank_mode"):
         facade.audit_legacy({}, _PRINCIPAL, {"rank_mode": "vector"})
 
@@ -1742,7 +1767,9 @@ def test_fork_and_branch_cards_carry_text(tmp_path: Path) -> None:
     assert content == replayed
     assert "text" in content
 
-    branches = {card.source_pointer["branch_id"]: card for card in result.cards if card.kind == "branch"}
+    branches = {
+        card.source_pointer["branch_id"]: card for card in result.cards if card.kind == "branch"
+    }
     assert branches["br-real"].text == "edit: set timeout to 30 | rerun the suite"
     assert branches["br-missing"].text == "br-missing imagined_unverified"
     assert branches["br-count"].text == " | ".join(
@@ -1892,6 +1919,4 @@ def test_expand_claim_neighborhood_by_card_id(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown card id"):
         facade.expand_claim_neighborhood(card_id="fork:fk-1@rev-1")
     with pytest.raises(ValueError, match="card_id"):
-        facade.expand_claim_neighborhood(
-            "rev-skip", "e-skip", card_id=claim_card.payload_ref
-        )
+        facade.expand_claim_neighborhood("rev-skip", "e-skip", card_id=claim_card.payload_ref)

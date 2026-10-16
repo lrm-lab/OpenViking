@@ -21,13 +21,13 @@ from openviking.session.influence_projection import (
     SourcePointer,
 )
 from openviking.session.influence_view import (
+    PURPOSE_FAILURE_DIAGNOSIS,
+    PURPOSE_POST_RUN_INDEX,
     AORange,
     CoverageManifest,
     InfluenceBlock,
     InfluenceClaim,
     InfluenceViewDraft,
-    PURPOSE_FAILURE_DIAGNOSIS,
-    PURPOSE_POST_RUN_INDEX,
     SegmentRef,
     SourceRef,
     build_minimal_fallback_view,
@@ -77,7 +77,9 @@ def _block(block_id: str, sequence: int, *, session_id: str = SESSION) -> Influe
 def _coverage(blocks: list[InfluenceBlock]) -> CoverageManifest:
     refs = tuple(ref for block in blocks for ref in block.source_refs)
     return CoverageManifest(
-        total_ao_range=AORange(start_seq=min(ref.sequence for ref in refs), end_seq=max(ref.sequence for ref in refs)),
+        total_ao_range=AORange(
+            start_seq=min(ref.sequence for ref in refs), end_seq=max(ref.sequence for ref in refs)
+        ),
         inspected_refs=refs,
         included_ranges=tuple(
             AORange(start_seq=block.ao_start_seq, end_seq=block.ao_end_seq, segment_id="seg-a")
@@ -89,7 +91,10 @@ def _coverage(blocks: list[InfluenceBlock]) -> CoverageManifest:
 
 
 def _revision_with_claim(session_id: str = SESSION, revision_id: str = "rev-claim"):
-    blocks = [_block("block-a", 1, session_id=session_id), _block("block-b", 2, session_id=session_id)]
+    blocks = [
+        _block("block-a", 1, session_id=session_id),
+        _block("block-b", 2, session_id=session_id),
+    ]
     claim = InfluenceClaim(
         claim_id="claim-1",
         source_block_id="block-a",
@@ -170,7 +175,9 @@ def test_search_hides_cards_when_acl_labels_do_not_intersect(tmp_path) -> None:
     assert registry.search(principal_labels=()) == ()
     leaked = registry.search(principal_labels=("secret", "outsider"))
     assert {card.source_pointer.view_revision_id for card in leaked} == {"rev-secret"}
-    other = registry.search(principal_labels=("team-b",), kind=CARD_KIND_BLOCK, status=CARD_STATUS_PROVISIONAL)
+    other = registry.search(
+        principal_labels=("team-b",), kind=CARD_KIND_BLOCK, status=CARD_STATUS_PROVISIONAL
+    )
     assert [card.session_id for card in other] == [OTHER]
 
 
@@ -203,7 +210,9 @@ def test_register_supersedes_same_purpose_only(tmp_path) -> None:
     found = registry.search(principal_labels=("team",))
     revision_ids = {card.source_pointer.view_revision_id for card in found}
     assert revision_ids == {"rev-2", "rev-diag"}
-    superseded = [record for record in registry.removed_records() if record.reason == REMOVAL_SUPERSEDED]
+    superseded = [
+        record for record in registry.removed_records() if record.reason == REMOVAL_SUPERSEDED
+    ]
     assert [record.card.source_pointer.view_revision_id for record in superseded] == ["rev-1"]
 
 
@@ -274,7 +283,9 @@ def test_promote_with_registration_validation_marks_verified(tmp_path) -> None:
 def test_registry_round_trip(tmp_path) -> None:
     registry = _registry(tmp_path)
     revision = _revision_with_claim(revision_id="rev-1")
-    registry.register(revision, acl_labels=("team-a",), validated_positions=(revision.blocks[0].block_id,))
+    registry.register(
+        revision, acl_labels=("team-a",), validated_positions=(revision.blocks[0].block_id,)
+    )
     registry.promote_to_verified(
         revision.revision_id,
         revision.blocks[0].block_id,
@@ -388,7 +399,9 @@ def test_acl_change_notifies_each_withdrawn_view_revision_once(tmp_path) -> None
         revision_id = record.card.source_pointer.view_revision_id
         if revision_id not in expected:
             expected.append(revision_id)
-    assert sum(record.card.source_pointer.view_revision_id == "rev-claim" for record in removed) >= 2
+    assert (
+        sum(record.card.source_pointer.view_revision_id == "rev-claim" for record in removed) >= 2
+    )
     assert [record.reason for record in removed] == [REMOVAL_ACL_CHANGE] * len(removed)
     assert {record.session_id for record in removed} == {SESSION}
     assert all(record.new_labels == ("team-b",) for record in removed)

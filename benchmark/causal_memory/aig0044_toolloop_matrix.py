@@ -376,8 +376,7 @@ def _verb_script() -> list[tuple[str, dict[str, Any]]]:
 def _build(root: Path) -> dict[str, Any]:
     texts = ["q", "plan", "work", "spare", "answer"]
     records = tuple(
-        _record(index, "worker", text, session_id="sess-verbs")
-        for index, text in enumerate(texts)
+        _record(index, "worker", text, session_id="sess-verbs") for index, text in enumerate(texts)
     )
     snapshot = AoSnapshot(records, watermark="wm-verbs", question="what failed?")
     covered = run_toolloop(
@@ -473,9 +472,7 @@ def _hard_invariants(root: Path) -> dict[str, bool]:
             lambda: surface.add_inheritance_note("end-1", "task-1", "later", "backwards")
         )
         == "edge_not_forward",
-        "missing_field": _code(
-            lambda: surface.modify_block("task-1", {"content": ""})
-        )
+        "missing_field": _code(lambda: surface.modify_block("task-1", {"content": ""}))
         == "missing_field",
         "not_adjacent": _code(
             lambda: surface.add_inheritance_note("task-1", "end-1", "the question", "skipped")
@@ -599,9 +596,9 @@ def _compile_view(result, snapshot: AoSnapshot) -> dict[str, Any]:
     rendered = render_paper_graph(revision, snapshot)
     paper = {
         block["block_id"]: block
-        for block in json.loads(Path(result.sidecar_path).read_text(encoding="utf-8"))[
-            "body"
-        ]["nodes"]
+        for block in json.loads(Path(result.sidecar_path).read_text(encoding="utf-8"))["body"][
+            "nodes"
+        ]
     }
     by_id = {node["block_id"]: node for node in rendered["blocks"]}
     for block_id, node in paper.items():
@@ -651,8 +648,7 @@ def _compile_view(result, snapshot: AoSnapshot) -> dict[str, Any]:
     if native["agent-c"].authorship != "executed" or native["agent-c"].defect_recorded != DEFECT_C:
         raise AssertionError("agent-c fields")
     edges = {
-        (edge.source_block_id, edge.target_block_id): edge.relation_type
-        for edge in revision.edges
+        (edge.source_block_id, edge.target_block_id): edge.relation_type for edge in revision.edges
     }
     if edges[("agent-b", "agent-c")] != "influence" or edges[("agent-a", "end-1")] != "skip":
         raise AssertionError(f"edge kinds {edges}")
@@ -914,11 +910,14 @@ def _fork_and_hops(
         ],
     )
     conflict_found = opened.search_precedents({"proposal": conflict, "temporal_cutoff": CUTOFF})
-    if _code(
-        lambda: opened.submit_fork_proposal(
-            conflict, [], retrieval_id=conflict_found["retrieval_id"], recorded_at=RECORDED
+    if (
+        _code(
+            lambda: opened.submit_fork_proposal(
+                conflict, [], retrieval_id=conflict_found["retrieval_id"], recorded_at=RECORDED
+            )
         )
-    ) != "overlay_conflict":
+        != "overlay_conflict"
+    ):
         raise AssertionError("same-anchor conflict was stored")
     retired_proposal = _proposal(
         catalog,
@@ -943,11 +942,14 @@ def _fork_and_hops(
             {"imagined_node_id": "img-budget", "step_kind": "imagined_node"},
         ],
     )
-    if _code(
-        lambda: opened.submit_fork_proposal(
-            blocked, [], retrieval_id="ignored", recorded_at=RECORDED
+    if (
+        _code(
+            lambda: opened.submit_fork_proposal(
+                blocked, [], retrieval_id="ignored", recorded_at=RECORDED
+            )
         )
-    ) != "submit_budget_exhausted":
+        != "submit_budget_exhausted"
+    ):
         raise AssertionError("submit budget stayed open")
     still = opened.submit_fork_proposal(
         proposal, [], retrieval_id=found["retrieval_id"], recorded_at=RECORDED
@@ -1089,12 +1091,8 @@ def _hops(
     if hidden["edges"]:
         raise AssertionError("bob saw carol's fork")
     if _code(
-        lambda: links.expand(
-            "replay-rev:hidden", principal_labels=(CAROL,), unresolved=()
-        )
-    ) != (
-        "replay_provenance_excluded"
-    ):
+        lambda: links.expand("replay-rev:hidden", principal_labels=(CAROL,), unresolved=())
+    ) != ("replay_provenance_excluded"):
         raise AssertionError("replay subject was reachable")
     replay_fork = _plant_replay(revision, overlays)
     replay_edges = links.expand(
@@ -1114,9 +1112,10 @@ def _hops(
     if guided["direction"] != "out" or guided["target_id"] != fork_id:
         raise AssertionError(f"guides edge {guided}")
     tight = ExperienceLinkService(root, overlays=overlays, patterns=patterns, reader_max_cards=1)
-    if _code(
-        lambda: tight.expand(fork_id, principal_labels=(CAROL,), unresolved=())
-    ) != "hop_budget_exceeded":
+    if (
+        _code(lambda: tight.expand(fork_id, principal_labels=(CAROL,), unresolved=()))
+        != "hop_budget_exceeded"
+    ):
         raise AssertionError("card budget returned a truncated page")
     hopper = ExperienceLinkService(root, overlays=overlays, patterns=patterns)
     context_id = None
@@ -1127,20 +1126,23 @@ def _hops(
         context_id = step["context_id"]
     if step["hops"] != DEFAULT_READER_MAX_HOPS:
         raise AssertionError(f"hops={step['hops']}")
-    if _code(
-        lambda: hopper.expand(
-            "nobody", principal_labels=(CAROL,), context_id=context_id, unresolved=()
+    if (
+        _code(
+            lambda: hopper.expand(
+                "nobody", principal_labels=(CAROL,), context_id=context_id, unresolved=()
+            )
         )
-    ) != "hop_budget_exceeded":
+        != "hop_budget_exceeded"
+    ):
         raise AssertionError("hop budget stayed open")
     if (DEFAULT_READER_MAX_HOPS, DEFAULT_READER_MAX_CARDS) != (8, 32):
         raise AssertionError("reader budget defaults moved")
     if (DEFAULT_MEMORY_MAX_HOPS, DEFAULT_MEMORY_MAX_CARDS) != (4, 16):
         raise AssertionError("memory budget defaults moved")
     audit = (root / "t-fork-audit" / "attempts.jsonl").read_text(encoding="utf-8")
-    if "ps field" not in (
-        root / "experience-link-audit" / "hops.jsonl"
-    ).read_text(encoding="utf-8"):
+    if "ps field" not in (root / "experience-link-audit" / "hops.jsonl").read_text(
+        encoding="utf-8"
+    ):
         raise AssertionError("unresolved context was not audited")
     if "phase_locked" not in audit:
         raise AssertionError("phase lock was not audited")
@@ -1217,7 +1219,7 @@ def _report(root: Path) -> dict[str, Any]:
     return {
         "assertions": {
             **built,
-            **{key: value for key, value in looped.items()},
+            **dict(looped.items()),
             **compiled_view,
             **read,
             **forked,

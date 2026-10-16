@@ -252,18 +252,22 @@ def test_only_confirmed_failure_with_a_precedent_can_propose(tmp_path: Path) -> 
     assert _code(lambda: _propose(world, mismatched)) == "retrieval_mismatch"
     unknown_fork = _branch(world, source_fork_id="fork-missing")
     assert _code(lambda: _propose(world, unknown_fork)) == "source_fork_unknown"
-    assert _code(
-        lambda: world.service.propose(
-            world.run,
-            world.sessions["reader"],
-            _branch(world),
-            principal_labels=(),
-            external_evidence=(_signal("fail"),),
+    assert (
+        _code(
+            lambda: world.service.propose(
+                world.run,
+                world.sessions["reader"],
+                _branch(world),
+                principal_labels=(),
+                external_evidence=(_signal("fail"),),
+            )
         )
-    ) == "acl_denied"
-    assert _code(
-        lambda: _propose(world, evidence=(_signal("fail", evidence_ref="evidence:other"),))
-    ) == "adjudication_conflict"
+        == "acl_denied"
+    )
+    assert (
+        _code(lambda: _propose(world, evidence=(_signal("fail", evidence_ref="evidence:other"),)))
+        == "adjudication_conflict"
+    )
     assert len(_files(tmp_path, "proposals")) == 1
 
 
@@ -271,15 +275,18 @@ def test_builder_critic_refiner_and_memory_cannot_propose(tmp_path: Path) -> Non
     world = _world(tmp_path)
     payload = _branch(world)
     for role in ("builder", "critic", "refiner"):
-        assert _code(
-            lambda role=role: world.service.propose(
-                world.run,
-                world.sessions[role],
-                payload,
-                principal_labels=(_CAROL,),
-                external_evidence=(_signal("fail"),),
+        assert (
+            _code(
+                lambda role=role: world.service.propose(
+                    world.run,
+                    world.sessions[role],
+                    payload,
+                    principal_labels=(_CAROL,),
+                    external_evidence=(_signal("fail"),),
+                )
             )
-        ) == "outcome_write_forbidden"
+            == "outcome_write_forbidden"
+        )
     forged = _branch(world, author_role="memory")
     with pytest.raises(ProtocolContractError, match="author_role"):
         world.service.propose(
@@ -295,15 +302,18 @@ def test_builder_critic_refiner_and_memory_cannot_propose(tmp_path: Path) -> Non
     bare.critique(sessions["critic"], [{"code": "gap", "severity": "high"}])
     bare.refine(sessions["refiner"], {"graph": ["n"]})
     bare.read_verify(sessions["reader"], {"verdict": "supported"})
-    assert _code(
-        lambda: world.service.propose(
-            bare,
-            sessions["reader"],
-            payload,
-            principal_labels=(_CAROL,),
-            external_evidence=(_signal("fail"),),
+    assert (
+        _code(
+            lambda: world.service.propose(
+                bare,
+                sessions["reader"],
+                payload,
+                principal_labels=(_CAROL,),
+                external_evidence=(_signal("fail"),),
+            )
         )
-    ) == "report_not_frozen"
+        == "report_not_frozen"
+    )
     assert _files(tmp_path, "proposals") == []
     with pytest.raises(AigContractError, match="memory_session_not_shared"):
         bare.session_for("memory")
@@ -335,8 +345,12 @@ def test_server_freezes_the_selected_agent_without_widening(tmp_path: Path) -> N
     assert first.guidance.content_hash == first.approval.guidance_content_hash
     assert "steps" not in inspect.signature(guidance_approval_document).parameters
     stored = json.loads(
-        (tmp_path / GUIDANCE_APPROVAL_DIRNAME / "guidance" / f"{first.guidance.content_hash}.json")
-        .read_text(encoding="utf-8")
+        (
+            tmp_path
+            / GUIDANCE_APPROVAL_DIRNAME
+            / "guidance"
+            / f"{first.guidance.content_hash}.json"
+        ).read_text(encoding="utf-8")
     )
     assert "selected_agent_id" not in stored["body"]
     assert "steps" not in stored["body"]
@@ -345,33 +359,42 @@ def test_server_freezes_the_selected_agent_without_widening(tmp_path: Path) -> N
         "agent_candidate_catalog",
         {"candidates": [_candidate("agent-a")], "task_id": "task-other"},
     )
-    assert _code(
-        lambda: world.service.approve(
-            proposed.proposal.content_hash,
-            other_task,
-            principal_labels=(_CAROL,),
+    assert (
+        _code(
+            lambda: world.service.approve(
+                proposed.proposal.content_hash,
+                other_task,
+                principal_labels=(_CAROL,),
+            )
         )
-    ) == "catalog_mismatch"
+        == "catalog_mismatch"
+    )
 
     narrow = _world(tmp_path / "capability")
     held = _propose(
         narrow,
         _branch(narrow, required_capabilities=["replay-sandbox", "rollback"]),
     )
-    assert _code(
-        lambda: narrow.service.approve(
-            held.proposal.content_hash,
-            _catalog(narrow, [_candidate("agent-a", capabilities=["replay-sandbox"])]),
-            principal_labels=(_CAROL,),
+    assert (
+        _code(
+            lambda: narrow.service.approve(
+                held.proposal.content_hash,
+                _catalog(narrow, [_candidate("agent-a", capabilities=["replay-sandbox"])]),
+                principal_labels=(_CAROL,),
+            )
         )
-    ) == "no_eligible_target"
-    assert _code(
-        lambda: narrow.service.approve(
-            held.proposal.content_hash,
-            _catalog(narrow, [_candidate("agent-a", acl_labels=[_BOB])]),
-            principal_labels=(_CAROL,),
+        == "no_eligible_target"
+    )
+    assert (
+        _code(
+            lambda: narrow.service.approve(
+                held.proposal.content_hash,
+                _catalog(narrow, [_candidate("agent-a", acl_labels=[_BOB])]),
+                principal_labels=(_CAROL,),
+            )
         )
-    ) == "no_eligible_target"
+        == "no_eligible_target"
+    )
     assert _files(tmp_path / "capability", "approvals") == []
 
 
@@ -516,48 +539,69 @@ def test_memory_publishes_only_the_approved_snapshot(tmp_path: Path) -> None:
 
     extra = _step(step_id="step-extra", imagined="img-extra", statement="add an unproposed retry")
     approval_bytes = (
-        tmp_path / GUIDANCE_APPROVAL_DIRNAME / "approvals" / f"{approval.approval.content_hash}.json"
+        tmp_path
+        / GUIDANCE_APPROVAL_DIRNAME
+        / "approvals"
+        / f"{approval.approval.content_hash}.json"
     ).read_bytes()
-    assert _code(
-        lambda: _publish(world.service,
-            approval.approval.content_hash,
-            render=mutated("steps", list(envelope["body"]["steps"]) + [extra]),
+    assert (
+        _code(
+            lambda: _publish(
+                world.service,
+                approval.approval.content_hash,
+                render=mutated("steps", list(envelope["body"]["steps"]) + [extra]),
+            )
         )
-    ) == "action_not_in_proposal"
-    assert _code(
-        lambda: _publish(world.service,
-            approval.approval.content_hash,
-            render=mutated("selected_agent_id", "agent-b"),
+        == "action_not_in_proposal"
+    )
+    assert (
+        _code(
+            lambda: _publish(
+                world.service,
+                approval.approval.content_hash,
+                render=mutated("selected_agent_id", "agent-b"),
+            )
         )
-    ) == "target_rewrite_forbidden"
-    assert _code(
-        lambda: _publish(world.service,
-            approval.approval.content_hash,
-            render=mutated(
-                "capability_limits",
-                ["replay-sandbox", "rollback"],
-                reproject=True,
-            ),
+        == "target_rewrite_forbidden"
+    )
+    assert (
+        _code(
+            lambda: _publish(
+                world.service,
+                approval.approval.content_hash,
+                render=mutated(
+                    "capability_limits",
+                    ["replay-sandbox", "rollback"],
+                    reproject=True,
+                ),
+            )
         )
-    ) == "unevidenced_action"
-    assert _code(
-        lambda: _publish(world.service,
-            approval.approval.content_hash,
-            render=mutated("reason", "reader_inference_only"),
+        == "unevidenced_action"
+    )
+    assert (
+        _code(
+            lambda: _publish(
+                world.service,
+                approval.approval.content_hash,
+                render=mutated("reason", "reader_inference_only"),
+            )
         )
-    ) == "basis_rewrite_forbidden"
+        == "basis_rewrite_forbidden"
+    )
     with pytest.raises(ProtocolContractError, match="confirmed_failure"):
-        _publish(world.service,
+        _publish(
+            world.service,
             approval.approval.content_hash,
             render=mutated("decision", DECISION_SUCCESS),
         )
     assert (
-        tmp_path / GUIDANCE_APPROVAL_DIRNAME / "approvals" / f"{approval.approval.content_hash}.json"
+        tmp_path
+        / GUIDANCE_APPROVAL_DIRNAME
+        / "approvals"
+        / f"{approval.approval.content_hash}.json"
     ).read_bytes() == approval_bytes
     assert (
-        world.service.read_publication(
-            approval.approval.content_hash, principal_labels=(_CAROL,)
-        )
+        world.service.read_publication(approval.approval.content_hash, principal_labels=(_CAROL,))
         == published.publication
     )
 
@@ -568,14 +612,20 @@ def test_rejected_and_unapproved_proposals_cannot_be_published(tmp_path: Path) -
     rejection = world.service.reject(proposed.proposal.content_hash)
     assert rejection.reason == "guidance_rejected"
     assert world.service.reject(proposed.proposal.content_hash) == rejection
-    assert _code(
-        lambda: world.service.approve(
-            proposed.proposal.content_hash,
-            _catalog(world, [_candidate("agent-a")]),
-            principal_labels=(_CAROL,),
+    assert (
+        _code(
+            lambda: world.service.approve(
+                proposed.proposal.content_hash,
+                _catalog(world, [_candidate("agent-a")]),
+                principal_labels=(_CAROL,),
+            )
         )
-    ) == "proposal_rejected"
-    assert _code(lambda: _publish(world.service, proposed.proposal.content_hash)) == "approval_required"
+        == "proposal_rejected"
+    )
+    assert (
+        _code(lambda: _publish(world.service, proposed.proposal.content_hash))
+        == "approval_required"
+    )
     assert _files(tmp_path, "approvals") == []
 
     other = _world(tmp_path / "kept")
@@ -588,9 +638,7 @@ def test_rejected_and_unapproved_proposals_cannot_be_published(tmp_path: Path) -
     _publish(other.service, frozen.approval.content_hash)
     assert _code(lambda: other.service.reject(held.proposal.content_hash)) == "approval_frozen"
     assert (
-        other.service.read_publication(
-            frozen.approval.content_hash, principal_labels=(_CAROL,)
-        )
+        other.service.read_publication(frozen.approval.content_hash, principal_labels=(_CAROL,))
         is not None
     )
 
@@ -607,9 +655,10 @@ def test_publish_records_the_principal_and_caller_timestamp(tmp_path: Path) -> N
     assert _code(lambda: _publish(world.service, content_hash, principal_labels=())) == (
         "publisher_required"
     )
-    assert _code(
-        lambda: _publish(world.service, content_hash, principal_labels=(" user:carol",))
-    ) == "publisher_required"
+    assert (
+        _code(lambda: _publish(world.service, content_hash, principal_labels=(" user:carol",)))
+        == "publisher_required"
+    )
     assert _code(lambda: _publish(world.service, content_hash, published_at="")) == (
         "published_at_required"
     )
@@ -617,10 +666,16 @@ def test_publish_records_the_principal_and_caller_timestamp(tmp_path: Path) -> N
         "published_at_required"
     )
     first = _publish(world.service, content_hash)
-    assert _code(
-        lambda: _publish(world.service, content_hash, published_at="2026-10-10T00:00:04.000Z")
-    ) == "publication_mismatch"
-    assert world.service.read_publication(content_hash, principal_labels=(_CAROL,)) == first.publication
+    assert (
+        _code(
+            lambda: _publish(world.service, content_hash, published_at="2026-10-10T00:00:04.000Z")
+        )
+        == "publication_mismatch"
+    )
+    assert (
+        world.service.read_publication(content_hash, principal_labels=(_CAROL,))
+        == first.publication
+    )
     second = _publish(
         world.service,
         content_hash,
@@ -632,28 +687,37 @@ def test_publish_records_the_principal_and_caller_timestamp(tmp_path: Path) -> N
     assert second.publication.published_at == "2026-10-10T00:00:04.000Z"
     assert second.publication.content_hash != first.publication.content_hash
     assert second.publication.approval_content_hash == content_hash
-    assert world.service.read_publication(content_hash, principal_labels=(_CAROL,)) == first.publication
+    assert (
+        world.service.read_publication(content_hash, principal_labels=(_CAROL,))
+        == first.publication
+    )
     assert len(_files(tmp_path, "publications")) == 2
 
 
 def test_illegal_outcome_evidence_has_its_own_code(tmp_path: Path) -> None:
     world = _world(tmp_path)
-    assert _code(
-        lambda: world.service.propose(
-            world.run,
-            world.sessions["reader"],
-            _branch(world),
-            principal_labels=(_CAROL,),
-            external_evidence="fail",
+    assert (
+        _code(
+            lambda: world.service.propose(
+                world.run,
+                world.sessions["reader"],
+                _branch(world),
+                principal_labels=(_CAROL,),
+                external_evidence="fail",
+            )
         )
-    ) == "outcome_evidence_invalid"
-    assert _code(
-        lambda: world.service.propose(
-            world.run,
-            world.sessions["reader"],
-            _branch(world),
-            principal_labels=(_CAROL,),
-            external_evidence=("not-evidence",),
+        == "outcome_evidence_invalid"
+    )
+    assert (
+        _code(
+            lambda: world.service.propose(
+                world.run,
+                world.sessions["reader"],
+                _branch(world),
+                principal_labels=(_CAROL,),
+                external_evidence=("not-evidence",),
+            )
         )
-    ) == "outcome_evidence_invalid"
+        == "outcome_evidence_invalid"
+    )
     assert _files(tmp_path, "proposals") == []

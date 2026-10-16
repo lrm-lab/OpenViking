@@ -119,8 +119,14 @@ class EvaluationIteration:
             "selected_refs",
             tuple(_require_str(ref, "selected_refs") for ref in self.selected_refs),
         )
-        object.__setattr__(self, "snapshot_watermarks", _json_mapping(self.snapshot_watermarks, "snapshot_watermarks"))
-        object.__setattr__(self, "policy_versions", _json_mapping(self.policy_versions, "policy_versions"))
+        object.__setattr__(
+            self,
+            "snapshot_watermarks",
+            _json_mapping(self.snapshot_watermarks, "snapshot_watermarks"),
+        )
+        object.__setattr__(
+            self, "policy_versions", _json_mapping(self.policy_versions, "policy_versions")
+        )
         object.__setattr__(self, "sub_budgets", _json_mapping(self.sub_budgets, "sub_budgets"))
         result = self.iteration_result
         if isinstance(result, Mapping):
@@ -204,7 +210,11 @@ class MinimalEvaluationLoop:
 
     def run(self, iteration: EvaluationIteration | Mapping[str, Any]) -> EvaluationLoopResult:
         """Run or replay one iteration. A second iteration id is rejected."""
-        spec = iteration if isinstance(iteration, EvaluationIteration) else _iteration_from_mapping(iteration)
+        spec = (
+            iteration
+            if isinstance(iteration, EvaluationIteration)
+            else _iteration_from_mapping(iteration)
+        )
         self._bind(spec)
         self._step(
             OrchestratorState.CREATED,
@@ -297,7 +307,9 @@ class MinimalEvaluationLoop:
                 f"bound iteration {self._iteration_id!r}"
             )
 
-    def _step(self, expected: OrchestratorState, event: str, payload: Mapping[str, Any], **kwargs: Any) -> None:
+    def _step(
+        self, expected: OrchestratorState, event: str, payload: Mapping[str, Any], **kwargs: Any
+    ) -> None:
         """Advance only from ``expected``. A later state has already passed this guard."""
         current = self._orchestrator.state
         rank = _STATE_RANK.get(current)
@@ -316,7 +328,9 @@ class MinimalEvaluationLoop:
             return self._orchestrator.should_stop(spec.iteration_result)
         raise IllegalTransition(state, OrchestratorState.STOPPED)
 
-    def _deliver_brief(self, spec: EvaluationIteration) -> tuple[DiagnosisBrief, str, DeliveryResult]:
+    def _deliver_brief(
+        self, spec: EvaluationIteration
+    ) -> tuple[DiagnosisBrief, str, DeliveryResult]:
         manifest = {
             "evaluation_id": self._orchestrator.evaluation_id,
             "task_id": spec.task_id,
@@ -349,7 +363,9 @@ class MinimalEvaluationLoop:
             raise TypeError("diagnosis_fn must return a sequence of fork proposals")
         revisions: list[ForkNodeRevision] = []
         for proposal in proposals:
-            revisions.append(self._experiences.commit_provisional(self._as_draft(proposal), self._server_checks))
+            revisions.append(
+                self._experiences.commit_provisional(self._as_draft(proposal), self._server_checks)
+            )
         return tuple(revisions)
 
     def _as_draft(self, proposal: Any) -> ForkDraft:
@@ -365,14 +381,18 @@ class MinimalEvaluationLoop:
             return self._experiences.submit_fork_draft(dict(proposal))
         raise TypeError("fork proposal must be a ForkDraft or a mapping")
 
-    def _deliver_hint(self, spec: EvaluationIteration, revisions: Sequence[ForkNodeRevision]) -> MemoryHint:
+    def _deliver_hint(
+        self, spec: EvaluationIteration, revisions: Sequence[ForkNodeRevision]
+    ) -> MemoryHint:
         composed = self._hint_composer(revisions)
         hint = composed if isinstance(composed, MemoryHint) else MemoryHint.from_dict(composed)
         delivered = self._hints.deliver(hint, task_lineage_id=spec.task_lineage_id)
         self._record_citations(spec, revisions)
         return delivered
 
-    def _record_citations(self, spec: EvaluationIteration, revisions: Sequence[ForkNodeRevision]) -> None:
+    def _record_citations(
+        self, spec: EvaluationIteration, revisions: Sequence[ForkNodeRevision]
+    ) -> None:
         """Record a structured citation once per provisional fork.
 
         Hint exposure is written by ``HintDeliveryService.deliver``. This pass
@@ -414,13 +434,19 @@ def _iteration_from_mapping(data: Mapping[str, Any]) -> EvaluationIteration:
         iteration_id=_require_str(data.get("iteration_id"), "iteration_id"),
         task_id=_require_str(data.get("task_id"), "task_id"),
         source_run_id=_require_str(data.get("source_run_id"), "source_run_id"),
-        memory_task_state_hash=_require_str(data.get("memory_task_state_hash"), "memory_task_state_hash"),
+        memory_task_state_hash=_require_str(
+            data.get("memory_task_state_hash"), "memory_task_state_hash"
+        ),
         selected_refs=tuple(refs),
-        snapshot_watermarks=_json_mapping(data.get("snapshot_watermarks", {}), "snapshot_watermarks"),
+        snapshot_watermarks=_json_mapping(
+            data.get("snapshot_watermarks", {}), "snapshot_watermarks"
+        ),
         policy_versions=_json_mapping(data.get("policy_versions", {}), "policy_versions"),
         sub_budgets=_json_mapping(data.get("sub_budgets", {}), "sub_budgets"),
         target_agent_id=_require_str(data.get("target_agent_id"), "target_agent_id"),
         task_lineage_id=_require_str(data.get("task_lineage_id"), "task_lineage_id"),
-        iteration_result=result if isinstance(result, IterationResult) else IterationResult.from_dict(result),
+        iteration_result=result
+        if isinstance(result, IterationResult)
+        else IterationResult.from_dict(result),
         diagnosis_batch=data.get("diagnosis_batch", 1),
     )

@@ -31,8 +31,8 @@ from openviking.session.aig_native_protocol import (
     OBJECT_KIND_GUIDED_COUNTERFACTUAL_BRANCH,
     OBJECT_KIND_TASK_OUTCOME_ASSESSMENT,
     SCHEMA_VERSION_AIG_NATIVE_V2,
-    ProtocolContractError,
     AigNativeViewRevision,
+    ProtocolContractError,
     guidance_execution_report_document,
     is_safe_id,
     is_sha256_hex,
@@ -40,7 +40,11 @@ from openviking.session.aig_native_protocol import (
     protocol_envelope,
     read_native_edge_revision,
 )
-from openviking.session.aig_role_chain import AigConstructionRun, AigContractError, FrozenRunSnapshot
+from openviking.session.aig_role_chain import (
+    AigConstructionRun,
+    AigContractError,
+    FrozenRunSnapshot,
+)
 from openviking.session.append_only import (
     append_jsonl,
     read_json_object,
@@ -92,9 +96,7 @@ AUDIT_REPLAYED = "delivery_replayed"
 AUDIT_REFUSED = "refused"
 
 _TRIGGERS = frozenset({TRIGGER_COMMIT, TRIGGER_DIAGNOSE})
-_PLAN_KEYS = frozenset(
-    {"applicability", "required_capabilities", "risk", "steps", "target_role"}
-)
+_PLAN_KEYS = frozenset({"applicability", "required_capabilities", "risk", "steps", "target_role"})
 
 
 class FailureGateError(ValueError):
@@ -311,7 +313,10 @@ class FailureGateOrchestrator:
             )
             existing = self._read_run(run_id)
             if existing is not None:
-                if existing.get("fingerprint") != fingerprint or existing.get("status") != "complete":
+                if (
+                    existing.get("fingerprint") != fingerprint
+                    or existing.get("status") != "complete"
+                ):
                     raise FailureGateError("delivery_conflict")
                 self._require_fresh_view(delivery)
                 return self._replay(delivery, existing, run_id)
@@ -344,9 +349,9 @@ class FailureGateOrchestrator:
         source_digest: str,
     ) -> AigNativeViewRevision | None:
         """Return the searchable frozen AIG, or None when this source has none."""
-        path = self._view_path(freshness_key(
-            session_id=session_id, task_id=task_id, source_digest=source_digest
-        ))
+        path = self._view_path(
+            freshness_key(session_id=session_id, task_id=task_id, source_digest=source_digest)
+        )
         if not path.is_file():
             return None
         record = read_json_object(path, FailureGateError)
@@ -404,9 +409,7 @@ class FailureGateOrchestrator:
         )
         if adjudication.decision == DECISION_CONFIRMED_FAILURE:
             if delivery.auto_remediate:
-                return self._remediate(
-                    delivery, run_id, binding, adjudication, evidence, kinds
-                )
+                return self._remediate(delivery, run_id, binding, adjudication, evidence, kinds)
             action = ACTION_RETAINED
             self._audit(
                 kinds,
@@ -434,7 +437,14 @@ class FailureGateOrchestrator:
             action = ACTION_ADVICE
         else:
             raise FailureGateError("decision_invalid")
-        self._audit(kinds, action, delivery, run_id, decision=adjudication.decision, reason=adjudication.reason)
+        self._audit(
+            kinds,
+            action,
+            delivery,
+            run_id,
+            decision=adjudication.decision,
+            reason=adjudication.reason,
+        )
         return self._finish(
             delivery,
             run_id,
@@ -506,19 +516,19 @@ class FailureGateOrchestrator:
         proposal_document = protocol_envelope(
             SCHEMA_VERSION_AIG_NATIVE_V2,
             OBJECT_KIND_GUIDED_COUNTERFACTUAL_BRANCH,
-                {
-                    "applicability": dict(plan["applicability"]),
-                    "author_role": "reader",
-                    "base_revision_id": catalog.base_revision_id,
-                    "report_hash": binding.reader_report_hash,
-                    "required_capabilities": list(plan["required_capabilities"]),
-                    "retrieval_id": retrieval.retrieval_id,
-                    "risk": plan["risk"],
-                    "source_fork_id": commit.stored.fork_node_id,
-                    "steps": [dict(step) for step in plan["steps"]],
-                    "target_role": plan["target_role"],
-                    "task_id": delivery.task_id,
-                },
+            {
+                "applicability": dict(plan["applicability"]),
+                "author_role": "reader",
+                "base_revision_id": catalog.base_revision_id,
+                "report_hash": binding.reader_report_hash,
+                "required_capabilities": list(plan["required_capabilities"]),
+                "retrieval_id": retrieval.retrieval_id,
+                "risk": plan["risk"],
+                "source_fork_id": commit.stored.fork_node_id,
+                "steps": [dict(step) for step in plan["steps"]],
+                "target_role": plan["target_role"],
+                "task_id": delivery.task_id,
+            },
         )
         try:
             self._guidance.propose(
@@ -712,9 +722,7 @@ class FailureGateOrchestrator:
             raise FailureGateError("view_required")
         if revision.session_id != delivery.session_id or revision.task_run_id != delivery.task_id:
             raise FailureGateError("view_identity_mismatch")
-        run, reader_session_id, report_hash = _freeze_role_chain(
-            revision, "aig-" + key[:32]
-        )
+        run, reader_session_id, report_hash = _freeze_role_chain(revision, "aig-" + key[:32])
         snapshot = run.frozen_snapshot()
         record = {
             "draft_hash": snapshot.draft_hash,
@@ -888,9 +896,7 @@ def _freeze_role_chain(
     revision: AigNativeViewRevision, run_id: str
 ) -> tuple[AigConstructionRun, str, str]:
     run = AigConstructionRun(run_id)
-    sessions = {
-        role: run.session_for(role) for role in ("builder", "critic", "refiner", "reader")
-    }
+    sessions = {role: run.session_for(role) for role in ("builder", "critic", "refiner", "reader")}
     run.submit_draft(
         sessions["builder"],
         {

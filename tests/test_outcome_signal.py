@@ -34,9 +34,7 @@ def _signal(
     error: object = None,
     detail: dict[str, object] | None = None,
 ) -> OutcomeSignal | None:
-    return normalize_verdict(
-        domain, reward=reward, graded=graded, error=error, detail=detail
-    )
+    return normalize_verdict(domain, reward=reward, graded=graded, error=error, detail=detail)
 
 
 @pytest.mark.parametrize("domain", _DOMAINS)

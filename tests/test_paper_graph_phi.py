@@ -17,9 +17,7 @@ def _ids(graph: dict) -> set[str]:
 
 
 def test_missing_task_root_is_structural() -> None:
-    report = evaluate_phi(
-        {"blocks": [{"block_id": "end-1", "kind": "conclusion"}], "edges": []}
-    )
+    report = evaluate_phi({"blocks": [{"block_id": "end-1", "kind": "conclusion"}], "edges": []})
     found = [item for item in report.violations if item.violation_id == "phi:missing_task_root"]
     assert len(found) == 1
     assert found[0].object_id == "graph"
@@ -32,9 +30,7 @@ def test_missing_task_root_is_structural() -> None:
 def test_missing_conclusion_sink_is_structural() -> None:
     report = evaluate_phi({"blocks": [{"block_id": "task-1", "kind": "task"}], "edges": []})
     found = [
-        item
-        for item in report.violations
-        if item.violation_id == "phi:missing_conclusion_sink"
+        item for item in report.violations if item.violation_id == "phi:missing_conclusion_sink"
     ]
     assert len(found) == 1
     assert found[0].kind == "structural"

@@ -11,14 +11,16 @@ from openviking.session.served_anchor_expansion import (
     DEFAULT_MAX_STEPS,
     HARD_MAX_STEPS,
     UNIQUE_SERVED_CAP,
+    ExpansionChain,
     ExpansionError,
     freeze_direct,
     reject_redirect,
-    ExpansionChain,
 )
 
 
-def _served(card_id: str, kind: str = "skill_revision", use_class: str = "memory_candidate") -> dict[str, object]:
+def _served(
+    card_id: str, kind: str = "skill_revision", use_class: str = "memory_candidate"
+) -> dict[str, object]:
     return {
         "id": card_id,
         "kind": kind,

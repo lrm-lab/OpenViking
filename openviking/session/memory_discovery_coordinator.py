@@ -185,11 +185,7 @@ def _reject_self_upgrade(card: Mapping[str, Any], disposition: str) -> None:
     if claimed is None:
         return
     legal_disposition = disposition in _ASSIGNABLE
-    if (
-        not legal_disposition
-        or claimed == CURRENT_EVIDENCE
-        or claimed != disposition
-    ):
+    if not legal_disposition or claimed == CURRENT_EVIDENCE or claimed != disposition:
         raise MemoryDiscoveryRejection(ADAPTER_SELF_UPGRADE)
 
 

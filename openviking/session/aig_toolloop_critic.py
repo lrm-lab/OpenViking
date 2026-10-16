@@ -48,6 +48,7 @@ def critic_prompt_for_mode(mode: str | None) -> str:
         return CRITIC_NEUTRAL_PROMPT
     return CRITIC_SYSTEM_PROMPT
 
+
 CRITIC_VERBS = frozenset(
     {
         "get_graph",

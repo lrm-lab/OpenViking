@@ -26,8 +26,8 @@ from openviking.session.trajectory_index import (
     PRIORITY_SUCCEEDED,
     SKIP_BUDGET_EXHAUSTED,
     SKIP_PAUSED,
-    IndexJob,
     IndexedResult,
+    IndexJob,
     SkippedResult,
     TrajectoryIndexService,
     WorkspacePolicy,
@@ -110,13 +110,31 @@ def test_process_next_orders_evaluation_before_failed_before_succeeded(tmp_path)
 
     service, _index = _service(tmp_path, builder=builder)
     service.enqueue(
-        _job("job-ok", "sess-ok", priority=PRIORITY_SUCCEEDED, outcome_status="succeeded", enqueued_at=T0)
+        _job(
+            "job-ok",
+            "sess-ok",
+            priority=PRIORITY_SUCCEEDED,
+            outcome_status="succeeded",
+            enqueued_at=T0,
+        )
     )
     service.enqueue(
-        _job("job-fail", "sess-fail", priority=PRIORITY_FAILED, outcome_status="failed", enqueued_at=T2)
+        _job(
+            "job-fail",
+            "sess-fail",
+            priority=PRIORITY_FAILED,
+            outcome_status="failed",
+            enqueued_at=T2,
+        )
     )
     service.enqueue(
-        _job("job-eval", "sess-eval", priority=PRIORITY_EVALUATION, outcome_status="evaluation", enqueued_at=T1)
+        _job(
+            "job-eval",
+            "sess-eval",
+            priority=PRIORITY_EVALUATION,
+            outcome_status="evaluation",
+            enqueued_at=T1,
+        )
     )
     policy = WorkspacePolicy(max_builds_per_window=10, window_seconds=60)
     order: list[str] = []
@@ -130,15 +148,32 @@ def test_process_next_orders_evaluation_before_failed_before_succeeded(tmp_path)
 
 def test_enqueue_dedup_keeps_highest_priority_for_session(tmp_path) -> None:
     service, _index = _service(tmp_path, builder=_revision_for)
-    assert service.enqueue(
-        _job("job-low", "sess", priority=PRIORITY_SUCCEEDED, outcome_status="succeeded")
-    ).job_id == "job-low"
-    assert service.enqueue(
-        _job("job-high", "sess", priority=PRIORITY_EVALUATION, outcome_status="evaluation", enqueued_at=T1)
-    ).job_id == "job-high"
-    assert service.enqueue(
-        _job("job-mid", "sess", priority=PRIORITY_FAILED, outcome_status="failed", enqueued_at=T2)
-    ).job_id == "job-high"
+    assert (
+        service.enqueue(
+            _job("job-low", "sess", priority=PRIORITY_SUCCEEDED, outcome_status="succeeded")
+        ).job_id
+        == "job-low"
+    )
+    assert (
+        service.enqueue(
+            _job(
+                "job-high",
+                "sess",
+                priority=PRIORITY_EVALUATION,
+                outcome_status="evaluation",
+                enqueued_at=T1,
+            )
+        ).job_id
+        == "job-high"
+    )
+    assert (
+        service.enqueue(
+            _job(
+                "job-mid", "sess", priority=PRIORITY_FAILED, outcome_status="failed", enqueued_at=T2
+            )
+        ).job_id
+        == "job-high"
+    )
     assert [job.job_id for job in service.pending_jobs()] == ["job-high"]
 
 
@@ -151,7 +186,9 @@ def test_budget_exhausted_skips_without_projection(tmp_path) -> None:
         return _revision_for(session_id, task_run_id, outcome_status)
 
     service, index = _service(tmp_path, builder=builder, clock=lambda: clock["now"])
-    service.enqueue(_job("job-1", "sess-1", priority=PRIORITY_EVALUATION, outcome_status="evaluation"))
+    service.enqueue(
+        _job("job-1", "sess-1", priority=PRIORITY_EVALUATION, outcome_status="evaluation")
+    )
     service.enqueue(
         _job("job-2", "sess-2", priority=PRIORITY_FAILED, outcome_status="failed", enqueued_at=T1)
     )
@@ -200,7 +237,9 @@ def test_paused_does_not_build(tmp_path) -> None:
 
 def test_missing_builder_registers_fallback_view(tmp_path) -> None:
     service, index = _service(tmp_path, builder=None)
-    service.enqueue(_job("job-fb", "sess-fb", priority=PRIORITY_SUCCEEDED, outcome_status="succeeded"))
+    service.enqueue(
+        _job("job-fb", "sess-fb", priority=PRIORITY_SUCCEEDED, outcome_status="succeeded")
+    )
     result = service.process_next(WorkspacePolicy(max_builds_per_window=1, window_seconds=60))
     assert isinstance(result, IndexedResult)
     assert result.revision.construction_mode == "fallback"
@@ -215,7 +254,13 @@ def test_second_process_supersedes_latest_revision(tmp_path) -> None:
     service, index = _service(tmp_path, builder=_revision_for)
     policy = WorkspacePolicy(max_builds_per_window=5, window_seconds=60)
     service.enqueue(
-        _job("job-1", "sess", priority=PRIORITY_SUCCEEDED, outcome_status="succeeded", task_run_id="run-1")
+        _job(
+            "job-1",
+            "sess",
+            priority=PRIORITY_SUCCEEDED,
+            outcome_status="succeeded",
+            task_run_id="run-1",
+        )
     )
     first = service.process_next(policy)
     assert isinstance(first, IndexedResult)
@@ -242,7 +287,9 @@ def test_second_process_supersedes_latest_revision(tmp_path) -> None:
 def test_state_round_trip_and_reload_preserves_budget(tmp_path) -> None:
     clock = {"now": datetime(2026, 1, 1, tzinfo=timezone.utc)}
     service, index = _service(tmp_path, builder=_revision_for, clock=lambda: clock["now"])
-    service.enqueue(_job("job-1", "sess-1", priority=PRIORITY_EVALUATION, outcome_status="evaluation"))
+    service.enqueue(
+        _job("job-1", "sess-1", priority=PRIORITY_EVALUATION, outcome_status="evaluation")
+    )
     service.enqueue(
         _job("job-2", "sess-2", priority=PRIORITY_FAILED, outcome_status="failed", enqueued_at=T1)
     )
@@ -255,7 +302,9 @@ def test_state_round_trip_and_reload_preserves_budget(tmp_path) -> None:
     skipped = SkippedResult(reason=SKIP_BUDGET_EXHAUSTED, job_id="job-2")
     assert skipped == SkippedResult.from_dict(json.loads(json.dumps(skipped.to_dict())))
     with pytest.raises(ValueError, match="projection"):
-        SkippedResult.from_dict({"reason": SKIP_PAUSED, "job_id": "job-2", "projection": {"card_id": "x"}})
+        SkippedResult.from_dict(
+            {"reason": SKIP_PAUSED, "job_id": "job-2", "projection": {"card_id": "x"}}
+        )
 
     payload = json.loads(json.dumps(service.to_dict()))
     restored = TrajectoryIndexService.from_dict(
@@ -288,12 +337,20 @@ def test_process_next_withdraws_superseded_projection_cards(tmp_path) -> None:
     service, _index = _service(tmp_path, builder=_revision_for, projection_registry=registry)
     policy = WorkspacePolicy(max_builds_per_window=5, window_seconds=60)
     service.enqueue(
-        _job("job-1", "sess", priority=PRIORITY_SUCCEEDED, outcome_status="succeeded", task_run_id="run-1")
+        _job(
+            "job-1",
+            "sess",
+            priority=PRIORITY_SUCCEEDED,
+            outcome_status="succeeded",
+            task_run_id="run-1",
+        )
     )
     first = service.process_next(policy)
     assert isinstance(first, IndexedResult)
     visible = registry.search(principal_labels=("team-a",))
-    assert {card.source_pointer.view_revision_id for card in visible} == {first.revision.revision_id}
+    assert {card.source_pointer.view_revision_id for card in visible} == {
+        first.revision.revision_id
+    }
 
     service.enqueue(
         _job(
@@ -308,7 +365,9 @@ def test_process_next_withdraws_superseded_projection_cards(tmp_path) -> None:
     second = service.process_next(policy)
     assert isinstance(second, IndexedResult)
     visible = registry.search(principal_labels=("team-a",))
-    assert {card.source_pointer.view_revision_id for card in visible} == {second.revision.revision_id}
+    assert {card.source_pointer.view_revision_id for card in visible} == {
+        second.revision.revision_id
+    }
     superseded = [
         record for record in registry.removed_records() if record.reason == REMOVAL_SUPERSEDED
     ]
@@ -415,7 +474,13 @@ def test_supersede_calls_revalidation_callback_with_previous_revision(tmp_path) 
     )
     policy = WorkspacePolicy(max_builds_per_window=5, window_seconds=60)
     service.enqueue(
-        _job("job-1", "sess", priority=PRIORITY_SUCCEEDED, outcome_status="succeeded", task_run_id="run-1")
+        _job(
+            "job-1",
+            "sess",
+            priority=PRIORITY_SUCCEEDED,
+            outcome_status="succeeded",
+            task_run_id="run-1",
+        )
     )
     first = service.process_next(policy)
     assert isinstance(first, IndexedResult)
@@ -439,7 +504,13 @@ def test_supersede_without_revalidation_callback_warns_once(tmp_path, caplog) ->
     service, _index = _service(tmp_path, builder=_revision_for)
     policy = WorkspacePolicy(max_builds_per_window=5, window_seconds=60)
     service.enqueue(
-        _job("job-1", "sess", priority=PRIORITY_SUCCEEDED, outcome_status="succeeded", task_run_id="run-1")
+        _job(
+            "job-1",
+            "sess",
+            priority=PRIORITY_SUCCEEDED,
+            outcome_status="succeeded",
+            task_run_id="run-1",
+        )
     )
     service.process_next(policy)
     with caplog.at_level(logging.WARNING):
@@ -468,7 +539,8 @@ def test_supersede_without_revalidation_callback_warns_once(tmp_path, caplog) ->
     warnings = [
         record
         for record in caplog.records
-        if record.name == "openviking.session.trajectory_index" and "revalidation_callback" in record.message
+        if record.name == "openviking.session.trajectory_index"
+        and "revalidation_callback" in record.message
     ]
     assert len(warnings) == 1
     assert warnings[0].levelno == logging.WARNING

@@ -13,6 +13,7 @@ import traceback
 from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence, Set, Union
 
 from openviking.service.task_work_index import TaskWorkIndex
+from openviking.utils.async_client_cache import LoopScopedAsyncClientCache
 from openviking_cli.utils.logger import get_logger
 
 from .embedding_queue import EmbeddingQueue
@@ -39,6 +40,7 @@ def init_queue_manager(
     max_concurrent_semantic: int = 32,
     max_concurrent_external_parse: int = 4,
     max_concurrent_add_resource: int = 4,
+    max_concurrent_reindex: int = 4,
     max_concurrent_session_commit: int = DEFAULT_MAX_CONCURRENT_SESSION_COMMIT,
     max_concurrent_external_task: int = 10,
     *,
@@ -54,6 +56,7 @@ def init_queue_manager(
         max_concurrent_semantic: Max concurrent semantic node work.
         max_concurrent_external_parse: Max concurrent ExternalParse tasks.
         max_concurrent_add_resource: Max concurrent AddResource tasks.
+        max_concurrent_reindex: Max concurrent Reindex tasks.
         max_concurrent_session_commit: Max concurrent SessionCommit tasks.
         middlewares: Additional middleware, fixed at construction for all queues.
     """
@@ -66,6 +69,7 @@ def init_queue_manager(
         max_concurrent_semantic=max_concurrent_semantic,
         max_concurrent_external_parse=max_concurrent_external_parse,
         max_concurrent_add_resource=max_concurrent_add_resource,
+        max_concurrent_reindex=max_concurrent_reindex,
         max_concurrent_session_commit=max_concurrent_session_commit,
         max_concurrent_external_task=max_concurrent_external_task,
         middlewares=middlewares,
@@ -92,6 +96,7 @@ class QueueManager:
     # Keep the on-disk name stable so pre-upgrade jobs remain recoverable.
     EXTERNAL_PARSE = "ExternalParse"
     ADD_RESOURCE = "AddResource"
+    REINDEX = "Reindex"
     SESSION_COMMIT = "SessionCommit"
     EXTERNAL_TASK = "ExternalTask"
     # Account and user cleanup share one consumer. Retain the persisted name
@@ -109,6 +114,7 @@ class QueueManager:
         max_concurrent_semantic: int = 32,
         max_concurrent_external_parse: int = 4,
         max_concurrent_add_resource: int = 4,
+        max_concurrent_reindex: int = 4,
         max_concurrent_session_commit: int = DEFAULT_MAX_CONCURRENT_SESSION_COMMIT,
         max_concurrent_external_task: int = 10,
         *,
@@ -122,6 +128,7 @@ class QueueManager:
         self._max_concurrent_semantic = max_concurrent_semantic
         self._max_concurrent_external_parse = max_concurrent_external_parse
         self._max_concurrent_add_resource = max_concurrent_add_resource
+        self._max_concurrent_reindex = max_concurrent_reindex
         self._max_concurrent_session_commit = max_concurrent_session_commit
         self._max_concurrent_external_task = max_concurrent_external_task
         self._queues: Dict[str, NamedQueue] = {}
@@ -150,9 +157,7 @@ class QueueManager:
         if self._started:
             return
         if self.SEMANTIC in self._queues and self._vlm_resolver is None:
-            raise RuntimeError(
-                "QueueManager requires a VLM resolver before semantic workers start"
-            )
+            raise RuntimeError("QueueManager requires a VLM resolver before semantic workers start")
 
         self._started = True
 
@@ -262,6 +267,8 @@ class QueueManager:
             return self._max_concurrent_external_parse
         if queue_name == self.ADD_RESOURCE:
             return self._max_concurrent_add_resource
+        if queue_name == self.REINDEX:
+            return self._max_concurrent_reindex
         if queue_name == self.SESSION_COMMIT:
             return self._max_concurrent_session_commit
         if queue_name == self.EXTERNAL_TASK:
@@ -318,6 +325,14 @@ class QueueManager:
                 loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             loop.run_until_complete(loop.shutdown_asyncgens())
             loop.run_until_complete(loop.shutdown_default_executor())
+            try:
+                loop.run_until_complete(LoopScopedAsyncClientCache.close_current_loop_clients())
+            except Exception:
+                logger.warning(
+                    "[QueueManager] Failed to close async clients for %s",
+                    queue.name,
+                    exc_info=True,
+                )
             loop.close()
             if queue.name == self.EMBEDDING:
                 # No more deliveries can start and active handlers have exited,

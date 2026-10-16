@@ -498,8 +498,7 @@ def test_more_than_eight_candidates_and_four_priors_are_all_returned() -> None:
         _card("skill-hidden", "skill_revision", "active", "skill_revision", 10, visible=False)
     )
     priors = [
-        _card(f"atom-{rank}", "atom", "observed", "segment_atom", rank)
-        for rank in (1, 2, 3, 4, 5)
+        _card(f"atom-{rank}", "atom", "observed", "segment_atom", rank) for rank in (1, 2, 3, 4, 5)
     ]
     result = MemoryDiscoveryCoordinator().classify(
         {
