@@ -2,6 +2,19 @@
 
 OpenViking provides multiple retrieval methods, including simple vector similarity search, keyword search, intelligent retrieval with session context, regex pattern matching, and file pattern matching.
 
+
+## HTTP keyword retrieval
+
+`POST /api/v1/search/find` accepts explicit `retrieval_mode: "bm25"`. Omission preserves the semantic path. BM25 searches resources previously indexed through `POST /api/v1/search/index_lexical`; it invokes no embedding, query expansion, or LLM.
+
+```json
+{"query":"Lumen Observatory","retrieval_mode":"bm25","target_uri":"viking://resources/docs","limit":5}
+```
+
+The admin-only ingestion endpoint accepts `{"resources":[{"uri":"viking://resources/docs/lumen.md","text":"Lumen opened in 2041.","kind":"document"}]}` with up to 100 resources and document/experience kinds. It returns content hashes; GET on the same endpoint returns index counts. An account-isolated persistent SQLite FTS5 index ranks the union of English word and Chinese character matches using BM25. Every result is checked against current filesystem permission and content hash.
+
+An administrator who owns the stored session may publish frozen native AIG and authorized Fork summaries using `POST /api/v1/search/publish_causal` with `{"session_id":"session-a"}`. Ordinary ingestion cannot create graph nodes. Results include `chain_ref` and navigation relations. `POST /api/v1/search/expand` takes `operation_id`, `chain_ref`, a previously served `uri`, `relation`, and `limit`. Chains bind to the user, expire after 600 seconds, and allow at most 4 hops and 30 nodes; every hop checks permission and snapshot freshness. Fork steps remain counterfactual.
+
 ## find vs search
 
 | Aspect | find | search |
@@ -1256,3 +1269,10 @@ results = client.search(
 - [Resources](02-resources.md) - Resource management
 - [Sessions](05-sessions.md) - Session context
 - [Context Layers](../concepts/03-context-layers.md) - L0/L1/L2
+
+
+## Lexical index status
+
+**GET /api/v1/search/index_lexical**
+
+Requires ROOT or ADMIN. No request body or query parameters are needed. Returns the standard `status`/`result` envelope with `retrieval_mode: "bm25"` and index counts for the authenticated account. It reads index metadata; it does not invoke an embedding service or a language model.

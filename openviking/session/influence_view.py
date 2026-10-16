@@ -1,0 +1,2577 @@
+# Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
+# SPDX-License-Identifier: AGPL-3.0
+"""L2 Influence View: mutable draft, frozen revision, structural checks.
+
+Post-run and failure-diagnosis views are derived trajectory indexes over the
+AO ledger (ADR-0010). Drafts stay mutable for at most three critic rounds;
+``freeze`` yields an immutable revision. The supersede index keeps older
+revisions as history and points ``latest`` at the newest freeze for a
+``(session_id, purpose)`` pair.
+
+A retrieval subgraph is a span the extraction model draws onto that frozen
+view, with the influence edges inside it and an explicit failure marker.
+The marker is stored as written. It is not inferred from block roles.
+
+AIG-native edges are a separate expand path (ADR-0043 P01). They live on
+``AigNativeViewDraft`` / ``AigNativeViewRevision``, not on a claim view.
+An edge records an inheritance or influence mechanism. It has no claim
+status, projection, or grounding lifecycle. Claim documents are not mapped
+onto this path, and a native-edge document is refused by the claim reader.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import threading
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Literal, Mapping, Sequence
+
+BLOCK_ROLES = frozenset(("task", "orchestrator", "agent_action", "conclusion"))
+# ``block_kind`` refines ``role``. ``unknown`` is the missing-key default only.
+BLOCK_KINDS = frozenset(
+    ("task", "tool_call", "tool_result", "orchestrator", "conclusion", "agent", "unknown")
+)
+BLOCK_KIND_ROLES: dict[str, str] = {
+    "task": "task",
+    "tool_call": "agent_action",
+    "tool_result": "agent_action",
+    "orchestrator": "orchestrator",
+    "conclusion": "conclusion",
+    # Paper tool-loop nodes use ``agent``. The native role stays ``agent_action``.
+    "agent": "agent_action",
+}
+PURPOSES = frozenset(("post_run_index", "failure_diagnosis"))
+CLAIM_STATUSES = frozenset(("hypothesis", "supported", "contradicted", "insufficient"))
+# Single-pass freezes write ``native_single_pass_aig``.
+# ``adaptive`` stays readable so revisions frozen before that rename still load.
+# ``adaptive_agentic_aig`` is the paper tool-loop freeze (ADR-0044).
+CONSTRUCTION_MODE_NATIVE_SINGLE_PASS = "native_single_pass_aig"
+CONSTRUCTION_MODE_ADAPTIVE = "adaptive"
+CONSTRUCTION_MODE_FALLBACK = "fallback"
+CONSTRUCTION_MODE_ADAPTIVE_AGENTIC = "adaptive_agentic_aig"
+CONSTRUCTION_MODES = frozenset(
+    (
+        CONSTRUCTION_MODE_NATIVE_SINGLE_PASS,
+        CONSTRUCTION_MODE_ADAPTIVE,
+        CONSTRUCTION_MODE_FALLBACK,
+        CONSTRUCTION_MODE_ADAPTIVE_AGENTIC,
+    )
+)
+SEVERITIES = frozenset(("high", "low"))
+
+CLAIM_STATUS_HYPOTHESIS = "hypothesis"
+PURPOSE_POST_RUN_INDEX = "post_run_index"
+PURPOSE_FAILURE_DIAGNOSIS = "failure_diagnosis"
+ROLE_TASK = "task"
+ROLE_CONCLUSION = "conclusion"
+RELATION_INFLUENCE = "influence"
+RELATION_SKIP = "skip"
+DETERMINISTIC_FALLBACK_REASON = "deterministic_fallback"
+SYNTHETIC_ROOT_SINK_REASON = "synthetic_root_sink"
+OMITTED_GAP_REASON = "not_in_selected_ao_range"
+MAX_CRITIC_ROUNDS = 3
+MAX_RETRIEVAL_SUBGRAPH_BLOCKS = 12
+INDEX_VERSION = 1
+# Transport identity for the native-edge path. Digests go through
+# ``aig_native_protocol.protocol_content_hash``.
+NATIVE_EDGE_SCHEMA_VERSION = "aig-native-v2"
+NATIVE_EDGE_DRAFT_KIND = "native_edge_draft"
+NATIVE_EDGE_REVISION_KIND = "native_edge_revision"
+NATIVE_EDGE_INDEX_KIND = "native_edge_index"
+_NATIVE_EDGE_RELATIONS = frozenset((RELATION_INFLUENCE, RELATION_SKIP))
+
+BlockRole = Literal["task", "orchestrator", "agent_action", "conclusion"]
+Purpose = Literal["post_run_index", "failure_diagnosis"]
+ClaimStatus = Literal["hypothesis", "supported", "contradicted", "insufficient"]
+ConstructionMode = Literal["native_single_pass_aig", "adaptive", "fallback", "adaptive_agentic_aig"]
+Severity = Literal["high", "low"]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _format_dt(value: datetime) -> str:
+    return _as_utc(value).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _canonical_dumps(value: Any) -> str:
+    """Same bytes as ``aig_native_protocol.canonical_dumps``."""
+    from openviking.session.aig_native_protocol import canonical_dumps
+
+    return canonical_dumps(value)
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _require_mapping(value: Any, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} must be a dict")
+    return value
+
+
+def _is_native_edge_document(payload: Mapping[str, Any]) -> bool:
+    """True when ``schema_version`` marks a native-edge document.
+
+    Legacy claim views omit ``schema_version`` and stay on the claim path.
+    A present version must be ``aig-native-v2`` or
+    ``extraction-contract-aig-native-v2``. Any other version fails closed.
+    The ``edges`` key is not a shape guess.
+    """
+    if "schema_version" not in payload:
+        return False
+    version = payload.get("schema_version")
+    if not isinstance(version, str) or not version or version.strip() != version:
+        raise ValueError(
+            "schema_version is missing or unknown; refusing to read this as a claim view"
+        )
+    from openviking.session.extraction_contract import EXTRACTION_CONTRACT_NATIVE_VERSION
+
+    if version == EXTRACTION_CONTRACT_NATIVE_VERSION:
+        return True
+    if version == NATIVE_EDGE_SCHEMA_VERSION:
+        return True
+    raise ValueError(
+        f"unsupported schema_version {version!r}; refusing to read this as a claim view"
+    )
+
+
+def _reject_native_edge_as_claim(payload: Mapping[str, Any], field: str) -> None:
+    if _is_native_edge_document(payload):
+        raise ValueError(f"{field} is not a claim view; refusing to read it as a claim")
+
+
+def _native_content_hash(schema_version: str, object_kind: str, body: Mapping[str, Any]) -> str:
+    """SHA-256 of the version-tagged canonical body. Delegates to the protocol."""
+    from openviking.session.aig_native_protocol import protocol_content_hash
+
+    return protocol_content_hash(schema_version, object_kind, body)
+
+
+def _require_str(value: Any, field: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a str")
+    if not allow_empty and not value.strip():
+        raise ValueError(f"{field} must be a non-empty str")
+    return value
+
+
+def _require_int(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field} must be an int")
+    return value
+
+
+def _defect_note(value: Any) -> str | None:
+    """Paper ``defect_recorded`` is absent, or an object ``{"note": ...}``."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"note"}:
+        raise ValueError("defect_recorded must be an object with note")
+    return _require_str(value.get("note"), "defect_recorded.note")
+
+
+def _require_choice(value: Any, field: str, choices: frozenset[str]) -> str:
+    text = _require_str(value, field)
+    if text not in choices:
+        raise ValueError(f"{field} must be one of {sorted(choices)}, got {text!r}")
+    return text
+
+
+def _require_bool(value: Any, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a bool")
+    return value
+
+
+def _as_str_tuple(value: Sequence[Any], field: str) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes)):
+        raise ValueError(f"{field} must be a sequence of str")
+    try:
+        items = tuple(value)
+    except TypeError as exc:
+        raise ValueError(f"{field} must be a sequence of str") from exc
+    for index, item in enumerate(items):
+        _require_str(item, f"{field}[{index}]")
+    return items
+
+
+@dataclass(frozen=True)
+class SegmentRef:
+    """Single segment a block is grounded in."""
+
+    segment_id: str
+    session_id: str
+
+    def __post_init__(self) -> None:
+        _require_str(self.segment_id, "segment_ref.segment_id")
+        _require_str(self.session_id, "segment_ref.session_id")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"segment_id": self.segment_id, "session_id": self.session_id}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SegmentRef:
+        payload = _require_mapping(data, "segment_ref")
+        return cls(
+            segment_id=_require_str(payload.get("segment_id"), "segment_ref.segment_id"),
+            session_id=_require_str(payload.get("session_id"), "segment_ref.session_id"),
+        )
+
+
+@dataclass(frozen=True)
+class SourceRef:
+    """Readable pointer from a block back to one AO (ao_id + sequence)."""
+
+    ao_id: str
+    sequence: int
+    participant_id: str
+    segment_id: str
+    session_id: str
+    content_hash: str
+
+    def __post_init__(self) -> None:
+        _require_str(self.ao_id, "source_ref.ao_id")
+        _require_int(self.sequence, "source_ref.sequence")
+        _require_str(self.participant_id, "source_ref.participant_id")
+        _require_str(self.segment_id, "source_ref.segment_id")
+        _require_str(self.session_id, "source_ref.session_id")
+        _require_str(self.content_hash, "source_ref.content_hash")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ao_id": self.ao_id,
+            "sequence": self.sequence,
+            "participant_id": self.participant_id,
+            "segment_id": self.segment_id,
+            "session_id": self.session_id,
+            "content_hash": self.content_hash,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SourceRef:
+        payload = _require_mapping(data, "source_ref")
+        return cls(
+            ao_id=_require_str(payload.get("ao_id"), "source_ref.ao_id"),
+            sequence=_require_int(payload.get("sequence"), "source_ref.sequence"),
+            participant_id=_require_str(payload.get("participant_id"), "source_ref.participant_id"),
+            segment_id=_require_str(payload.get("segment_id"), "source_ref.segment_id"),
+            session_id=_require_str(payload.get("session_id"), "source_ref.session_id"),
+            content_hash=_require_str(payload.get("content_hash"), "source_ref.content_hash"),
+        )
+
+
+@dataclass(frozen=True)
+class InfluenceEvidenceRef:
+    """Nine-field provenance, same shape as causal-experiences ``EvidenceRef``."""
+
+    ao_id: str
+    source_session_id: str
+    source_archive_id: str | None
+    archive_commit_watermark: str | None
+    source_sequence: int
+    source_read_snapshot_watermark: str
+    evidence_role: str
+    evidence_content_hash: str
+    captured_state: str
+
+    def __post_init__(self) -> None:
+        _require_str(self.ao_id, "evidence_ref.ao_id")
+        _require_str(self.source_session_id, "evidence_ref.source_session_id")
+        if self.source_archive_id is not None:
+            _require_str(self.source_archive_id, "evidence_ref.source_archive_id")
+        if self.archive_commit_watermark is not None:
+            _require_str(self.archive_commit_watermark, "evidence_ref.archive_commit_watermark")
+        _require_int(self.source_sequence, "evidence_ref.source_sequence")
+        _require_str(
+            self.source_read_snapshot_watermark,
+            "evidence_ref.source_read_snapshot_watermark",
+        )
+        _require_str(self.evidence_role, "evidence_ref.evidence_role")
+        _require_str(self.evidence_content_hash, "evidence_ref.evidence_content_hash")
+        _require_str(self.captured_state, "evidence_ref.captured_state")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ao_id": self.ao_id,
+            "source_session_id": self.source_session_id,
+            "source_archive_id": self.source_archive_id,
+            "archive_commit_watermark": self.archive_commit_watermark,
+            "source_sequence": self.source_sequence,
+            "source_read_snapshot_watermark": self.source_read_snapshot_watermark,
+            "evidence_role": self.evidence_role,
+            "evidence_content_hash": self.evidence_content_hash,
+            "captured_state": self.captured_state,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> InfluenceEvidenceRef:
+        payload = _require_mapping(data, "evidence_ref")
+        archive_id = payload.get("source_archive_id")
+        watermark = payload.get("archive_commit_watermark")
+        return cls(
+            ao_id=_require_str(payload.get("ao_id"), "evidence_ref.ao_id"),
+            source_session_id=_require_str(
+                payload.get("source_session_id"), "evidence_ref.source_session_id"
+            ),
+            source_archive_id=(
+                None
+                if archive_id is None
+                else _require_str(archive_id, "evidence_ref.source_archive_id")
+            ),
+            archive_commit_watermark=(
+                None
+                if watermark is None
+                else _require_str(watermark, "evidence_ref.archive_commit_watermark")
+            ),
+            source_sequence=_require_int(
+                payload.get("source_sequence"), "evidence_ref.source_sequence"
+            ),
+            source_read_snapshot_watermark=_require_str(
+                payload.get("source_read_snapshot_watermark"),
+                "evidence_ref.source_read_snapshot_watermark",
+            ),
+            evidence_role=_require_str(payload.get("evidence_role"), "evidence_ref.evidence_role"),
+            evidence_content_hash=_require_str(
+                payload.get("evidence_content_hash"), "evidence_ref.evidence_content_hash"
+            ),
+            captured_state=_require_str(
+                payload.get("captured_state"), "evidence_ref.captured_state"
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class AORange:
+    """Inclusive AO sequence interval."""
+
+    start_seq: int
+    end_seq: int
+    segment_id: str | None = None
+
+    def __post_init__(self) -> None:
+        start = _require_int(self.start_seq, "ao_range.start_seq")
+        end = _require_int(self.end_seq, "ao_range.end_seq")
+        if start > end:
+            raise ValueError("ao range must be non-empty and contiguous")
+        if self.segment_id is not None:
+            _require_str(self.segment_id, "ao_range.segment_id")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "start_seq": self.start_seq,
+            "end_seq": self.end_seq,
+            "segment_id": self.segment_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AORange:
+        payload = _require_mapping(data, "ao_range")
+        segment_id = payload.get("segment_id")
+        return cls(
+            start_seq=_require_int(payload.get("start_seq"), "ao_range.start_seq"),
+            end_seq=_require_int(payload.get("end_seq"), "ao_range.end_seq"),
+            segment_id=None
+            if segment_id is None
+            else _require_str(segment_id, "ao_range.segment_id"),
+        )
+
+    def overlaps(self, start_seq: int, end_seq: int) -> bool:
+        return self.start_seq <= end_seq and start_seq <= self.end_seq
+
+
+@dataclass(frozen=True)
+class OmittedRange:
+    """AO interval left out of the view. ``reason`` may be empty until validation."""
+
+    start_seq: int
+    end_seq: int
+    reason: str
+    segment_id: str | None = None
+
+    def __post_init__(self) -> None:
+        start = _require_int(self.start_seq, "omitted_range.start_seq")
+        end = _require_int(self.end_seq, "omitted_range.end_seq")
+        if start > end:
+            raise ValueError("omitted range must be non-empty")
+        if not isinstance(self.reason, str):
+            raise ValueError("omitted_range.reason must be a str")
+        if self.segment_id is not None:
+            _require_str(self.segment_id, "omitted_range.segment_id")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "start_seq": self.start_seq,
+            "end_seq": self.end_seq,
+            "reason": self.reason,
+            "segment_id": self.segment_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> OmittedRange:
+        payload = _require_mapping(data, "omitted_range")
+        segment_id = payload.get("segment_id")
+        reason = payload.get("reason")
+        if not isinstance(reason, str):
+            raise ValueError("omitted_range.reason must be a str")
+        return cls(
+            start_seq=_require_int(payload.get("start_seq"), "omitted_range.start_seq"),
+            end_seq=_require_int(payload.get("end_seq"), "omitted_range.end_seq"),
+            reason=reason,
+            segment_id=(
+                None if segment_id is None else _require_str(segment_id, "omitted_range.segment_id")
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class InfluenceBlock:
+    """Action-level unit: one participant, one segment, one contiguous AO span."""
+
+    block_id: str
+    role: BlockRole
+    participant_id: str
+    segment_ref: SegmentRef
+    ao_start_seq: int
+    ao_end_seq: int
+    summary: str
+    input: str
+    output: str
+    authorship: str
+    granularity_reason: str
+    source_content_hashes: tuple[str, ...]
+    source_refs: tuple[SourceRef, ...]
+    defect_recorded: str | None = None
+    block_kind: str = "unknown"
+
+    def __post_init__(self) -> None:
+        ordered = tuple(sorted(self.source_refs, key=lambda ref: (ref.sequence, ref.ao_id)))
+        object.__setattr__(self, "source_refs", ordered)
+        object.__setattr__(self, "source_content_hashes", tuple(self.source_content_hashes))
+        self.validate()
+
+    def validate(self) -> None:
+        """Reject cross-participant, cross-segment, empty, or gapped spans."""
+        _require_str(self.block_id, "block_id")
+        _require_choice(self.role, "role", BLOCK_ROLES)
+        _require_choice(self.block_kind, "block_kind", BLOCK_KINDS)
+        if self.block_kind != "unknown":
+            refined = BLOCK_KIND_ROLES[self.block_kind]
+            if refined != self.role:
+                raise ValueError(
+                    f"block_kind {self.block_kind!r} refines role {refined!r}, got {self.role!r}"
+                )
+        if self.defect_recorded is not None:
+            _require_str(self.defect_recorded, "defect_recorded")
+            if self.block_kind != "agent":
+                raise ValueError("defect_recorded requires block_kind agent")
+        _require_str(self.participant_id, "participant_id")
+        if not isinstance(self.segment_ref, SegmentRef):
+            raise ValueError("segment_ref must be a single SegmentRef")
+        _require_str(self.summary, "summary", allow_empty=True)
+        _require_str(self.input, "input", allow_empty=True)
+        _require_str(self.output, "output", allow_empty=True)
+        _require_str(self.authorship, "authorship", allow_empty=True)
+        if not isinstance(self.granularity_reason, str) or not self.granularity_reason.strip():
+            raise ValueError("granularity_reason is required")
+        start = _require_int(self.ao_start_seq, "ao_start_seq")
+        end = _require_int(self.ao_end_seq, "ao_end_seq")
+        if start > end:
+            raise ValueError("AO range must be contiguous and non-empty")
+        if not self.source_refs:
+            raise ValueError("AO range must be contiguous and non-empty")
+        participants = {ref.participant_id for ref in self.source_refs}
+        if participants != {self.participant_id}:
+            raise ValueError("InfluenceBlock must belong to a single participant")
+        segments = {ref.segment_id for ref in self.source_refs}
+        if segments != {self.segment_ref.segment_id}:
+            raise ValueError("InfluenceBlock must reference a single segment")
+        sessions = {ref.session_id for ref in self.source_refs}
+        if sessions != {self.segment_ref.session_id}:
+            raise ValueError("InfluenceBlock must stay within a single session")
+        sequences = [ref.sequence for ref in self.source_refs]
+        if len(sequences) != len(set(sequences)):
+            raise ValueError("AO range must be contiguous and non-empty")
+        ordered = sorted(sequences)
+        expected = list(range(ordered[0], ordered[-1] + 1))
+        if ordered != expected or ordered[0] != start or ordered[-1] != end:
+            raise ValueError("AO range must be contiguous and non-empty")
+        hashes = tuple(ref.content_hash for ref in self.source_refs)
+        if tuple(self.source_content_hashes) != hashes:
+            raise ValueError("source_content_hashes must align with source refs in sequence order")
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {
+            "block_id": self.block_id,
+            "role": self.role,
+            "participant_id": self.participant_id,
+            "segment_ref": self.segment_ref.to_dict(),
+            "ao_start_seq": self.ao_start_seq,
+            "ao_end_seq": self.ao_end_seq,
+            "summary": self.summary,
+            "input": self.input,
+            "output": self.output,
+            "authorship": self.authorship,
+            "granularity_reason": self.granularity_reason,
+            "source_content_hashes": list(self.source_content_hashes),
+            "source_refs": [ref.to_dict() for ref in self.source_refs],
+        }
+        if self.defect_recorded is not None:
+            payload["defect_recorded"] = {"note": self.defect_recorded}
+        payload["block_kind"] = self.block_kind
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> InfluenceBlock:
+        payload = _require_mapping(data, "block")
+        refs = tuple(
+            SourceRef.from_dict(_require_mapping(item, "source_ref"))
+            for item in payload.get("source_refs") or []
+        )
+        hashes = payload.get("source_content_hashes")
+        if not isinstance(hashes, list):
+            raise ValueError("source_content_hashes must be a list")
+        return cls(
+            block_id=_require_str(payload.get("block_id"), "block_id"),
+            role=_require_choice(payload.get("role"), "role", BLOCK_ROLES),  # type: ignore[arg-type]
+            participant_id=_require_str(payload.get("participant_id"), "participant_id"),
+            segment_ref=SegmentRef.from_dict(
+                _require_mapping(payload.get("segment_ref"), "segment_ref")
+            ),
+            ao_start_seq=_require_int(payload.get("ao_start_seq"), "ao_start_seq"),
+            ao_end_seq=_require_int(payload.get("ao_end_seq"), "ao_end_seq"),
+            summary=_require_str(payload.get("summary"), "summary", allow_empty=True),
+            input=_require_str(payload.get("input"), "input", allow_empty=True),
+            output=_require_str(payload.get("output"), "output", allow_empty=True),
+            authorship=_require_str(payload.get("authorship"), "authorship", allow_empty=True),
+            granularity_reason=_require_str(
+                payload.get("granularity_reason"), "granularity_reason", allow_empty=True
+            ),
+            source_content_hashes=tuple(str(item) for item in hashes),
+            source_refs=refs,
+            defect_recorded=_defect_note(payload.get("defect_recorded", None)),
+            block_kind=_require_choice(
+                payload.get("block_kind", "unknown"), "block_kind", BLOCK_KINDS
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class InfluenceClaim:
+    """Directed hypothesis from an earlier block to a later block.
+
+    ``status`` is the reader evidence verdict. ``critic_verdict`` is a separate
+    column and never overwrites ``status``. New claims start as hypothesis.
+    """
+
+    claim_id: str
+    source_block_id: str
+    target_block_id: str
+    carried_artifact: str
+    downstream_effect: str
+    relation_type: str
+    source_evidence_refs: tuple[InfluenceEvidenceRef, ...] = ()
+    target_evidence_refs: tuple[InfluenceEvidenceRef, ...] = ()
+    status: ClaimStatus = CLAIM_STATUS_HYPOTHESIS
+    critic_verdict: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_str(self.claim_id, "claim_id")
+        _require_str(self.source_block_id, "source_block_id")
+        _require_str(self.target_block_id, "target_block_id")
+        _require_str(self.carried_artifact, "carried_artifact")
+        _require_str(self.downstream_effect, "downstream_effect")
+        _require_str(self.relation_type, "relation_type")
+        _require_choice(self.status, "status", CLAIM_STATUSES)
+        if self.critic_verdict is not None:
+            _require_str(self.critic_verdict, "critic_verdict", allow_empty=True)
+        object.__setattr__(self, "source_evidence_refs", tuple(self.source_evidence_refs))
+        object.__setattr__(self, "target_evidence_refs", tuple(self.target_evidence_refs))
+        for ref in self.source_evidence_refs:
+            if not isinstance(ref, InfluenceEvidenceRef):
+                raise ValueError("source_evidence_refs must contain InfluenceEvidenceRef")
+        for ref in self.target_evidence_refs:
+            if not isinstance(ref, InfluenceEvidenceRef):
+                raise ValueError("target_evidence_refs must contain InfluenceEvidenceRef")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "claim_id": self.claim_id,
+            "source_block_id": self.source_block_id,
+            "target_block_id": self.target_block_id,
+            "carried_artifact": self.carried_artifact,
+            "downstream_effect": self.downstream_effect,
+            "relation_type": self.relation_type,
+            "source_evidence_refs": [ref.to_dict() for ref in self.source_evidence_refs],
+            "target_evidence_refs": [ref.to_dict() for ref in self.target_evidence_refs],
+            "status": self.status,
+            "critic_verdict": self.critic_verdict,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> InfluenceClaim:
+        payload = _require_mapping(data, "claim")
+        source_refs = tuple(
+            InfluenceEvidenceRef.from_dict(_require_mapping(item, "evidence_ref"))
+            for item in payload.get("source_evidence_refs") or []
+        )
+        target_refs = tuple(
+            InfluenceEvidenceRef.from_dict(_require_mapping(item, "evidence_ref"))
+            for item in payload.get("target_evidence_refs") or []
+        )
+        verdict = payload.get("critic_verdict")
+        return cls(
+            claim_id=_require_str(payload.get("claim_id"), "claim_id"),
+            source_block_id=_require_str(payload.get("source_block_id"), "source_block_id"),
+            target_block_id=_require_str(payload.get("target_block_id"), "target_block_id"),
+            carried_artifact=_require_str(payload.get("carried_artifact"), "carried_artifact"),
+            downstream_effect=_require_str(payload.get("downstream_effect"), "downstream_effect"),
+            relation_type=_require_str(payload.get("relation_type"), "relation_type"),
+            source_evidence_refs=source_refs,
+            target_evidence_refs=target_refs,
+            status=_require_choice(  # type: ignore[arg-type]
+                payload.get("status", CLAIM_STATUS_HYPOTHESIS), "status", CLAIM_STATUSES
+            ),
+            critic_verdict=None
+            if verdict is None
+            else _require_str(verdict, "critic_verdict", allow_empty=True),
+        )
+
+
+@dataclass(frozen=True)
+class CoverageManifest:
+    """Bounded coverage of a snapshot: included spans plus omitted spans with reasons."""
+
+    total_ao_range: AORange
+    inspected_refs: tuple[SourceRef, ...]
+    included_ranges: tuple[AORange, ...]
+    omitted_ranges: tuple[OmittedRange, ...]
+    snapshot_watermark: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.total_ao_range, AORange):
+            raise ValueError("total_ao_range must be an AORange")
+        _require_str(self.snapshot_watermark, "snapshot_watermark")
+        object.__setattr__(self, "inspected_refs", tuple(self.inspected_refs))
+        object.__setattr__(self, "included_ranges", tuple(self.included_ranges))
+        object.__setattr__(self, "omitted_ranges", tuple(self.omitted_ranges))
+        for ref in self.inspected_refs:
+            if not isinstance(ref, SourceRef):
+                raise ValueError("inspected_refs must contain SourceRef")
+        for item in self.included_ranges:
+            if not isinstance(item, AORange):
+                raise ValueError("included_ranges must contain AORange")
+        for item in self.omitted_ranges:
+            if not isinstance(item, OmittedRange):
+                raise ValueError("omitted_ranges must contain OmittedRange")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "total_ao_range": self.total_ao_range.to_dict(),
+            "inspected_refs": [ref.to_dict() for ref in self.inspected_refs],
+            "included_ranges": [item.to_dict() for item in self.included_ranges],
+            "omitted_ranges": [item.to_dict() for item in self.omitted_ranges],
+            "snapshot_watermark": self.snapshot_watermark,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CoverageManifest:
+        payload = _require_mapping(data, "coverage")
+        return cls(
+            total_ao_range=AORange.from_dict(
+                _require_mapping(payload.get("total_ao_range"), "total_ao_range")
+            ),
+            inspected_refs=tuple(
+                SourceRef.from_dict(_require_mapping(item, "source_ref"))
+                for item in payload.get("inspected_refs") or []
+            ),
+            included_ranges=tuple(
+                AORange.from_dict(_require_mapping(item, "ao_range"))
+                for item in payload.get("included_ranges") or []
+            ),
+            omitted_ranges=tuple(
+                OmittedRange.from_dict(_require_mapping(item, "omitted_range"))
+                for item in payload.get("omitted_ranges") or []
+            ),
+            snapshot_watermark=_require_str(
+                payload.get("snapshot_watermark"), "snapshot_watermark"
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class Violation:
+    """Deterministic structural finding. ``location`` points at the offending node."""
+
+    code: str
+    severity: Severity
+    message: str
+    location: str
+
+    def __post_init__(self) -> None:
+        _require_str(self.code, "violation.code")
+        _require_choice(self.severity, "violation.severity", SEVERITIES)
+        _require_str(self.message, "violation.message")
+        _require_str(self.location, "violation.location")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "severity": self.severity,
+            "message": self.message,
+            "location": self.location,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Violation:
+        payload = _require_mapping(data, "violation")
+        return cls(
+            code=_require_str(payload.get("code"), "violation.code"),
+            severity=_require_choice(  # type: ignore[arg-type]
+                payload.get("severity"), "violation.severity", SEVERITIES
+            ),
+            message=_require_str(payload.get("message"), "violation.message"),
+            location=_require_str(payload.get("location"), "violation.location"),
+        )
+
+
+class HighSeverityViolation(ValueError):
+    """``freeze`` refused because ``validate_view`` still reports high-severity violations.
+
+    Callers should build a fallback view instead of publishing the draft.
+    """
+
+    def __init__(self, violations: Sequence[Violation]) -> None:
+        items = tuple(violations)
+        if not items:
+            raise ValueError("HighSeverityViolation requires at least one violation")
+        for item in items:
+            if not isinstance(item, Violation) or item.severity != "high":
+                raise ValueError("HighSeverityViolation requires high-severity Violation values")
+        self.violations = items
+        codes = ", ".join(item.code for item in items)
+        super().__init__(f"freeze refused: {len(items)} high-severity violation(s): {codes}")
+
+
+@dataclass(frozen=True)
+class CriticPatchRecord:
+    """Provenance for one refiner round that addressed a violation."""
+
+    round_index: int
+    violation_code: str
+    location: str
+    severity: Severity
+    note: str
+
+    def __post_init__(self) -> None:
+        index = _require_int(self.round_index, "patch.round_index")
+        if index < 1 or index > MAX_CRITIC_ROUNDS:
+            raise ValueError(f"patch.round_index must be in 1..{MAX_CRITIC_ROUNDS}")
+        _require_str(self.violation_code, "patch.violation_code")
+        _require_str(self.location, "patch.location")
+        _require_choice(self.severity, "patch.severity", SEVERITIES)
+        _require_str(self.note, "patch.note", allow_empty=True)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "round_index": self.round_index,
+            "violation_code": self.violation_code,
+            "location": self.location,
+            "severity": self.severity,
+            "note": self.note,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CriticPatchRecord:
+        payload = _require_mapping(data, "patch")
+        return cls(
+            round_index=_require_int(payload.get("round_index"), "patch.round_index"),
+            violation_code=_require_str(payload.get("violation_code"), "patch.violation_code"),
+            location=_require_str(payload.get("location"), "patch.location"),
+            severity=_require_choice(  # type: ignore[arg-type]
+                payload.get("severity"), "patch.severity", SEVERITIES
+            ),
+            note=_require_str(payload.get("note", ""), "patch.note", allow_empty=True),
+        )
+
+
+@dataclass(frozen=True)
+class RetrievalSubgraph:
+    """One model-drawn span on a frozen view, plus its influence edges.
+
+    ``subgraph_id`` is unique inside the revision. It does not carry
+    ``session_id``, ``task_run_id``, ``revision_id``, or ``view_id``.
+    ``is_failure`` repeats the explicit ``failure_marked`` flag the
+    extraction model wrote. Block role and summary text do not set it.
+    """
+
+    subgraph_id: str
+    block_ids: tuple[str, ...]
+    claim_ids: tuple[str, ...]
+    failure_marked: bool = False
+    failure_evidence_refs: tuple[InfluenceEvidenceRef, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_str(self.subgraph_id, "subgraph_id")
+        object.__setattr__(self, "block_ids", _as_str_tuple(self.block_ids, "block_ids"))
+        object.__setattr__(self, "claim_ids", _as_str_tuple(self.claim_ids, "claim_ids"))
+        if not isinstance(self.failure_marked, bool):
+            raise ValueError("failure_marked must be a bool")
+        object.__setattr__(self, "failure_evidence_refs", tuple(self.failure_evidence_refs))
+        for ref in self.failure_evidence_refs:
+            if not isinstance(ref, InfluenceEvidenceRef):
+                raise ValueError("failure_evidence_refs must contain InfluenceEvidenceRef")
+
+    @property
+    def is_failure(self) -> bool:
+        """Explicit failure marker only. Conclusion blocks do not count."""
+        return self.failure_marked
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "subgraph_id": self.subgraph_id,
+            "block_ids": list(self.block_ids),
+            "claim_ids": list(self.claim_ids),
+            "failure_marked": self.failure_marked,
+            "failure_evidence_refs": [ref.to_dict() for ref in self.failure_evidence_refs],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RetrievalSubgraph:
+        payload = _require_mapping(data, "retrieval_subgraph")
+        block_ids = payload.get("block_ids")
+        claim_ids = payload.get("claim_ids")
+        if not isinstance(block_ids, list):
+            raise ValueError("block_ids must be a list")
+        if not isinstance(claim_ids, list):
+            raise ValueError("claim_ids must be a list")
+        evidence = tuple(
+            InfluenceEvidenceRef.from_dict(_require_mapping(item, "evidence_ref"))
+            for item in payload.get("failure_evidence_refs") or []
+        )
+        return cls(
+            subgraph_id=_require_str(payload.get("subgraph_id"), "subgraph_id"),
+            block_ids=_as_str_tuple(block_ids, "block_ids"),
+            claim_ids=_as_str_tuple(claim_ids, "claim_ids"),
+            failure_marked=_require_bool(payload.get("failure_marked", False), "failure_marked"),
+            failure_evidence_refs=evidence,
+        )
+
+
+def compute_content_hash(
+    blocks: Sequence[InfluenceBlock],
+    claims: Sequence[InfluenceClaim],
+    coverage: CoverageManifest,
+    retrieval_subgraphs: Sequence[RetrievalSubgraph] = (),
+) -> str:
+    """sha256 of canonical JSON for blocks, claims, coverage, and retrieval subgraphs.
+
+    The subgraph list is always part of the payload, including when it is empty.
+    """
+    payload = {
+        "blocks": [block.to_dict() for block in blocks],
+        "claims": [claim.to_dict() for claim in claims],
+        "coverage": coverage.to_dict(),
+        "retrieval_subgraphs": [item.to_dict() for item in retrieval_subgraphs],
+    }
+    return _sha256_text(_canonical_dumps(payload))
+
+
+class InfluenceViewDraft:
+    """Mutable view. Builder and refiner edits stop after three critic rounds."""
+
+    def __init__(
+        self,
+        *,
+        view_id: str,
+        purpose: Purpose,
+        session_id: str,
+        task_run_id: str,
+        coverage: CoverageManifest,
+        blocks: Sequence[InfluenceBlock] | None = None,
+        claims: Sequence[InfluenceClaim] | None = None,
+        retrieval_subgraphs: Sequence[RetrievalSubgraph] | None = None,
+        critic_rounds: int = 0,
+        patch_provenance: Sequence[CriticPatchRecord] | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.view_id = _require_str(view_id, "view_id")
+        self.purpose = _require_choice(purpose, "purpose", PURPOSES)
+        self.session_id = _require_str(session_id, "session_id")
+        self.task_run_id = _require_str(task_run_id, "task_run_id")
+        if not isinstance(coverage, CoverageManifest):
+            raise ValueError("coverage must be a CoverageManifest")
+        self.coverage = coverage
+        rounds = _require_int(critic_rounds, "critic_rounds")
+        if rounds < 0 or rounds > MAX_CRITIC_ROUNDS:
+            raise ValueError(f"critic_rounds must be in 0..{MAX_CRITIC_ROUNDS}")
+        self.critic_rounds = rounds
+        self.blocks: list[InfluenceBlock] = []
+        self.claims: list[InfluenceClaim] = []
+        self.retrieval_subgraphs: list[RetrievalSubgraph] = []
+        self.patch_provenance: list[CriticPatchRecord] = []
+        for block in blocks or ():
+            self._append_block(block)
+        for claim in claims or ():
+            self._append_claim(claim, enforce_hypothesis=False)
+        for subgraph in retrieval_subgraphs or ():
+            self._append_retrieval_subgraph(subgraph)
+        for record in patch_provenance or ():
+            if not isinstance(record, CriticPatchRecord):
+                raise ValueError("patch_provenance must contain CriticPatchRecord")
+            self.patch_provenance.append(record)
+        self._clock = clock or _utc_now
+
+    def _ensure_editable(self) -> None:
+        if self.critic_rounds >= MAX_CRITIC_ROUNDS:
+            raise ValueError(f"critic_rounds limit is {MAX_CRITIC_ROUNDS}; refusing further edits")
+
+    def _append_block(self, block: InfluenceBlock) -> None:
+        if not isinstance(block, InfluenceBlock):
+            raise ValueError("block must be an InfluenceBlock")
+        if any(existing.block_id == block.block_id for existing in self.blocks):
+            raise ValueError(f"duplicate block_id {block.block_id}")
+        self.blocks.append(block)
+
+    def _append_claim(self, claim: InfluenceClaim, *, enforce_hypothesis: bool) -> None:
+        if not isinstance(claim, InfluenceClaim):
+            raise ValueError("claim must be an InfluenceClaim")
+        if enforce_hypothesis and claim.status != CLAIM_STATUS_HYPOTHESIS:
+            raise ValueError("new claims must start as hypothesis")
+        if any(existing.claim_id == claim.claim_id for existing in self.claims):
+            raise ValueError(f"duplicate claim_id {claim.claim_id}")
+        self.claims.append(claim)
+
+    def add_block(self, block: InfluenceBlock) -> None:
+        self._ensure_editable()
+        self._append_block(block)
+
+    def add_claim(self, claim: InfluenceClaim) -> None:
+        self._ensure_editable()
+        self._append_claim(claim, enforce_hypothesis=True)
+
+    def _append_retrieval_subgraph(self, subgraph: RetrievalSubgraph) -> None:
+        if not isinstance(subgraph, RetrievalSubgraph):
+            raise ValueError("subgraph must be a RetrievalSubgraph")
+        self.retrieval_subgraphs.append(subgraph)
+
+    def add_retrieval_subgraph(self, subgraph: RetrievalSubgraph) -> None:
+        """Append one model-drawn subgraph.
+
+        Structural problems are ``Violation`` values from ``validate_view``,
+        the same channel as the other view checks. This method does not
+        reject them itself.
+        """
+        self._ensure_editable()
+        self._append_retrieval_subgraph(subgraph)
+
+    def apply_critic_patch(
+        self,
+        violation: Violation,
+        *,
+        note: str = "",
+        blocks: Sequence[InfluenceBlock] | None = None,
+        claims: Sequence[InfluenceClaim] | None = None,
+        coverage: CoverageManifest | None = None,
+    ) -> None:
+        """Apply one refiner patch and record which violation it addresses."""
+        if not isinstance(violation, Violation):
+            raise ValueError("violation must be a Violation")
+        self._ensure_editable()
+        next_blocks = list(self.blocks)
+        next_claims = list(self.claims)
+        next_coverage = self.coverage
+        if blocks is not None:
+            next_blocks = []
+            seen: set[str] = set()
+            for block in blocks:
+                if not isinstance(block, InfluenceBlock):
+                    raise ValueError("block must be an InfluenceBlock")
+                if block.block_id in seen:
+                    raise ValueError(f"duplicate block_id {block.block_id}")
+                seen.add(block.block_id)
+                next_blocks.append(block)
+        if claims is not None:
+            next_claims = []
+            seen_claims: set[str] = set()
+            for claim in claims:
+                if not isinstance(claim, InfluenceClaim):
+                    raise ValueError("claim must be an InfluenceClaim")
+                if claim.status != CLAIM_STATUS_HYPOTHESIS:
+                    raise ValueError("new claims must start as hypothesis")
+                if claim.claim_id in seen_claims:
+                    raise ValueError(f"duplicate claim_id {claim.claim_id}")
+                seen_claims.add(claim.claim_id)
+                next_claims.append(claim)
+        if coverage is not None:
+            if not isinstance(coverage, CoverageManifest):
+                raise ValueError("coverage must be a CoverageManifest")
+            next_coverage = coverage
+        self.blocks = next_blocks
+        self.claims = next_claims
+        self.coverage = next_coverage
+        self.critic_rounds += 1
+        self.patch_provenance.append(
+            CriticPatchRecord(
+                round_index=self.critic_rounds,
+                violation_code=violation.code,
+                location=violation.location,
+                severity=violation.severity,
+                note=note,
+            )
+        )
+
+    def freeze(
+        self,
+        *,
+        construction_mode: ConstructionMode = CONSTRUCTION_MODE_NATIVE_SINGLE_PASS,
+        revision_id: str | None = None,
+        frozen_at: str | None = None,
+        enforce_checks: bool = True,
+    ) -> InfluenceViewRevision:
+        """Freeze this draft. High-severity violations refuse the freeze by default.
+
+        Set ``enforce_checks=False`` only when the caller has already decided
+        the draft may be stored. A raised ``HighSeverityViolation`` means the
+        caller should switch to ``build_minimal_fallback_view``.
+        """
+        mode = _require_choice(construction_mode, "construction_mode", CONSTRUCTION_MODES)
+        stamp = (
+            _format_dt(self._clock()) if frozen_at is None else _require_str(frozen_at, "frozen_at")
+        )
+        identity = revision_id or uuid.uuid4().hex
+        if not isinstance(enforce_checks, bool):
+            raise ValueError("enforce_checks must be a bool")
+        if enforce_checks:
+            high = [item for item in validate_view(self) if item.severity == "high"]
+            if high:
+                raise HighSeverityViolation(high)
+        blocks = tuple(self.blocks)
+        claims = tuple(self.claims)
+        retrieval_subgraphs = tuple(self.retrieval_subgraphs)
+        return InfluenceViewRevision(
+            revision_id=_require_str(identity, "revision_id"),
+            view_id=self.view_id,
+            purpose=self.purpose,  # type: ignore[arg-type]
+            session_id=self.session_id,
+            task_run_id=self.task_run_id,
+            blocks=blocks,
+            claims=claims,
+            coverage=self.coverage,
+            critic_rounds=self.critic_rounds,
+            patch_provenance=tuple(self.patch_provenance),
+            construction_mode=mode,  # type: ignore[arg-type]
+            content_hash=compute_content_hash(blocks, claims, self.coverage, retrieval_subgraphs),
+            frozen_at=stamp,
+            retrieval_subgraphs=retrieval_subgraphs,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "view_id": self.view_id,
+            "purpose": self.purpose,
+            "session_id": self.session_id,
+            "task_run_id": self.task_run_id,
+            "blocks": [block.to_dict() for block in self.blocks],
+            "claims": [claim.to_dict() for claim in self.claims],
+            "retrieval_subgraphs": [item.to_dict() for item in self.retrieval_subgraphs],
+            "coverage": self.coverage.to_dict(),
+            "critic_rounds": self.critic_rounds,
+            "patch_provenance": [item.to_dict() for item in self.patch_provenance],
+        }
+
+    @classmethod
+    def from_dict(
+        cls, data: dict[str, Any], *, clock: Callable[[], datetime] | None = None
+    ) -> InfluenceViewDraft:
+        payload = _require_mapping(data, "draft")
+        _reject_native_edge_as_claim(payload, "draft")
+        return cls(
+            view_id=_require_str(payload.get("view_id"), "view_id"),
+            purpose=_require_choice(payload.get("purpose"), "purpose", PURPOSES),  # type: ignore[arg-type]
+            session_id=_require_str(payload.get("session_id"), "session_id"),
+            task_run_id=_require_str(payload.get("task_run_id"), "task_run_id"),
+            coverage=CoverageManifest.from_dict(
+                _require_mapping(payload.get("coverage"), "coverage")
+            ),
+            blocks=tuple(
+                InfluenceBlock.from_dict(_require_mapping(item, "block"))
+                for item in payload.get("blocks") or []
+            ),
+            claims=tuple(
+                InfluenceClaim.from_dict(_require_mapping(item, "claim"))
+                for item in payload.get("claims") or []
+            ),
+            retrieval_subgraphs=tuple(
+                RetrievalSubgraph.from_dict(_require_mapping(item, "retrieval_subgraph"))
+                for item in payload.get("retrieval_subgraphs") or []
+            ),
+            critic_rounds=_require_int(payload.get("critic_rounds", 0), "critic_rounds"),
+            patch_provenance=tuple(
+                CriticPatchRecord.from_dict(_require_mapping(item, "patch"))
+                for item in payload.get("patch_provenance") or []
+            ),
+            clock=clock,
+        )
+
+
+@dataclass(frozen=True)
+class InfluenceViewRevision:
+    """Immutable freeze of a draft.
+
+    Content hash covers blocks, claims, coverage, and retrieval subgraphs.
+    Equality includes the subgraph tuple.
+    """
+
+    revision_id: str
+    view_id: str
+    purpose: Purpose
+    session_id: str
+    task_run_id: str
+    blocks: tuple[InfluenceBlock, ...]
+    claims: tuple[InfluenceClaim, ...]
+    coverage: CoverageManifest
+    critic_rounds: int
+    patch_provenance: tuple[CriticPatchRecord, ...]
+    construction_mode: ConstructionMode
+    content_hash: str
+    frozen_at: str
+    retrieval_subgraphs: tuple[RetrievalSubgraph, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_str(self.revision_id, "revision_id")
+        _require_str(self.view_id, "view_id")
+        _require_choice(self.purpose, "purpose", PURPOSES)
+        _require_str(self.session_id, "session_id")
+        _require_str(self.task_run_id, "task_run_id")
+        _require_choice(self.construction_mode, "construction_mode", CONSTRUCTION_MODES)
+        _require_str(self.content_hash, "content_hash")
+        _require_str(self.frozen_at, "frozen_at")
+        rounds = _require_int(self.critic_rounds, "critic_rounds")
+        if rounds < 0 or rounds > MAX_CRITIC_ROUNDS:
+            raise ValueError(f"critic_rounds must be in 0..{MAX_CRITIC_ROUNDS}")
+        if not isinstance(self.coverage, CoverageManifest):
+            raise ValueError("coverage must be a CoverageManifest")
+        object.__setattr__(self, "blocks", tuple(self.blocks))
+        object.__setattr__(self, "claims", tuple(self.claims))
+        object.__setattr__(self, "patch_provenance", tuple(self.patch_provenance))
+        object.__setattr__(self, "retrieval_subgraphs", tuple(self.retrieval_subgraphs))
+        for item in self.retrieval_subgraphs:
+            if not isinstance(item, RetrievalSubgraph):
+                raise ValueError("retrieval_subgraphs must contain RetrievalSubgraph")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "revision_id": self.revision_id,
+            "view_id": self.view_id,
+            "purpose": self.purpose,
+            "session_id": self.session_id,
+            "task_run_id": self.task_run_id,
+            "blocks": [block.to_dict() for block in self.blocks],
+            "claims": [claim.to_dict() for claim in self.claims],
+            "retrieval_subgraphs": [item.to_dict() for item in self.retrieval_subgraphs],
+            "coverage": self.coverage.to_dict(),
+            "critic_rounds": self.critic_rounds,
+            "patch_provenance": [item.to_dict() for item in self.patch_provenance],
+            "construction_mode": self.construction_mode,
+            "content_hash": self.content_hash,
+            "frozen_at": self.frozen_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> InfluenceViewRevision:
+        payload = _require_mapping(data, "revision")
+        _reject_native_edge_as_claim(payload, "revision")
+        return cls(
+            revision_id=_require_str(payload.get("revision_id"), "revision_id"),
+            view_id=_require_str(payload.get("view_id"), "view_id"),
+            purpose=_require_choice(payload.get("purpose"), "purpose", PURPOSES),  # type: ignore[arg-type]
+            session_id=_require_str(payload.get("session_id"), "session_id"),
+            task_run_id=_require_str(payload.get("task_run_id"), "task_run_id"),
+            blocks=tuple(
+                InfluenceBlock.from_dict(_require_mapping(item, "block"))
+                for item in payload.get("blocks") or []
+            ),
+            claims=tuple(
+                InfluenceClaim.from_dict(_require_mapping(item, "claim"))
+                for item in payload.get("claims") or []
+            ),
+            coverage=CoverageManifest.from_dict(
+                _require_mapping(payload.get("coverage"), "coverage")
+            ),
+            critic_rounds=_require_int(payload.get("critic_rounds", 0), "critic_rounds"),
+            patch_provenance=tuple(
+                CriticPatchRecord.from_dict(_require_mapping(item, "patch"))
+                for item in payload.get("patch_provenance") or []
+            ),
+            construction_mode=_require_choice(  # type: ignore[arg-type]
+                payload.get("construction_mode"), "construction_mode", CONSTRUCTION_MODES
+            ),
+            content_hash=_require_str(payload.get("content_hash"), "content_hash"),
+            frozen_at=_require_str(payload.get("frozen_at"), "frozen_at"),
+            retrieval_subgraphs=tuple(
+                RetrievalSubgraph.from_dict(_require_mapping(item, "retrieval_subgraph"))
+                for item in payload.get("retrieval_subgraphs") or []
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class AigNativeEdge:
+    """Directed edge from an earlier block to a later block.
+
+    ``relation_type`` is the mechanism class: ``influence`` or ``skip``.
+    ``mechanism`` is a short note. The edge is not an ``InfluenceClaim``:
+    it has no status, critic verdict, evidence refs, or grounding.
+    """
+
+    edge_id: str
+    source_block_id: str
+    target_block_id: str
+    relation_type: str
+    mechanism: str = ""
+
+    def __post_init__(self) -> None:
+        _require_str(self.edge_id, "edge_id")
+        _require_str(self.source_block_id, "source_block_id")
+        _require_str(self.target_block_id, "target_block_id")
+        if self.source_block_id == self.target_block_id:
+            raise ValueError("native edge endpoints must differ")
+        _require_choice(self.relation_type, "relation_type", _NATIVE_EDGE_RELATIONS)
+        _require_str(self.mechanism, "mechanism", allow_empty=True)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "edge_id": self.edge_id,
+            "source_block_id": self.source_block_id,
+            "target_block_id": self.target_block_id,
+            "relation_type": self.relation_type,
+            "mechanism": self.mechanism,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AigNativeEdge:
+        payload = _require_mapping(data, "edge")
+        mechanism = payload.get("mechanism", "")
+        return cls(
+            edge_id=_require_str(payload.get("edge_id"), "edge_id"),
+            source_block_id=_require_str(payload.get("source_block_id"), "source_block_id"),
+            target_block_id=_require_str(payload.get("target_block_id"), "target_block_id"),
+            relation_type=_require_str(payload.get("relation_type"), "relation_type"),
+            mechanism=_require_str(mechanism, "mechanism", allow_empty=True),
+        )
+
+
+_AUDIT_REQUIRED = ("evidence", "kind", "object_id", "severity", "violation_id")
+_AUDIT_OPTIONAL = ("evidence_ao_refs", "note")
+_AUDIT_KINDS = frozenset({"structural", "semantic", "granularity"})
+
+
+def _normalize_sidecar_hash(value: Any) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("paper_sidecar_hash must be a str")
+    if value == "":
+        return ""
+    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise ValueError("paper_sidecar_hash must be a sha256 hex digest")
+    return value
+
+
+def _normalize_known_violations(value: Any) -> tuple[dict[str, Any], ...]:
+    """Audit summaries. Empty input stays empty and is omitted from the hash."""
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)):
+        raise ValueError("known_violations must be a list")
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"known_violations[{index}] must be a dict")
+        unexpected = [
+            key for key in item if key not in _AUDIT_REQUIRED and key not in _AUDIT_OPTIONAL
+        ]
+        if unexpected:
+            raise ValueError(f"known_violations[{index}] unexpected field {unexpected[0]!r}")
+        missing = [key for key in _AUDIT_REQUIRED if key not in item]
+        if missing:
+            raise ValueError(f"known_violations[{index}] missing field {missing[0]!r}")
+        violation_id = _require_str(
+            item.get("violation_id"), f"known_violations[{index}].violation_id"
+        )
+        if violation_id in seen:
+            raise ValueError(f"duplicate known violation {violation_id}")
+        seen.add(violation_id)
+        kind = _require_choice(item.get("kind"), f"known_violations[{index}].kind", _AUDIT_KINDS)
+        severity = _require_choice(
+            item.get("severity"), f"known_violations[{index}].severity", SEVERITIES
+        )
+        record = {
+            "evidence": _require_str(item.get("evidence"), f"known_violations[{index}].evidence"),
+            "kind": kind,
+            "object_id": _require_str(
+                item.get("object_id"), f"known_violations[{index}].object_id"
+            ),
+            "severity": severity,
+            "violation_id": violation_id,
+        }
+        if "evidence_ao_refs" in item:
+            refs = item.get("evidence_ao_refs")
+            if isinstance(refs, (str, bytes)) or not isinstance(refs, (list, tuple)):
+                raise ValueError(f"known_violations[{index}].evidence_ao_refs must be a list")
+            numbers: list[int] = []
+            for ref_index, ref in enumerate(refs):
+                if isinstance(ref, bool) or not isinstance(ref, int) or ref < 0:
+                    raise ValueError(
+                        f"known_violations[{index}].evidence_ao_refs[{ref_index}] must be an int"
+                    )
+                numbers.append(ref)
+            if numbers:
+                record["evidence_ao_refs"] = numbers
+        if "note" in item:
+            note = _require_str(
+                item.get("note"), f"known_violations[{index}].note", allow_empty=True
+            )
+            if note:
+                record["note"] = note
+        items.append(record)
+    items.sort(key=lambda record: record["violation_id"])
+    return tuple(items)
+
+
+def _revision_audit_fields(
+    known_violations: tuple[dict[str, Any], ...], paper_sidecar_hash: str
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    if known_violations:
+        fields["known_violations"] = [dict(item) for item in known_violations]
+    if paper_sidecar_hash:
+        fields["paper_sidecar_hash"] = paper_sidecar_hash
+    return fields
+
+
+def _reject_claim_fields_on_native(payload: Mapping[str, Any]) -> None:
+    """Refuse a claim/cut document instead of mapping it onto a native edge."""
+    forbidden = (
+        "claims",
+        "claim_id",
+        "cut_grounding",
+        "retrieval_subgraphs",
+        "influence_claim",
+        "influence_grounding",
+    )
+    for key in forbidden:
+        if key in payload:
+            raise ValueError(f"refusing to map a claim view onto a native-edge revision: {key}")
+
+
+def _native_blocks(value: Any) -> tuple[InfluenceBlock, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, list):
+        raise ValueError("blocks must be a list")
+    return tuple(InfluenceBlock.from_dict(_require_mapping(item, "block")) for item in value)
+
+
+def _native_edges(value: Any) -> tuple[AigNativeEdge, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, list):
+        raise ValueError("edges must be a list")
+    return tuple(AigNativeEdge.from_dict(_require_mapping(item, "edge")) for item in value)
+
+
+class AigNativeViewDraft:
+    """Mutable block-and-edge view. Adding an edge does not create a claim."""
+
+    def __init__(
+        self,
+        *,
+        view_id: str,
+        purpose: Purpose,
+        session_id: str,
+        task_run_id: str,
+        coverage: CoverageManifest,
+        blocks: Sequence[InfluenceBlock] | None = None,
+        edges: Sequence[AigNativeEdge] | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.view_id = _require_str(view_id, "view_id")
+        self.purpose = _require_choice(purpose, "purpose", PURPOSES)
+        self.session_id = _require_str(session_id, "session_id")
+        self.task_run_id = _require_str(task_run_id, "task_run_id")
+        if not isinstance(coverage, CoverageManifest):
+            raise ValueError("coverage must be a CoverageManifest")
+        self.coverage = coverage
+        self.blocks: list[InfluenceBlock] = []
+        self.edges: list[AigNativeEdge] = []
+        self._clock = clock or _utc_now
+        for block in blocks or ():
+            self._append_block(block)
+        for edge in edges or ():
+            self._append_edge(edge)
+
+    def _append_block(self, block: InfluenceBlock) -> None:
+        if not isinstance(block, InfluenceBlock):
+            raise ValueError("block must be an InfluenceBlock")
+        if any(existing.block_id == block.block_id for existing in self.blocks):
+            raise ValueError(f"duplicate block_id {block.block_id}")
+        self.blocks.append(block)
+
+    def _append_edge(self, edge: AigNativeEdge) -> None:
+        if not isinstance(edge, AigNativeEdge):
+            raise ValueError("edge must be an AigNativeEdge")
+        if any(existing.edge_id == edge.edge_id for existing in self.edges):
+            raise ValueError(f"duplicate edge_id {edge.edge_id}")
+        pair = (edge.source_block_id, edge.target_block_id)
+        if any(
+            (existing.source_block_id, existing.target_block_id) == pair for existing in self.edges
+        ):
+            raise ValueError(f"duplicate native edge {pair[0]}->{pair[1]}")
+        self.edges.append(edge)
+
+    def add_block(self, block: InfluenceBlock) -> None:
+        self._append_block(block)
+
+    def add_edge(self, edge: AigNativeEdge) -> None:
+        self._append_edge(edge)
+
+    def protocol_body(self) -> dict[str, Any]:
+        return {
+            "view_id": self.view_id,
+            "purpose": self.purpose,
+            "session_id": self.session_id,
+            "task_run_id": self.task_run_id,
+            "blocks": [block.to_dict() for block in self.blocks],
+            "edges": [edge.to_dict() for edge in self.edges],
+            "coverage": self.coverage.to_dict(),
+        }
+
+    def protocol_document(self) -> dict[str, Any]:
+        body = self.protocol_body()
+        return {
+            "schema_version": NATIVE_EDGE_SCHEMA_VERSION,
+            "object_kind": NATIVE_EDGE_DRAFT_KIND,
+            "content_hash": _native_content_hash(
+                NATIVE_EDGE_SCHEMA_VERSION, NATIVE_EDGE_DRAFT_KIND, body
+            ),
+            "body": body,
+        }
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, AigNativeViewDraft):
+            return NotImplemented
+        return self.protocol_body() == other.protocol_body()
+
+    def freeze(
+        self,
+        *,
+        construction_mode: ConstructionMode = CONSTRUCTION_MODE_NATIVE_SINGLE_PASS,
+        revision_id: str | None = None,
+        frozen_at: str | None = None,
+        enforce_checks: bool = True,
+        known_violations: Sequence[Mapping[str, Any]] | None = None,
+        paper_sidecar_hash: str = "",
+    ) -> AigNativeViewRevision:
+        """Freeze blocks and edges. High-severity structural violations refuse it."""
+        mode = _require_choice(construction_mode, "construction_mode", CONSTRUCTION_MODES)
+        stamp = (
+            _format_dt(self._clock()) if frozen_at is None else _require_str(frozen_at, "frozen_at")
+        )
+        identity = revision_id or uuid.uuid4().hex
+        if not isinstance(enforce_checks, bool):
+            raise ValueError("enforce_checks must be a bool")
+        if enforce_checks:
+            high = [item for item in validate_native_view(self) if item.severity == "high"]
+            if high:
+                raise HighSeverityViolation(high)
+        blocks = tuple(self.blocks)
+        edges = tuple(self.edges)
+        revision_key = _require_str(identity, "revision_id")
+        violations = _normalize_known_violations(known_violations or ())
+        sidecar = _normalize_sidecar_hash(paper_sidecar_hash)
+        body = {
+            "revision_id": revision_key,
+            "view_id": self.view_id,
+            "purpose": self.purpose,
+            "session_id": self.session_id,
+            "task_run_id": self.task_run_id,
+            "blocks": [block.to_dict() for block in blocks],
+            "edges": [edge.to_dict() for edge in edges],
+            "coverage": self.coverage.to_dict(),
+            "construction_mode": mode,
+            "frozen_at": stamp,
+        }
+        body.update(_revision_audit_fields(violations, sidecar))
+        return AigNativeViewRevision(
+            revision_id=revision_key,
+            view_id=self.view_id,
+            purpose=self.purpose,  # type: ignore[arg-type]
+            session_id=self.session_id,
+            task_run_id=self.task_run_id,
+            blocks=blocks,
+            edges=edges,
+            coverage=self.coverage,
+            construction_mode=mode,  # type: ignore[arg-type]
+            content_hash=_native_content_hash(
+                NATIVE_EDGE_SCHEMA_VERSION, NATIVE_EDGE_REVISION_KIND, body
+            ),
+            frozen_at=stamp,
+            known_violations=violations,
+            paper_sidecar_hash=sidecar,
+        )
+
+    @classmethod
+    def from_body(cls, body: Mapping[str, Any]) -> AigNativeViewDraft:
+        payload = _require_mapping(dict(body), "native_edge_draft")
+        _reject_claim_fields_on_native(payload)
+        return cls(
+            view_id=_require_str(payload.get("view_id"), "view_id"),
+            purpose=_require_choice(payload.get("purpose"), "purpose", PURPOSES),  # type: ignore[arg-type]
+            session_id=_require_str(payload.get("session_id"), "session_id"),
+            task_run_id=_require_str(payload.get("task_run_id"), "task_run_id"),
+            coverage=CoverageManifest.from_dict(
+                _require_mapping(payload.get("coverage"), "coverage")
+            ),
+            blocks=_native_blocks(payload.get("blocks")),
+            edges=_native_edges(payload.get("edges")),
+        )
+
+
+@dataclass(frozen=True)
+class AigNativeViewRevision:
+    """Frozen blocks and native edges. Content hash is the protocol digest.
+
+    The hash covers ``schema_version``, ``object_kind``, and ``protocol_body``.
+    Claims, retrieval subgraphs, and cut grounding are not fields of this object.
+    """
+
+    revision_id: str
+    view_id: str
+    purpose: Purpose
+    session_id: str
+    task_run_id: str
+    blocks: tuple[InfluenceBlock, ...]
+    edges: tuple[AigNativeEdge, ...]
+    coverage: CoverageManifest
+    construction_mode: ConstructionMode
+    content_hash: str
+    frozen_at: str
+    known_violations: tuple[dict[str, Any], ...] = ()
+    paper_sidecar_hash: str = ""
+    schema_version: str = NATIVE_EDGE_SCHEMA_VERSION
+    object_kind: str = NATIVE_EDGE_REVISION_KIND
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "known_violations", _normalize_known_violations(self.known_violations)
+        )
+        object.__setattr__(
+            self, "paper_sidecar_hash", _normalize_sidecar_hash(self.paper_sidecar_hash)
+        )
+        _require_str(self.revision_id, "revision_id")
+        _require_str(self.view_id, "view_id")
+        _require_choice(self.purpose, "purpose", PURPOSES)
+        _require_str(self.session_id, "session_id")
+        _require_str(self.task_run_id, "task_run_id")
+        _require_choice(self.construction_mode, "construction_mode", CONSTRUCTION_MODES)
+        _require_str(self.content_hash, "content_hash")
+        _require_str(self.frozen_at, "frozen_at")
+        if self.schema_version != NATIVE_EDGE_SCHEMA_VERSION:
+            raise ValueError(
+                f"schema_version must be {NATIVE_EDGE_SCHEMA_VERSION!r}, got {self.schema_version!r}"
+            )
+        if self.object_kind != NATIVE_EDGE_REVISION_KIND:
+            raise ValueError(
+                f"object_kind must be {NATIVE_EDGE_REVISION_KIND!r}, got {self.object_kind!r}"
+            )
+        if not isinstance(self.coverage, CoverageManifest):
+            raise ValueError("coverage must be a CoverageManifest")
+        object.__setattr__(self, "blocks", tuple(self.blocks))
+        object.__setattr__(self, "edges", tuple(self.edges))
+        for block in self.blocks:
+            if not isinstance(block, InfluenceBlock):
+                raise ValueError("blocks must contain InfluenceBlock")
+        for edge in self.edges:
+            if not isinstance(edge, AigNativeEdge):
+                raise ValueError("edges must contain AigNativeEdge")
+        digest = _native_content_hash(
+            NATIVE_EDGE_SCHEMA_VERSION, NATIVE_EDGE_REVISION_KIND, self.protocol_body()
+        )
+        if self.content_hash != digest:
+            raise ValueError(
+                f"content_hash mismatch: stored {self.content_hash!r} != computed {digest!r}"
+            )
+
+    def protocol_body(self) -> dict[str, Any]:
+        body = {
+            "revision_id": self.revision_id,
+            "view_id": self.view_id,
+            "purpose": self.purpose,
+            "session_id": self.session_id,
+            "task_run_id": self.task_run_id,
+            "blocks": [block.to_dict() for block in self.blocks],
+            "edges": [edge.to_dict() for edge in self.edges],
+            "coverage": self.coverage.to_dict(),
+            "construction_mode": self.construction_mode,
+            "frozen_at": self.frozen_at,
+        }
+        body.update(_revision_audit_fields(self.known_violations, self.paper_sidecar_hash))
+        return body
+
+    def protocol_document(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "object_kind": self.object_kind,
+            "content_hash": self.content_hash,
+            "body": self.protocol_body(),
+        }
+
+    @classmethod
+    def from_body(cls, body: Mapping[str, Any], *, content_hash: str) -> AigNativeViewRevision:
+        payload = _require_mapping(dict(body), "native_edge_revision")
+        _reject_claim_fields_on_native(payload)
+        return cls(
+            revision_id=_require_str(payload.get("revision_id"), "revision_id"),
+            view_id=_require_str(payload.get("view_id"), "view_id"),
+            purpose=_require_choice(payload.get("purpose"), "purpose", PURPOSES),  # type: ignore[arg-type]
+            session_id=_require_str(payload.get("session_id"), "session_id"),
+            task_run_id=_require_str(payload.get("task_run_id"), "task_run_id"),
+            blocks=_native_blocks(payload.get("blocks")),
+            edges=_native_edges(payload.get("edges")),
+            coverage=CoverageManifest.from_dict(
+                _require_mapping(payload.get("coverage"), "coverage")
+            ),
+            construction_mode=_require_choice(  # type: ignore[arg-type]
+                payload.get("construction_mode"), "construction_mode", CONSTRUCTION_MODES
+            ),
+            content_hash=_require_str(content_hash, "content_hash"),
+            frozen_at=_require_str(payload.get("frozen_at"), "frozen_at"),
+            known_violations=_normalize_known_violations(payload.get("known_violations", ())),
+            paper_sidecar_hash=_normalize_sidecar_hash(payload.get("paper_sidecar_hash", "")),
+        )
+
+
+def _view_parts(
+    view: InfluenceViewDraft | InfluenceViewRevision,
+) -> tuple[str, str, Sequence[InfluenceBlock], Sequence[InfluenceClaim], CoverageManifest]:
+    return view.purpose, view.session_id, view.blocks, view.claims, view.coverage
+
+
+def _readable_source_violations(blocks: Sequence[InfluenceBlock]) -> list[Violation]:
+    findings: list[Violation] = []
+    for block in blocks:
+        if not block.source_refs:
+            findings.append(
+                Violation(
+                    code="missing_source_ref",
+                    severity="high",
+                    message="block has no readable source ref",
+                    location=f"block:{block.block_id}",
+                )
+            )
+            continue
+        for index, ref in enumerate(block.source_refs):
+            if not ref.ao_id.strip() or not ref.content_hash.strip():
+                findings.append(
+                    Violation(
+                        code="unreadable_source_ref",
+                        severity="high",
+                        message="source ref must expose ao_id and content hash",
+                        location=f"block:{block.block_id}/source_refs[{index}]",
+                    )
+                )
+        if not block.segment_ref.segment_id.strip():
+            findings.append(
+                Violation(
+                    code="unreadable_source_ref",
+                    severity="high",
+                    message="block segment ref is empty",
+                    location=f"block:{block.block_id}",
+                )
+            )
+    return findings
+
+
+def _temporal_and_cycle_violations(
+    blocks: Sequence[InfluenceBlock],
+    claims: Sequence[InfluenceClaim],
+) -> list[Violation]:
+    by_id = {block.block_id: block for block in blocks}
+    findings: list[Violation] = []
+    graph: dict[str, list[tuple[str, InfluenceClaim]]] = {}
+    nodes: set[str] = set()
+    for claim in claims:
+        source = by_id.get(claim.source_block_id)
+        target = by_id.get(claim.target_block_id)
+        if source is None or target is None:
+            findings.append(
+                Violation(
+                    code="dangling_claim",
+                    severity="high",
+                    message="claim endpoints must name blocks in this view",
+                    location=f"claim:{claim.claim_id}",
+                )
+            )
+        elif source.ao_end_seq >= target.ao_start_seq:
+            findings.append(
+                Violation(
+                    code="temporal_order",
+                    severity="high",
+                    message="source AO interval must be strictly before the target interval",
+                    location=f"claim:{claim.claim_id}",
+                )
+            )
+        graph.setdefault(claim.source_block_id, []).append((claim.target_block_id, claim))
+        nodes.add(claim.source_block_id)
+        nodes.add(claim.target_block_id)
+
+    white, gray, black = 0, 1, 2
+    color = dict.fromkeys(nodes, white)
+
+    def walk(node: str) -> None:
+        color[node] = gray
+        for nxt, claim in graph.get(node, ()):
+            if color.get(nxt, white) == gray:
+                findings.append(
+                    Violation(
+                        code="cycle",
+                        severity="high",
+                        message="influence view must be acyclic",
+                        location=f"claim:{claim.claim_id}",
+                    )
+                )
+            elif color.get(nxt, white) == white:
+                walk(nxt)
+        color[node] = black
+
+    for node in sorted(nodes):
+        if color[node] == white:
+            walk(node)
+    return findings
+
+
+def _weak_component(root_id: str, claims: Sequence[InfluenceClaim]) -> set[str]:
+    undirected: dict[str, set[str]] = {}
+    for claim in claims:
+        undirected.setdefault(claim.source_block_id, set()).add(claim.target_block_id)
+        undirected.setdefault(claim.target_block_id, set()).add(claim.source_block_id)
+    seen: set[str] = set()
+    stack = [root_id]
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        stack.extend(undirected.get(node, set()) - seen)
+    return seen
+
+
+def _diagnosis_connectivity_violations(
+    purpose: str,
+    blocks: Sequence[InfluenceBlock],
+    claims: Sequence[InfluenceClaim],
+) -> list[Violation]:
+    if purpose != PURPOSE_FAILURE_DIAGNOSIS:
+        return []
+    findings: list[Violation] = []
+    roots = [block for block in blocks if block.role == ROLE_TASK]
+    sinks = [block for block in blocks if block.role == ROLE_CONCLUSION]
+    if len(roots) != 1:
+        findings.append(
+            Violation(
+                code="missing_task_root",
+                severity="high",
+                message="failure_diagnosis view requires exactly one virtual task root",
+                location="view",
+            )
+        )
+    if len(sinks) != 1:
+        findings.append(
+            Violation(
+                code="missing_outcome_sink",
+                severity="high",
+                message="failure_diagnosis view requires exactly one observed-outcome sink",
+                location="view",
+            )
+        )
+    if len(roots) != 1 or len(sinks) != 1:
+        return findings
+    root = roots[0]
+    sink = sinks[0]
+    component = _weak_component(root.block_id, claims)
+    if sink.block_id not in component:
+        findings.append(
+            Violation(
+                code="root_sink_not_weakly_connected",
+                severity="high",
+                message="virtual task root and observed-outcome sink are not weakly connected",
+                location="view",
+            )
+        )
+        return findings
+    for block in blocks:
+        if block.block_id not in component:
+            findings.append(
+                Violation(
+                    code="block_outside_root_sink_subgraph",
+                    severity="high",
+                    message="included block is outside the root-to-sink weak subgraph",
+                    location=f"block:{block.block_id}",
+                )
+            )
+    return findings
+
+
+def _ranges_overlap_gap(omitted: OmittedRange, start_seq: int, end_seq: int) -> bool:
+    if start_seq > end_seq:
+        return False
+    return omitted.start_seq <= end_seq and start_seq <= omitted.end_seq
+
+
+def _coverage_violations(
+    blocks: Sequence[InfluenceBlock],
+    claims: Sequence[InfluenceClaim],
+    coverage: CoverageManifest,
+) -> list[Violation]:
+    findings: list[Violation] = []
+    if not coverage.snapshot_watermark.strip():
+        findings.append(
+            Violation(
+                code="coverage_incomplete",
+                severity="high",
+                message="coverage manifest requires a snapshot watermark",
+                location="coverage.snapshot_watermark",
+            )
+        )
+    for index, omitted in enumerate(coverage.omitted_ranges):
+        if not omitted.reason.strip():
+            findings.append(
+                Violation(
+                    code="omitted_range_missing_reason",
+                    severity="high",
+                    message="every omitted range requires a reason",
+                    location=f"coverage.omitted_ranges[{index}]",
+                )
+            )
+    by_id = {block.block_id: block for block in blocks}
+    for claim in claims:
+        source = by_id.get(claim.source_block_id)
+        target = by_id.get(claim.target_block_id)
+        if source is None or target is None:
+            continue
+        gap_start = source.ao_end_seq + 1
+        gap_end = target.ao_start_seq - 1
+        crosses = any(
+            _ranges_overlap_gap(omitted, gap_start, gap_end) for omitted in coverage.omitted_ranges
+        )
+        if not crosses:
+            continue
+        if claim.relation_type != RELATION_SKIP:
+            findings.append(
+                Violation(
+                    code="omitted_range_skip_required",
+                    severity="high",
+                    message="a claim that crosses an omitted range must use relation_type skip",
+                    location=f"claim:{claim.claim_id}",
+                )
+            )
+        if not claim.source_evidence_refs or not claim.target_evidence_refs:
+            findings.append(
+                Violation(
+                    code="skip_missing_evidence",
+                    severity="high",
+                    message="a skip across an omitted range must cite evidence on both ends",
+                    location=f"claim:{claim.claim_id}",
+                )
+            )
+    return findings
+
+
+def _retrieval_subgraph_violations(
+    blocks: Sequence[InfluenceBlock],
+    claims: Sequence[InfluenceClaim],
+    retrieval_subgraphs: Sequence[RetrievalSubgraph],
+) -> list[Violation]:
+    """Structural checks for model-drawn subgraphs. Failure is not inferred."""
+    findings: list[Violation] = []
+    block_ids = {block.block_id for block in blocks}
+    claims_by_id = {claim.claim_id: claim for claim in claims}
+    seen_ids: dict[str, int] = {}
+    for subgraph in retrieval_subgraphs:
+        seen_ids[subgraph.subgraph_id] = seen_ids.get(subgraph.subgraph_id, 0) + 1
+        member_blocks = set(subgraph.block_ids)
+        for block_id in subgraph.block_ids:
+            if block_id not in block_ids:
+                findings.append(
+                    Violation(
+                        code="subgraph_unknown_member",
+                        severity="high",
+                        message=f"block_id {block_id} is not in this revision",
+                        location=f"subgraph:{subgraph.subgraph_id}/block_ids/{block_id}",
+                    )
+                )
+        for claim_id in subgraph.claim_ids:
+            claim = claims_by_id.get(claim_id)
+            if claim is None:
+                findings.append(
+                    Violation(
+                        code="subgraph_unknown_member",
+                        severity="high",
+                        message=f"claim_id {claim_id} is not in this revision",
+                        location=f"subgraph:{subgraph.subgraph_id}/claim_ids/{claim_id}",
+                    )
+                )
+                continue
+            outside = (
+                claim.source_block_id not in member_blocks
+                or claim.target_block_id not in member_blocks
+            )
+            if outside:
+                findings.append(
+                    Violation(
+                        code="subgraph_claim_endpoint_outside",
+                        severity="high",
+                        message="claim endpoints must both be blocks of this retrieval subgraph",
+                        location=f"subgraph:{subgraph.subgraph_id}/claim_ids/{claim_id}",
+                    )
+                )
+        if len(subgraph.block_ids) > MAX_RETRIEVAL_SUBGRAPH_BLOCKS:
+            findings.append(
+                Violation(
+                    code="subgraph_block_limit",
+                    severity="high",
+                    message=(
+                        f"retrieval subgraph has {len(subgraph.block_ids)} blocks; "
+                        f"limit is {MAX_RETRIEVAL_SUBGRAPH_BLOCKS}"
+                    ),
+                    location=f"subgraph:{subgraph.subgraph_id}/block_ids",
+                )
+            )
+        marked = subgraph.failure_marked
+        has_evidence = bool(subgraph.failure_evidence_refs)
+        if marked and not has_evidence:
+            findings.append(
+                Violation(
+                    code="subgraph_failure_evidence",
+                    severity="high",
+                    message="a failure marker requires failure evidence",
+                    location=f"subgraph:{subgraph.subgraph_id}/failure_evidence_refs",
+                )
+            )
+        elif has_evidence and not marked:
+            findings.append(
+                Violation(
+                    code="subgraph_failure_evidence",
+                    severity="high",
+                    message="failure evidence requires an explicit failure marker",
+                    location=f"subgraph:{subgraph.subgraph_id}/failure_evidence_refs",
+                )
+            )
+    for subgraph_id, count in seen_ids.items():
+        if count > 1:
+            findings.append(
+                Violation(
+                    code="duplicate_subgraph_id",
+                    severity="high",
+                    message=f"subgraph_id {subgraph_id} is duplicated in this revision",
+                    location=f"subgraph:{subgraph_id}",
+                )
+            )
+    return findings
+
+
+def validate_view(draft: InfluenceViewDraft | InfluenceViewRevision) -> list[Violation]:
+    """Server-side structural checks. Semantic critic verdicts are out of scope."""
+    if isinstance(draft, (AigNativeViewDraft, AigNativeViewRevision)):
+        raise TypeError("native-edge view is not a claim view; use validate_native_view")
+    purpose, session_id, blocks, claims, coverage = _view_parts(draft)
+    findings: list[Violation] = []
+    for block in blocks:
+        if block.segment_ref.session_id != session_id:
+            findings.append(
+                Violation(
+                    code="session_mismatch",
+                    severity="high",
+                    message="block segment session must match the view session",
+                    location=f"block:{block.block_id}",
+                )
+            )
+    findings.extend(_readable_source_violations(blocks))
+    findings.extend(_temporal_and_cycle_violations(blocks, claims))
+    findings.extend(_diagnosis_connectivity_violations(purpose, blocks, claims))
+    findings.extend(_coverage_violations(blocks, claims, coverage))
+    findings.extend(_retrieval_subgraph_violations(blocks, claims, draft.retrieval_subgraphs))
+    return findings
+
+
+def _native_temporal_and_cycle_violations(
+    blocks: Sequence[InfluenceBlock],
+    edges: Sequence[AigNativeEdge],
+) -> list[Violation]:
+    by_id = {block.block_id: block for block in blocks}
+    findings: list[Violation] = []
+    graph: dict[str, list[tuple[str, AigNativeEdge]]] = {}
+    nodes: set[str] = set()
+    for edge in edges:
+        source = by_id.get(edge.source_block_id)
+        target = by_id.get(edge.target_block_id)
+        if source is None or target is None:
+            findings.append(
+                Violation(
+                    code="dangling_edge",
+                    severity="high",
+                    message="edge endpoints must name blocks in this view",
+                    location=f"edge:{edge.edge_id}",
+                )
+            )
+            continue
+        if source.ao_end_seq >= target.ao_start_seq:
+            findings.append(
+                Violation(
+                    code="temporal_order",
+                    severity="high",
+                    message="source AO interval must be strictly before the target interval",
+                    location=f"edge:{edge.edge_id}",
+                )
+            )
+        graph.setdefault(edge.source_block_id, []).append((edge.target_block_id, edge))
+        nodes.add(edge.source_block_id)
+        nodes.add(edge.target_block_id)
+
+    white, gray, black = 0, 1, 2
+    color = dict.fromkeys(nodes, white)
+
+    def walk(node: str) -> None:
+        color[node] = gray
+        for nxt, edge in graph.get(node, ()):
+            if color.get(nxt, white) == gray:
+                findings.append(
+                    Violation(
+                        code="cycle",
+                        severity="high",
+                        message="native-edge view must be acyclic",
+                        location=f"edge:{edge.edge_id}",
+                    )
+                )
+            elif color.get(nxt, white) == white:
+                walk(nxt)
+        color[node] = black
+
+    for node in sorted(nodes):
+        if color[node] == white:
+            walk(node)
+    return findings
+
+
+def _native_weak_component(root_id: str, edges: Sequence[AigNativeEdge]) -> set[str]:
+    undirected: dict[str, set[str]] = {}
+    for edge in edges:
+        undirected.setdefault(edge.source_block_id, set()).add(edge.target_block_id)
+        undirected.setdefault(edge.target_block_id, set()).add(edge.source_block_id)
+    seen: set[str] = set()
+    stack = [root_id]
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        stack.extend(undirected.get(node, set()) - seen)
+    return seen
+
+
+def _native_diagnosis_violations(
+    purpose: str,
+    blocks: Sequence[InfluenceBlock],
+    edges: Sequence[AigNativeEdge],
+) -> list[Violation]:
+    if purpose != PURPOSE_FAILURE_DIAGNOSIS:
+        return []
+    findings: list[Violation] = []
+    roots = [block for block in blocks if block.role == ROLE_TASK]
+    sinks = [block for block in blocks if block.role == ROLE_CONCLUSION]
+    if len(roots) != 1:
+        findings.append(
+            Violation(
+                code="missing_task_root",
+                severity="high",
+                message="failure_diagnosis view requires exactly one virtual task root",
+                location="view",
+            )
+        )
+    if len(sinks) != 1:
+        findings.append(
+            Violation(
+                code="missing_outcome_sink",
+                severity="high",
+                message="failure_diagnosis view requires exactly one observed-outcome sink",
+                location="view",
+            )
+        )
+    if len(roots) != 1 or len(sinks) != 1:
+        return findings
+    root = roots[0]
+    sink = sinks[0]
+    component = _native_weak_component(root.block_id, edges)
+    if sink.block_id not in component:
+        findings.append(
+            Violation(
+                code="root_sink_not_weakly_connected",
+                severity="high",
+                message="virtual task root and observed-outcome sink are not weakly connected",
+                location="view",
+            )
+        )
+        return findings
+    for block in blocks:
+        if block.block_id not in component:
+            findings.append(
+                Violation(
+                    code="block_outside_root_sink_subgraph",
+                    severity="high",
+                    message="included block is outside the root-to-sink weak subgraph",
+                    location=f"block:{block.block_id}",
+                )
+            )
+    return findings
+
+
+def _native_coverage_violations(
+    blocks: Sequence[InfluenceBlock],
+    edges: Sequence[AigNativeEdge],
+    coverage: CoverageManifest,
+) -> list[Violation]:
+    findings: list[Violation] = []
+    if not coverage.snapshot_watermark.strip():
+        findings.append(
+            Violation(
+                code="coverage_incomplete",
+                severity="high",
+                message="coverage manifest requires a snapshot watermark",
+                location="coverage.snapshot_watermark",
+            )
+        )
+    for index, omitted in enumerate(coverage.omitted_ranges):
+        if not omitted.reason.strip():
+            findings.append(
+                Violation(
+                    code="omitted_range_missing_reason",
+                    severity="high",
+                    message="every omitted range requires a reason",
+                    location=f"coverage.omitted_ranges[{index}]",
+                )
+            )
+    by_id = {block.block_id: block for block in blocks}
+    for edge in edges:
+        source = by_id.get(edge.source_block_id)
+        target = by_id.get(edge.target_block_id)
+        if source is None or target is None:
+            continue
+        gap_start = source.ao_end_seq + 1
+        gap_end = target.ao_start_seq - 1
+        crosses = any(
+            _ranges_overlap_gap(omitted, gap_start, gap_end) for omitted in coverage.omitted_ranges
+        )
+        if crosses and edge.relation_type != RELATION_SKIP:
+            findings.append(
+                Violation(
+                    code="omitted_range_skip_required",
+                    severity="high",
+                    message="an edge that crosses an omitted range must use relation_type skip",
+                    location=f"edge:{edge.edge_id}",
+                )
+            )
+    return findings
+
+
+def validate_native_view(
+    view: AigNativeViewDraft | AigNativeViewRevision,
+) -> list[Violation]:
+    """Structural checks for a native-edge view. Claim status is not involved."""
+    if not isinstance(view, (AigNativeViewDraft, AigNativeViewRevision)):
+        raise TypeError("validate_native_view requires a native-edge draft or revision")
+    findings: list[Violation] = []
+    if not view.blocks:
+        findings.append(
+            Violation(
+                code="missing_block",
+                severity="high",
+                message="native-edge view requires at least one block",
+                location="blocks",
+            )
+        )
+    for block in view.blocks:
+        if block.segment_ref.session_id != view.session_id:
+            findings.append(
+                Violation(
+                    code="session_mismatch",
+                    severity="high",
+                    message="block segment session must match the view session",
+                    location=f"block:{block.block_id}",
+                )
+            )
+    findings.extend(_readable_source_violations(view.blocks))
+    findings.extend(_native_temporal_and_cycle_violations(view.blocks, view.edges))
+    findings.extend(_native_diagnosis_violations(view.purpose, view.blocks, view.edges))
+    findings.extend(_native_coverage_violations(view.blocks, view.edges, view.coverage))
+    return findings
+
+
+def _as_record(item: Mapping[str, Any], default_session: str) -> SourceRef:
+    payload = _require_mapping(item, "ao_record")
+    session_id = payload.get("session_id", default_session)
+    return SourceRef(
+        ao_id=_require_str(payload.get("ao_id"), "ao_record.ao_id"),
+        sequence=_require_int(payload.get("sequence"), "ao_record.sequence"),
+        participant_id=_require_str(payload.get("participant_id"), "ao_record.participant_id"),
+        segment_id=_require_str(payload.get("segment_id"), "ao_record.segment_id"),
+        session_id=_require_str(session_id, "ao_record.session_id"),
+        content_hash=_require_str(payload.get("content_hash"), "ao_record.content_hash"),
+    )
+
+
+def _contiguous_runs(records: Sequence[SourceRef]) -> list[list[SourceRef]]:
+    ordered = sorted(records, key=lambda ref: (ref.sequence, ref.ao_id))
+    if not ordered:
+        return []
+    runs: list[list[SourceRef]] = [[ordered[0]]]
+    for ref in ordered[1:]:
+        previous = runs[-1][-1]
+        if ref.sequence == previous.sequence + 1:
+            runs[-1].append(ref)
+        elif ref.sequence == previous.sequence:
+            raise ValueError("fallback AO sequences must be unique within a segment")
+        else:
+            raise ValueError(
+                "fallback AO interval within a segment must be contiguous; "
+                f"gap before sequence {ref.sequence}"
+            )
+    return runs
+
+
+def _synthetic_endpoint_block(
+    *,
+    block_id: str,
+    role: BlockRole,
+    sequence: int,
+    session_id: str,
+    summary: str,
+) -> InfluenceBlock:
+    participant_id = f"synthetic-{role}"
+    segment_id = f"synthetic-{role}"
+    ref = SourceRef(
+        ao_id=f"synthetic-{block_id}",
+        sequence=sequence,
+        participant_id=participant_id,
+        segment_id=segment_id,
+        session_id=session_id,
+        content_hash=f"synthetic-{block_id}",
+    )
+    return InfluenceBlock(
+        block_id=block_id,
+        role=role,
+        participant_id=participant_id,
+        segment_ref=SegmentRef(segment_id=segment_id, session_id=session_id),
+        ao_start_seq=sequence,
+        ao_end_seq=sequence,
+        summary=summary,
+        input="",
+        output="",
+        authorship=participant_id,
+        granularity_reason=SYNTHETIC_ROOT_SINK_REASON,
+        source_content_hashes=(ref.content_hash,),
+        source_refs=(ref,),
+    )
+
+
+def _fallback_evidence(ref: SourceRef, watermark: str) -> InfluenceEvidenceRef:
+    return InfluenceEvidenceRef(
+        ao_id=ref.ao_id,
+        source_session_id=ref.session_id,
+        source_archive_id=None,
+        archive_commit_watermark=None,
+        source_sequence=ref.sequence,
+        source_read_snapshot_watermark=watermark,
+        evidence_role="contemporaneous_basis",
+        evidence_content_hash=ref.content_hash,
+        captured_state="committed",
+    )
+
+
+def _fallback_link(
+    source: InfluenceBlock,
+    target: InfluenceBlock,
+    omitted: Sequence[OmittedRange],
+    watermark: str,
+) -> InfluenceClaim:
+    crosses = any(
+        _ranges_overlap_gap(item, source.ao_end_seq + 1, target.ao_start_seq - 1)
+        for item in omitted
+    )
+    if crosses:
+        source_evidence = (_fallback_evidence(source.source_refs[0], watermark),)
+        target_evidence = (_fallback_evidence(target.source_refs[0], watermark),)
+        relation = RELATION_SKIP
+    else:
+        source_evidence = ()
+        target_evidence = ()
+        relation = RELATION_INFLUENCE
+    return InfluenceClaim(
+        claim_id=f"fallback-link-{source.block_id}-{target.block_id}",
+        source_block_id=source.block_id,
+        target_block_id=target.block_id,
+        carried_artifact="fallback-span",
+        downstream_effect="observed outcome",
+        relation_type=relation,
+        source_evidence_refs=source_evidence,
+        target_evidence_refs=target_evidence,
+    )
+
+
+def _with_diagnosis_root_sink(
+    blocks: list[InfluenceBlock],
+    coverage: CoverageManifest,
+    session_id: str,
+) -> tuple[list[InfluenceBlock], tuple[InfluenceClaim, ...]]:
+    """Attach a virtual task root and observed-outcome sink so diagnosis fallback validates."""
+    root = _synthetic_endpoint_block(
+        block_id="synthetic-task-root",
+        role=ROLE_TASK,
+        sequence=min(block.ao_start_seq for block in blocks) - 1,
+        session_id=session_id,
+        summary="virtual task root",
+    )
+    sink = _synthetic_endpoint_block(
+        block_id="synthetic-outcome-sink",
+        role=ROLE_CONCLUSION,
+        sequence=max(block.ao_end_seq for block in blocks) + 1,
+        session_id=session_id,
+        summary="observed-outcome sink",
+    )
+    links = [
+        link
+        for block in blocks
+        for link in (
+            _fallback_link(root, block, coverage.omitted_ranges, coverage.snapshot_watermark),
+            _fallback_link(block, sink, coverage.omitted_ranges, coverage.snapshot_watermark),
+        )
+    ]
+    return [root, *blocks, sink], tuple(links)
+
+
+def build_minimal_fallback_view(
+    session: Mapping[str, Any],
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> InfluenceViewRevision:
+    """One block per segment over the given AO interval.
+
+    Segment blocks use ``granularity_reason=deterministic_fallback``. A
+    ``failure_diagnosis`` view also gets a virtual task root and an
+    observed-outcome sink (``granularity_reason=synthetic_root_sink``) so the
+    same structural checks that gate ``freeze`` accept the fallback.
+    ``construction_mode`` is ``fallback``.
+    """
+    payload = _require_mapping(dict(session), "session")
+    session_id = _require_str(payload.get("session_id"), "session_id")
+    task_run_id = _require_str(payload.get("task_run_id"), "task_run_id")
+    purpose = _require_choice(payload.get("purpose", PURPOSE_POST_RUN_INDEX), "purpose", PURPOSES)
+    raw_records = payload.get("ao_records")
+    if not isinstance(raw_records, list) or not raw_records:
+        raise ValueError("ao_records must be a non-empty list")
+    records = [_as_record(_require_mapping(item, "ao_record"), session_id) for item in raw_records]
+    if any(ref.session_id != session_id for ref in records):
+        raise ValueError("fallback AO records must belong to the view session")
+
+    grouped: dict[str, list[SourceRef]] = {}
+    for ref in records:
+        grouped.setdefault(ref.segment_id, []).append(ref)
+
+    segment_ids = sorted(
+        grouped,
+        key=lambda segment_id: (min(ref.sequence for ref in grouped[segment_id]), segment_id),
+    )
+    blocks: list[InfluenceBlock] = []
+    included: list[AORange] = []
+    for segment_id in segment_ids:
+        segment_records = grouped[segment_id]
+        participants = {ref.participant_id for ref in segment_records}
+        if len(participants) != 1:
+            raise ValueError("fallback segment must belong to a single participant")
+        runs = _contiguous_runs(segment_records)
+        if len(runs) != 1:
+            raise ValueError("fallback segment must be one contiguous AO interval")
+        run = runs[0]
+        start = run[0].sequence
+        end = run[-1].sequence
+        participant_id = run[0].participant_id
+        summary = str(payload.get("summary") or f"segment {segment_id} sequences {start}-{end}")
+        blocks.append(
+            InfluenceBlock(
+                block_id=f"fallback-{segment_id}-{start}-{end}",
+                role="agent_action",
+                participant_id=participant_id,
+                segment_ref=SegmentRef(segment_id=segment_id, session_id=session_id),
+                ao_start_seq=start,
+                ao_end_seq=end,
+                summary=summary,
+                input="",
+                output="",
+                authorship=participant_id,
+                granularity_reason=DETERMINISTIC_FALLBACK_REASON,
+                source_content_hashes=tuple(ref.content_hash for ref in run),
+                source_refs=tuple(run),
+            )
+        )
+        included.append(AORange(start_seq=start, end_seq=end, segment_id=segment_id))
+
+    included_sorted = tuple(
+        sorted(included, key=lambda item: (item.start_seq, item.segment_id or ""))
+    )
+    omitted: list[OmittedRange] = []
+    cursor = included_sorted[0].start_seq
+    for item in included_sorted:
+        if item.start_seq > cursor:
+            omitted.append(
+                OmittedRange(
+                    start_seq=cursor,
+                    end_seq=item.start_seq - 1,
+                    reason=OMITTED_GAP_REASON,
+                )
+            )
+        cursor = max(cursor, item.end_seq + 1)
+    all_sequences = [ref.sequence for ref in records]
+    total = AORange(start_seq=min(all_sequences), end_seq=max(all_sequences))
+    watermark = payload.get("snapshot_watermark")
+    if watermark is None:
+        watermark = f"fallback:{session_id}:{total.end_seq}"
+    coverage = CoverageManifest(
+        total_ao_range=total,
+        inspected_refs=tuple(sorted(records, key=lambda ref: (ref.sequence, ref.ao_id))),
+        included_ranges=included_sorted,
+        omitted_ranges=tuple(omitted),
+        snapshot_watermark=_require_str(watermark, "snapshot_watermark"),
+    )
+    view_id = payload.get("view_id") or f"fallback-{session_id}-{purpose}"
+    claims: tuple[InfluenceClaim, ...] = ()
+    if purpose == PURPOSE_FAILURE_DIAGNOSIS:
+        blocks, claims = _with_diagnosis_root_sink(blocks, coverage, session_id)
+    draft = InfluenceViewDraft(
+        view_id=_require_str(view_id, "view_id"),
+        purpose=purpose,  # type: ignore[arg-type]
+        session_id=session_id,
+        task_run_id=task_run_id,
+        coverage=coverage,
+        blocks=tuple(blocks),
+        claims=claims,
+        clock=clock,
+    )
+    frozen_at = payload.get("frozen_at")
+    revision_id = payload.get("revision_id")
+    return draft.freeze(
+        construction_mode=CONSTRUCTION_MODE_FALLBACK,
+        revision_id=None if revision_id is None else _require_str(revision_id, "revision_id"),
+        frozen_at=None if frozen_at is None else _require_str(frozen_at, "frozen_at"),
+    )
+
+
+class ViewSupersedeIndex:
+    """Latest frozen revision per ``(session_id, purpose)``, with history retained.
+
+    ``revisions_for_purpose`` is the online cross-session read. ``to_dict`` stays
+    an offline dump and is not that read path.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self._lock = threading.Lock()
+        self._history: dict[tuple[str, str], list[InfluenceViewRevision]] = {}
+        self._load()
+
+    def register(self, revision: InfluenceViewRevision) -> None:
+        if not isinstance(revision, InfluenceViewRevision):
+            raise ValueError("revision must be an InfluenceViewRevision")
+        key = (revision.session_id, revision.purpose)
+        with self._lock:
+            self._history.setdefault(key, []).append(revision)
+            self._save_locked()
+
+    def latest(self, session_id: str, purpose: str) -> InfluenceViewRevision | None:
+        purpose_value = _require_choice(purpose, "purpose", PURPOSES)
+        with self._lock:
+            items = self._history.get((session_id, purpose_value), [])
+            if not items:
+                return None
+            return items[-1]
+
+    def history(self, session_id: str, purpose: str) -> list[InfluenceViewRevision]:
+        purpose_value = _require_choice(purpose, "purpose", PURPOSES)
+        with self._lock:
+            return list(self._history.get((session_id, purpose_value), []))
+
+    def revisions_for_purpose(self, purpose: str) -> list[InfluenceViewRevision]:
+        """Every frozen revision for ``purpose``, across sessions.
+
+        Order is ``session_id``, then registration order within that session.
+        This does not apply principal ACL and does not call ``to_dict``.
+        """
+        purpose_value = _require_choice(purpose, "purpose", PURPOSES)
+        with self._lock:
+            found: list[InfluenceViewRevision] = []
+            session_ids = sorted(
+                session_id
+                for session_id, stored_purpose in self._history
+                if stored_purpose == purpose_value
+            )
+            for session_id in session_ids:
+                found.extend(self._history.get((session_id, purpose_value), ()))
+            return found
+
+    def to_dict(self) -> dict[str, Any]:
+        keys: list[dict[str, Any]] = []
+        for (session_id, purpose), revisions in sorted(self._history.items()):
+            keys.append(
+                {
+                    "session_id": session_id,
+                    "purpose": purpose,
+                    "revisions": [revision.to_dict() for revision in revisions],
+                }
+            )
+        return {"version": INDEX_VERSION, "keys": keys}
+
+    def _load(self) -> None:
+        if not self.path.is_file():
+            return
+        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        parsed = _require_mapping(payload, "index")
+        if _is_native_edge_document(parsed):
+            raise ValueError("native-edge document cannot be opened as a claim view index")
+        history: dict[tuple[str, str], list[InfluenceViewRevision]] = {}
+        for entry in parsed.get("keys") or []:
+            item = _require_mapping(entry, "index.keys")
+            session_id = _require_str(item.get("session_id"), "index.session_id")
+            purpose = _require_choice(item.get("purpose"), "index.purpose", PURPOSES)
+            revisions = [
+                InfluenceViewRevision.from_dict(_require_mapping(raw, "revision"))
+                for raw in item.get("revisions") or []
+            ]
+            history[(session_id, purpose)] = revisions
+        self._history = history
+
+    def _save_locked(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        text = json.dumps(self.to_dict(), ensure_ascii=False, indent=2, sort_keys=True)
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary.write_text(text, encoding="utf-8")
+        temporary.replace(self.path)

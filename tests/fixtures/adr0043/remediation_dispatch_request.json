@@ -1,0 +1,21 @@
+{
+  "schema_version": "aig-native-v2",
+  "object_kind": "remediation_dispatch_request",
+  "content_hash": "8dd95fa9c5b4e4b929bfb7e077d807f7e24ccb9187515c45c77d73607dd13819",
+  "body": {
+    "capability_limits": [
+      "replay-sandbox"
+    ],
+    "decision_id": "f72ef844881c1ec2d22d29a2101f7a531619e98a71434842417cb0424326f66f",
+    "guidance_content_hash": "abababababababababababababababababababababababababababababababab",
+    "guidance_id": "guidance-1",
+    "idempotency_key": "remediation-1",
+    "parent_session_id": "sess-parent",
+    "requested_side_effects": [],
+    "selected_agent_id": "agent-a",
+    "source_fork_id": "fork-1",
+    "source_guidance_id": "guidance-1",
+    "target_role": "task_agent",
+    "request_id": "4ccdc8e66d13ee51e3e9100500133d5d31a310f26b49d5436d8cb7fb70e25f86"
+  }
+}

@@ -25,6 +25,13 @@ before using it. Never call a tool that is not registered, and do not fall
 back to raw HTTP. If no OpenViking tools are registered at all, continue
 without memory.
 
+`retrieve_causal_cards` and `expand_causal_neighborhood` are causal-mode
+tools. On a server that has them, they are registered with the rest of the
+MCP tools, but they succeed only when that server's skill trajectory mode is
+causal. While the mode is off, calling either one is an error, not an empty
+result, and that error does not mean the query was searched and found
+nothing. See [references/optional-tools.md](references/optional-tools.md).
+
 ## Recall: at task start
 
 1. Decide whether the request warrants memory. Retrieve for executable or

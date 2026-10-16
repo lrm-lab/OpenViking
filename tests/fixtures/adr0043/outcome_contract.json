@@ -1,0 +1,44 @@
+{
+  "schema_version": "aig-native-v2",
+  "object_kind": "outcome_contract",
+  "content_hash": "e7950f3e439877c6421f8935d8daab06ca3515fddbf2c25e6237cb8f436d7587",
+  "body": {
+    "acceptance_criteria": [
+      {
+        "criterion_id": "crit-error-budget",
+        "statement": "error rate stays under 1%"
+      }
+    ],
+    "contract_id": "contract-task-1",
+    "evaluator_bindings": [
+      {
+        "binding_id": "bind-eval-1",
+        "kind": "evaluator",
+        "ref": "eval://error-budget"
+      },
+      {
+        "binding_id": "bind-test-1",
+        "kind": "test",
+        "ref": "test://rollback-suite"
+      }
+    ],
+    "frozen_at": "2026-10-10T00:00:00.000Z",
+    "goals": [
+      "ship the rollback within the error budget"
+    ],
+    "policy_constraints": [
+      {
+        "constraint_id": "policy-change-window",
+        "kind": "policy",
+        "statement": "changes only inside the window"
+      },
+      {
+        "constraint_id": "sla-latency",
+        "kind": "sla",
+        "statement": "p99 under 200ms"
+      }
+    ],
+    "source": "orchestrator",
+    "task_id": "task-1"
+  }
+}

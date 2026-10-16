@@ -1,0 +1,9 @@
+{
+  "body": {
+    "proposal_content_hash": "893800bd825fcc4991a27506ed99ff3fce19eb1c94896aa4c1be3f9bfa0e81e0",
+    "reason": "guidance_rejected"
+  },
+  "content_hash": "27263e03b6374020ae8b8270d4b7af06d2612d26a45b86598e9e65a434528d6a",
+  "object_kind": "guidance_rejection",
+  "schema_version": "aig-native-v2"
+}

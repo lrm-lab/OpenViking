@@ -311,7 +311,9 @@ class DeletionService:
             if gateway_config is not None and gateway_config.enabled:
                 from openviking.service.gateway_deletion import delete_gateway_data
 
-                await run_to_completion(lambda: delete_gateway_data(gateway_config, account_id, user_id))
+                await run_to_completion(
+                    lambda: delete_gateway_data(gateway_config, account_id, user_id)
+                )
             scheduler = self._service.watch_scheduler
             if scheduler is not None:
                 await run_to_completion(lambda: scheduler.delete_tasks(account_id, user_id))
@@ -340,6 +342,9 @@ class DeletionService:
                     )
                 )
             if user_id is None:
+                lexical = getattr(self._service, "lexical", None)
+                if lexical is not None:
+                    await run_to_completion(lambda: lexical.delete_account(account_id))
                 await run_to_completion(
                     lambda: self._service.release_account_vector_resources(account_id)
                 )

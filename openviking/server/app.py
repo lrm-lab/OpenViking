@@ -38,8 +38,10 @@ from openviking.server.routers import (
     compile_router,
     console_router,
     content_router,
+    coordinator_router,
     debug_router,
     filesystem_router,
+    lexical_memory_router,
     metrics_router,
     observer_router,
     openviking_assets_router,
@@ -605,11 +607,13 @@ def create_app(
     app.include_router(gateway_router)
     app.include_router(agent_evolution_router)
     app.include_router(compile_router)
+    app.include_router(coordinator_router)
     app.include_router(resources_router)
     app.include_router(filesystem_router)
     app.include_router(content_router)
     app.include_router(console_router)
     app.include_router(search_router)
+    app.include_router(lexical_memory_router)
     app.include_router(privacy_configs_router)
     app.include_router(skills_router)
     app.include_router(sessions_router)
@@ -790,9 +794,10 @@ def create_app(
     else:
         logger.info("Web Studio bundle not found at %s; skipping /studio mount", _studio_dir)
 
-    # MCP endpoint — serves 16 tools (find, search, read, write, edit,
-    # list, tree, remember, add_resource, add_skill, list_watches, cancel_watch,
-    # grep, glob, forget, health) via streamable HTTP for MCP clients.
+    # MCP endpoint — serves 18 tools (find, search, retrieve_causal_cards,
+    # expand_causal_neighborhood, read, write, edit, list, tree, remember,
+    # add_resource, add_skill, list_watches, cancel_watch, grep, glob, forget,
+    # health) via streamable HTTP for MCP clients.
     from starlette.routing import Match, Route
 
     from openviking.server.mcp_endpoint import create_mcp_app

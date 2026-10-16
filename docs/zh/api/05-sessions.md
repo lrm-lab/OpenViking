@@ -1744,3 +1744,28 @@ results = client.search(query=query, session_id=session_id)
 - [检索](06-retrieval.md) - 结合会话进行搜索
 - [资源管理](02-resources.md) - 资源管理
 - [后台任务](17-tasks.md) - 跟踪 commit 任务
+
+
+## 显式四角色归因
+
+**POST /api/v1/sessions/{session_id}/diagnosis**
+
+对当前认证用户已保存的会话启动或轮询有预算限制的 Builder/Critic/Refiner/Reader 归因。存储的会话所有者必须与调用者一致，ROOT 也不能绕过此检查。此流程必须显式请求，与普通消息写入分开。
+
+```json
+{"request_id":"diagnose-1","question":"哪个操作解释了观察到的失败？"}
+```
+
+`request_id` 必填，长度为 1–128；`question` 必填，长度为 1–8192；拒绝额外请求字段。使用相同请求 ID 和问题可轮询同一请求。返回标准响应信封，`result` 含请求 ID、状态和证据水位，以及可用的归因结果或失败原因。标识符无效或同一 ID 内容冲突时拒绝请求。
+
+**GET /api/v1/sessions/{session_id}/diagnosis/{request_id}**
+
+读取已持久化的请求状态，不启动新归因。适用相同的会话所有者检查。请求不存在时返回 HTTP 404；运行超时会返回失败状态及 `diagnosis_timeout`。
+
+## 协调器归因门控
+
+**POST /api/v1/coordinator/diagnose**
+
+接收 `coordinator-boundary-v1` 协议信封，`object_kind` 为 `coordinator_diagnose_request`，包含经过校验的 `content_hash` 和 `body`。正文含 `commit_id`、`session_id`、`task_id`、`source_digest`、`principal_labels` 和 `intent: "diagnose"`。ID 必须为安全标识符，来源摘要必须为十六进制摘要。可使用 `openviking.session.coordinator_boundary` 中的 `coordinator_diagnose_request_document` 构造带规范哈希的信封。
+
+请求必须指定唯一的 `user:<id>` 主体，与调用者匹配，且调用者可访问存储的会话所有者。拒绝不支持的版本、无效哈希或意图；主体或会话未授权时拒绝访问。成功响应中的失败门控事件包含决策、原因和编排标识；事件本身不会启动 worker。

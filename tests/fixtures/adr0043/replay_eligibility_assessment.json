@@ -1,0 +1,32 @@
+{
+  "schema_version": "aig-native-v2",
+  "object_kind": "replay_eligibility_assessment",
+  "content_hash": "bcfbb10fb6b8e6d462eb3fb01911426aa08f5a20cc32059816c446cfd05a5e9e",
+  "body": {
+    "anchor_block_id": "blk-action",
+    "anchor_state": "recoverable",
+    "base_revision_id": "rev-aig-frozen-1",
+    "budget": "compliant",
+    "dependencies": "available",
+    "eligibility": "replayable",
+    "evaluator": "bound",
+    "evidence_ref": "evidence:replay-eligibility",
+    "fork_node_id": "fork-overlay-1",
+    "intervention_type": "narrow_retry",
+    "permissions": "sufficient",
+    "reasons": [
+      "controls_recoverable"
+    ],
+    "required_capabilities": [
+      "replay-sandbox"
+    ],
+    "route": "replay",
+    "safety_control_params": {
+      "isolation": "sandbox"
+    },
+    "side_effect_isolation": "isolated",
+    "target_boundary": "blk-action",
+    "assessment_id": "fe5c5ed12532718fd9beafd1f3d4a250fc41ec90b1805809335830030a3c4620",
+    "checked_at": "2026-10-10T00:00:00.000Z"
+  }
+}

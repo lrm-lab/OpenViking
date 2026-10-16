@@ -1,0 +1,15 @@
+{
+  "schema_version": "coordinator-boundary-v1",
+  "object_kind": "coordinator_diagnose_request",
+  "content_hash": "0a6411579d2605aa95c22836b4e15e325e1bfd824cd610223451f9669fcdb53d",
+  "body": {
+    "commit_id": "commit-diagnose-1",
+    "intent": "diagnose",
+    "principal_labels": [
+      "user:carol"
+    ],
+    "session_id": "sess-diagnose",
+    "source_digest": "abababababababababababababababababababababababababababababababab",
+    "task_id": "task-diagnose"
+  }
+}

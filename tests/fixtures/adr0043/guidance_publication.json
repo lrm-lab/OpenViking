@@ -1,0 +1,73 @@
+{
+  "schema_version": "aig-native-v2",
+  "object_kind": "guidance_publication",
+  "content_hash": "7dd7c490404bed5e1ecfcbbe24647abc890c6ada0365ddc34cb23928aef3846b",
+  "body": {
+    "applicability": {
+      "task_decision_type": "applicable",
+      "anchor_state": "partially_applicable",
+      "failure_mode": "applicable",
+      "action_skill_role": "applicable"
+    },
+    "approval_content_hash": "e44834edf32dae25000b9b4410c7d295ed1bc2a16d4c79e801c24ad7d7d84e84",
+    "base_revision_id": "rev-aig-frozen-1",
+    "capability_limits": [
+      "replay-sandbox"
+    ],
+    "decision": "confirmed_failure",
+    "evidence_refs": [
+      {
+        "ao_id": "ao-eval-1",
+        "source_session_id": "sess-1",
+        "source_archive_id": null,
+        "archive_commit_watermark": null,
+        "source_sequence": 4,
+        "source_read_snapshot_watermark": "wm-1",
+        "evidence_role": "hindsight_attribution",
+        "evidence_content_hash": "hash-eval-1",
+        "captured_state": "committed"
+      }
+    ],
+    "guidance_content_hash": "91b38305bb07d19a6f1058689060f4c8799649a2c89bf6bfe01c1a3753d6bea6",
+    "guidance_id": "d916a96c1ed736228cd30a62ef73fa560e325cbe2e19dd830093377e11940dc7",
+    "outcome_evidence": [
+      {
+        "binding_id": "bind-eval-1",
+        "evidence_ref": "evidence:eval-1",
+        "signal": "fail",
+        "signal_kind": "evaluator"
+      }
+    ],
+    "policy_version": "outcome-evidence-v1",
+    "published_at": "2026-10-10T00:00:03.000Z",
+    "publisher_labels": [
+      "user:carol"
+    ],
+    "reason": "external_fail",
+    "report_hash": "cf899129e58b27f8d77082b97e54eb9ee59f99d5fe25843472d5e30a1cc8ec70",
+    "risk": "retry may repeat the failed rollout",
+    "selected_agent_id": "agent-a",
+    "source_fork_id": "fork-overlay-1",
+    "steps": [
+      {
+        "evidence_refs": [
+          {
+            "ao_id": "ao-eval-1",
+            "source_session_id": "sess-1",
+            "source_archive_id": null,
+            "archive_commit_watermark": null,
+            "source_sequence": 4,
+            "source_read_snapshot_watermark": "wm-1",
+            "evidence_role": "hindsight_attribution",
+            "evidence_content_hash": "hash-eval-1",
+            "captured_state": "committed"
+          }
+        ],
+        "imagined_node_id": "img-narrow-retry",
+        "statement": "retry the call with a narrower timeout",
+        "step_id": "step-retry"
+      }
+    ],
+    "target_role": "task_agent"
+  }
+}

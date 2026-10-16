@@ -9,7 +9,7 @@ Provides session management operations: session, sessions, add_message, commit, 
 import asyncio
 from dataclasses import replace
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from openviking.core.namespace import canonical_session_uri
 from openviking.server.config import ToolOutputExternalizationConfig
@@ -49,6 +49,8 @@ logger = get_logger(__name__)
 if TYPE_CHECKING:
     from openviking.config.vlm import VLMResolver
     from openviking.session.compressor_v3 import SessionCompressorV3
+    from openviking.session.extraction_contract import ExtractionProviderFactory
+    from openviking.session.extraction_write import ExtractionProvider
     from openviking.usage_reporter import UsageReporter
 
 
@@ -71,6 +73,9 @@ class SessionService:
         self._default_user_memory_policy: Optional[Dict[str, Any]] = None
         self._default_user_auto_commit_policy: Optional[Dict[str, Any]] = None
         self._usage_reporter: Optional["UsageReporter"] = None
+        self._extraction_provider: Optional["ExtractionProvider"] = None
+        self._extraction_provider_factory: Optional["ExtractionProviderFactory"] = None
+        self._diagnosis_sink: Optional[Callable[..., None]] = None
         # Server-wide controls remain disabled until configured during app setup.
         self._session_auto_commit_config = SessionAutoCommitConfig()
         # Per-worker in-flight guard so bursts don't spawn duplicate commit
@@ -98,6 +103,33 @@ class SessionService:
     ) -> None:
         """Set tool output externalization controls for newly created sessions."""
         self._tool_output_externalization_config = config.model_copy(deep=True)
+
+    def set_extraction_provider(self, provider: Optional["ExtractionProvider"]) -> None:
+        """Set the Phase 2 extraction provider for newly created sessions.
+
+        ``None`` leaves Phase 2 on the Phase 1 fallback revision. This is not
+        read from config.
+        """
+        self._extraction_provider = provider
+
+    def set_extraction_provider_factory(
+        self, factory: Optional["ExtractionProviderFactory"]
+    ) -> None:
+        """Set the Phase 2 extraction provider factory for newly created sessions.
+
+        The factory receives the commit snapshot and returns an
+        ``ExtractionProvider``. ``None`` leaves the factory unset. This is not
+        read from config.
+        """
+        self._extraction_provider_factory = factory
+
+    def set_diagnosis_sink(self, sink: Optional[Callable[..., None]]) -> None:
+        """Set the post-extraction diagnosis callback for newly created sessions.
+
+        ``None`` does not read failure briefs. This is not read from config
+        and is not an agent tool.
+        """
+        self._diagnosis_sink = sink
 
     def set_default_user_memory_policy(self, memory_policy: Optional[Dict[str, Any]]) -> None:
         """Set the server fallback used when a User has no persisted policy."""
@@ -218,6 +250,9 @@ class SessionService:
             memory_policy_provider=lambda: self._get_user_memory_policy(ctx),
             usage_reporter=self._usage_reporter,
             vlm_resolver=self._vlm_resolver,
+            extraction_provider=self._extraction_provider,
+            extraction_provider_factory=self._extraction_provider_factory,
+            diagnosis_sink=self._diagnosis_sink,
         )
 
     async def _get_user_memory_policy(self, ctx: RequestContext) -> Optional[Dict[str, Any]]:
@@ -235,6 +270,7 @@ class SessionService:
         auto_commit_policy: Optional[Dict[str, Any]] = None,
         update_auto_commit_policy: bool = False,
         event_tags: Optional[List[str]] = None,
+        skill_trajectory_mode: Optional[str] = None,
     ) -> Session:
         """Create a session and persist its root path.
 
@@ -259,6 +295,10 @@ class SessionService:
                 if await existing.exists():
                     raise AlreadyExistsError(f"Session '{session_id}' already exists")
             session = self.session(ctx, session_id)
+            if skill_trajectory_mode is not None:
+                if skill_trajectory_mode not in {"legacy", "causal"}:
+                    raise ValueError("skill_trajectory_mode must be legacy or causal")
+                session.meta.skill_trajectory_mode = skill_trajectory_mode
             if memory_policy is not None:
                 policy = MemoryPolicy.from_dict(memory_policy)
                 policy.validate_memory_types(
@@ -379,6 +419,8 @@ class SessionService:
         min_raw_tail_steps: Optional[int] = None,
         event_tags: Optional[List[str]] = None,
         reset_context: bool = False,
+        outcome_evaluator_results: Optional[List[Dict[str, Any]]] = None,
+        aig_question: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Commit a session (archive messages and extract memories).
 
@@ -402,6 +444,8 @@ class SessionService:
             min_raw_tail_steps=min_raw_tail_steps,
             event_tags=event_tags,
             reset_context=reset_context,
+            outcome_evaluator_results=outcome_evaluator_results,
+            aig_question=aig_question,
         )
 
     async def commit_async(
@@ -417,6 +461,8 @@ class SessionService:
         min_raw_tail_steps: Optional[int] = None,
         event_tags: Optional[List[str]] = None,
         reset_context: bool = False,
+        outcome_evaluator_results: Optional[List[Dict[str, Any]]] = None,
+        aig_question: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Async commit a session.
 
@@ -449,6 +495,10 @@ class SessionService:
             commit_kwargs["event_tags"] = event_tags
         if reset_context:
             commit_kwargs["reset_context"] = True
+        if outcome_evaluator_results is not None:
+            commit_kwargs["outcome_evaluator_results"] = outcome_evaluator_results
+        if aig_question is not None:
+            commit_kwargs["aig_question"] = aig_question
         result = await session.commit_async(**commit_kwargs)
         self._record_lifecycle_metric("commit", "ok" if result.get("status") else "error")
         self._record_archive_metric("ok" if result.get("archived") else "skip")

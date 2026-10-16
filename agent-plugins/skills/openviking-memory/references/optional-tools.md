@@ -12,6 +12,7 @@ Availability summary:
 | `tree` | ≥ 0.4.14 | after the cloud rolls to 0.4.14 |
 | `write`, `edit` | ≥ 0.4.14 | after the cloud rolls to 0.4.14 |
 | `list_watches`, `cancel_watch` | ≥ 0.3.18, self-hosted / private | not exposed |
+| `retrieve_causal_cards`, `expand_causal_neighborhood` | server skill trajectory mode is causal | only when that deployment enables causal mode |
 
 The managed cloud runs stateless multi-instance serving, so account-level
 stateful tools (`list_watches`, `cancel_watch`) are trimmed there even when
@@ -47,3 +48,16 @@ interval (private / self-hosted deployments only). `list_watches` shows the
 account's active subscriptions; `cancel_watch` stops one by its target URI.
 Only touch watches the user asked about — cancelling someone's subscription is
 destructive.
+
+## `retrieve_causal_cards(query, session_id, limit?)` and `expand_causal_neighborhood(card_id, session_id)`
+
+Causal-memory reads for one session. They are present in the registered tool
+list on servers that include them, and they run only while that server's
+skill trajectory mode is causal. If the mode is off, the call errors. That
+error is not an empty hit list and is not evidence that nothing matched.
+
+- `retrieve_causal_cards` returns causal-memory cards for `session_id`. The
+  server chooses the retrieval profile. `limit`, when passed, only shortens
+  the returned card list.
+- `expand_causal_neighborhood` walks the influence neighborhood of one claim
+  card id taken from `retrieve_causal_cards`. It does not write anything.

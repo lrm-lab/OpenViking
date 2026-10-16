@@ -1,0 +1,25 @@
+{
+  "body": {
+    "candidates": [
+      {
+        "acl_labels": [
+          "user:carol"
+        ],
+        "agent_id": "agent-a",
+        "available": true,
+        "capabilities": [
+          "replay-sandbox",
+          "rollback"
+        ],
+        "roles": [
+          "task_agent"
+        ],
+        "task_member": true
+      }
+    ],
+    "task_id": "task-1"
+  },
+  "content_hash": "6901aa89c13c3fbf6a4cad2ae7728a954ee0d12be6c63d445aaaca5bdc9192b6",
+  "object_kind": "agent_candidate_catalog",
+  "schema_version": "aig-native-v2"
+}

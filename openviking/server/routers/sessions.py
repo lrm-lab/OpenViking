@@ -25,6 +25,70 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 logger = get_logger(__name__)
 
 
+class ExplicitDiagnosisRequest(BaseModel):
+    request_id: str = Field(min_length=1, max_length=128)
+    question: str = Field(min_length=1, max_length=8192)
+
+    model_config = {"extra": "forbid"}
+
+
+async def _diagnosis_session(session_id: str, ctx: RequestContext):
+    from openviking.session.aig_native_protocol import is_safe_id
+    from openviking.session.session_acl import session_stored_owner_label
+    from openviking_cli.exceptions import OpenVikingError
+
+    if not is_safe_id(session_id) or len(session_id) > 128:
+        raise HTTPException(status_code=400, detail="invalid_diagnosis_session_id")
+    session = get_service().sessions.session(ctx, session_id)
+    await session.load()
+    try:
+        owner = session_stored_owner_label(session)
+    except ValueError:
+        owner = None
+    if owner != f"user:{ctx.user.user_id}":
+        raise OpenVikingError("target session is not visible", code="PERMISSION_DENIED")
+    return session
+
+
+@router.get("/{session_id}/diagnosis/{request_id}")
+async def explicit_session_diagnosis_status(
+    session_id: str,
+    request_id: str,
+    ctx: RequestContext = Depends(get_session_request_context),
+):
+    from openviking.session.explicit_diagnosis import read_diagnosis
+
+    session = await _diagnosis_session(session_id, ctx)
+    try:
+        result = read_diagnosis(session, request_id)
+    except ValueError as exc:
+        from openviking_cli.exceptions import InvalidArgumentError
+
+        raise InvalidArgumentError(str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="diagnosis_not_found")
+    return Response(status="ok", result=result).model_dump(exclude_none=True)
+
+
+@router.post("/{session_id}/diagnosis")
+async def explicit_session_diagnosis(
+    session_id: str,
+    body: ExplicitDiagnosisRequest,
+    ctx: RequestContext = Depends(get_session_request_context),
+):
+    """Start or poll a bounded four-role diagnosis of this caller's session."""
+    from openviking.session.explicit_diagnosis import request_diagnosis
+
+    session = await _diagnosis_session(session_id, ctx)
+    try:
+        result = await request_diagnosis(session, body.request_id, body.question)
+    except ValueError as exc:
+        from openviking_cli.exceptions import InvalidArgumentError
+
+        raise InvalidArgumentError(str(exc)) from exc
+    return Response(status="ok", result=result).model_dump(exclude_none=True)
+
+
 class TextPartRequest(BaseModel):
     """Text part request model."""
 
@@ -171,6 +235,7 @@ class CreateSessionRequest(BaseModel):
 
     session_id: Optional[str] = None
     memory_policy: Optional[Dict[str, Any]] = None
+    skill_trajectory_mode: Optional[Literal["legacy", "causal"]] = None
     auto_commit_policy: Optional[AutoCommitPolicyRequest] = None
     memory_extraction_config: Optional[MemoryExtractionConfigRequest] = None
     telemetry: TelemetryRequest = False
@@ -314,6 +379,7 @@ async def create_session(
             _ctx,
             request.session_id,
             memory_policy=request.memory_policy,
+            skill_trajectory_mode=request.skill_trajectory_mode,
             auto_commit_policy=auto_commit_policy_payload,
             update_auto_commit_policy=update_auto_commit_policy,
             event_tags=event_tags,
@@ -638,6 +704,14 @@ class CommitRequest(BaseModel):
         ),
     )
     telemetry: TelemetryRequest = False
+    outcome_evaluator_results: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Explicit evaluator results for post-commit failure attribution.",
+    )
+    aig_question: Optional[str] = Field(
+        default=None,
+        description="Task question for four-role AIG construction.",
+    )
 
     @model_validator(mode="after")
     def validate_turn_retention_opt_in(self) -> "CommitRequest":
@@ -686,6 +760,10 @@ async def commit_session(
     event_tags = _commit_event_tags(body.extraction_metadata)
     if event_tags is not None:
         commit_kwargs["event_tags"] = event_tags
+    if body.outcome_evaluator_results is not None:
+        commit_kwargs["outcome_evaluator_results"] = body.outcome_evaluator_results
+    if body.aig_question is not None:
+        commit_kwargs["aig_question"] = body.aig_question
     execution = await run_operation(
         operation="session.commit",
         telemetry=body.telemetry,

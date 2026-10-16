@@ -1746,3 +1746,28 @@ results = client.search(query=query, session_id=session_id)
 - [Retrieval](06-retrieval.md) - Search with session
 - [Resources](02-resources.md) - Resource management
 - [Background Tasks](17-tasks.md) - track commit tasks
+
+
+## Explicit four-role diagnosis
+
+**POST /api/v1/sessions/{session_id}/diagnosis**
+
+Start or poll a bounded Builder/Critic/Refiner/Reader diagnosis of the authenticated user's stored session. The stored owner must match the caller; ROOT does not bypass this ownership check. This is an explicit request, separate from ordinary message ingestion.
+
+```json
+{"request_id":"diagnose-1","question":"Which action explains the observed failure?"}
+```
+
+`request_id` is required (1–128 characters), and `question` is required (1–8192 characters); extra body fields are refused. Reuse the same request ID and question to poll the same request. The server returns the standard response envelope; `result` includes the request ID, status and evidence watermark, plus the available diagnosis result or failure reason. Missing/invalid identifiers and conflicting reuse are refused.
+
+**GET /api/v1/sessions/{session_id}/diagnosis/{request_id}**
+
+Read the persisted request state without starting a new diagnosis. The same session-owner check applies. An unknown request returns HTTP 404; expired running work is reported as failed with `diagnosis_timeout`.
+
+## Coordinator diagnosis gate
+
+**POST /api/v1/coordinator/diagnose**
+
+Accepts a `coordinator-boundary-v1` protocol envelope with `object_kind: "coordinator_diagnose_request"`, a verified `content_hash`, and a `body`. The body contains `commit_id`, `session_id`, `task_id`, `source_digest`, `principal_labels` and `intent: "diagnose"`. IDs must be safe identifiers; the source digest is a hexadecimal digest. Construct the envelope with `coordinator_diagnose_request_document` from `openviking.session.coordinator_boundary` so its canonical hash matches the contract.
+
+The request must name exactly one `user:<id>` principal, that principal must match the caller, and the stored session owner must be visible. Unsupported schema, invalid hash or intent is refused; an unauthorized principal/session is denied. A successful response wraps a failure-gate event with decision, reason and orchestration identity. The event itself does not start a worker.

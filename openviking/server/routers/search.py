@@ -126,6 +126,7 @@ class FindRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    retrieval_mode: Literal["semantic", "bm25"] = "semantic"
     query: str = ""
     image_url: Optional[str] = None
     target_uri: Union[str, List[str]] = ""
@@ -375,6 +376,41 @@ async def find(
     """Semantic search without session context."""
     service = get_service()
     actual_limit = _resolve_search_limit(request.limit, request.node_limit)
+    if request.retrieval_mode == "bm25":
+        if any(
+            (
+                request.image_url,
+                request.filter,
+                request.context_type,
+                request.tags,
+                request.level,
+                request.since,
+                request.until,
+                request.time_field,
+                request.score_threshold is not None,
+                request.include_provenance,
+                request.read_content,
+                request.telemetry,
+            )
+        ):
+            raise InvalidArgumentError(
+                "BM25 find accepts text, a resource scope, and a result limit"
+            )
+        if not isinstance(request.target_uri, str):
+            raise InvalidArgumentError("BM25 find requires one target URI")
+        target = (
+            _resolve_uri_or_uris(request.target_uri, _ctx)
+            if request.target_uri
+            else "viking://resources"
+        )
+        try:
+            result = await service.lexical.find(
+                request.query, _ctx, target_uri=target, limit=actual_limit
+            )
+        except ValueError as exc:
+            raise InvalidArgumentError(str(exc)) from exc
+        return Response(status="ok", result=result).model_dump(exclude_none=True)
+
     effective_filter = _resolve_search_filter(
         request.filter,
         request.context_type,

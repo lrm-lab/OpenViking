@@ -1,0 +1,12 @@
+{
+  "schema_version": "aig-native-v2",
+  "object_kind": "remediation_dispatch_confirmation",
+  "content_hash": "1cf2b81e198a60a8643a2994a88344d18d1202c9744ca91e0785285dea79eb50",
+  "body": {
+    "child_run_id": "child-run-1",
+    "executor": "scripted",
+    "request_id": "4ccdc8e66d13ee51e3e9100500133d5d31a310f26b49d5436d8cb7fb70e25f86",
+    "status": "accepted",
+    "confirmation_id": "759fd6367efa27efa29213e002d54ccb3a912b2ef6624619b8e0792b6f0ac8af"
+  }
+}

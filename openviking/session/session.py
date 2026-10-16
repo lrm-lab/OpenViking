@@ -22,6 +22,10 @@ from openviking.message.part import TextPart, ToolPart
 from openviking.server.config import ToolOutputExternalizationConfig
 from openviking.server.identity import RequestContext, Role
 from openviking.session import working_memory as wm
+from openviking.session.ao_ledger_recorder import (
+    maybe_record_session_tool_exchanges,
+    maybe_write_session_archive_attribution,
+)
 from openviking.session.archive_store import (
     ArchiveStore,
     _ArchiveMessagesCorruptError,
@@ -56,6 +60,7 @@ from openviking.session.retention import (
     plan_retention,
 )
 from openviking.session.tool_output_externalizer import ToolOutputExternalizer
+from openviking.session.trajectory_index_hook import maybe_index_session_trajectory
 from openviking.session.working_memory import (
     WM_CREATE_WITH_CHECKPOINTS_TOOL,
     WM_SEVEN_SECTIONS,
@@ -77,6 +82,8 @@ from openviking_cli.utils.config import get_openviking_config
 if TYPE_CHECKING:
     from openviking.config.vlm import VLMResolver
     from openviking.session.compressor_v3 import SessionCompressorV3 as SessionCompressor
+    from openviking.session.extraction_contract import ExtractionProviderFactory
+    from openviking.session.extraction_write import ExtractionProvider
     from openviking.storage import VikingDBManager
     from openviking.storage.queuefs.session_commit_msg import SessionCommitMsg
     from openviking.storage.viking_fs import VikingFS
@@ -311,6 +318,7 @@ class SessionMeta:
     retained_message_token_budget: int = 0
     min_raw_tail_steps: int = 1
     memory_policy: Optional[Dict[str, Any]] = None
+    skill_trajectory_mode: Optional[str] = None
     # Automatic-commit policy. None keeps auto-commit disabled; a dict enables
     # it with the stored bounds. Session config PATCH may update it.
     auto_commit_policy: Optional[Dict[str, Any]] = None
@@ -345,6 +353,7 @@ class SessionMeta:
             "retained_message_token_budget": self.retained_message_token_budget,
             "min_raw_tail_steps": self.min_raw_tail_steps,
             "memory_policy": dict(self.memory_policy) if self.memory_policy is not None else None,
+            "skill_trajectory_mode": self.skill_trajectory_mode,
             "auto_commit_policy": (
                 dict(self.auto_commit_policy) if self.auto_commit_policy is not None else None
             ),
@@ -401,6 +410,7 @@ class SessionMeta:
             ),
             min_raw_tail_steps=max(0, int(data.get("min_raw_tail_steps", 1) or 0)),
             memory_policy=data.get("memory_policy"),
+            skill_trajectory_mode=data.get("skill_trajectory_mode"),
             auto_commit_policy=data.get("auto_commit_policy"),
             last_message_at=data.get("last_message_at", ""),
             last_auto_commit_at=data.get("last_auto_commit_at", ""),
@@ -427,6 +437,10 @@ class Session:
         agent_evolution_enabled_provider: Optional[Callable[[], bool | Awaitable[bool]]] = None,
         memory_policy_provider: Optional[MemoryPolicyProvider] = None,
         vlm_resolver: Optional["VLMResolver"] = None,
+        *,
+        extraction_provider: Optional["ExtractionProvider"] = None,
+        extraction_provider_factory: Optional["ExtractionProviderFactory"] = None,
+        diagnosis_sink: Optional[Callable[..., None]] = None,
     ):
         self._viking_fs = viking_fs
         self._vikingdb_manager = vikingdb_manager
@@ -466,6 +480,11 @@ class Session:
         self._memory_policy_provider = memory_policy_provider
         self._usage_reporter = usage_reporter
         self._vlm_resolver = vlm_resolver
+        self._extraction_provider = extraction_provider
+        self._extraction_provider_factory = extraction_provider_factory
+        self._diagnosis_sink = diagnosis_sink
+        self.outcome_evaluator_results: List[Dict[str, Any]] = []
+        self.aig_question: str = ""
 
     async def _get_vlm_config(self):
         if self._vlm_resolver is None:
@@ -872,6 +891,7 @@ class Session:
             )
             messages.extend(group)
         await self._append_messages_authoritatively(messages)
+        maybe_record_session_tool_exchanges(self, messages)
         return messages
 
     def add_message(
@@ -1257,6 +1277,8 @@ class Session:
         record_auto_commit_success: bool = False,
         event_tags: Optional[List[str]] = None,
         reset_context: bool = False,
+        outcome_evaluator_results: Optional[List[Dict[str, Any]]] = None,
+        aig_question: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Archive immediately and enqueue restart-safe Phase 2 processing.
 
@@ -1294,6 +1316,14 @@ class Session:
         from openviking.storage.queuefs import QueueManager, get_queue_manager
         from openviking.storage.queuefs.session_commit_msg import SessionCommitMsg
 
+        if outcome_evaluator_results is not None:
+            from openviking.session.outcome_contract import external_evidence_from_session
+
+            external_evidence_from_session(evaluator_results=outcome_evaluator_results)
+        if aig_question is not None and (
+            not isinstance(aig_question, str) or not aig_question.strip()
+        ):
+            raise ValueError("aig_question must be a non-empty string")
         if reset_context and (keep_recent_count != 0 or retention_mode is not None):
             raise ValueError("reset_context requires keep_recent_count=0 and no retention_mode")
         trace_id = tracer.get_trace_id()
@@ -1534,6 +1564,8 @@ class Session:
                 record_auto_commit_success=record_auto_commit_success,
                 event_search_tags=list(effective_event_tags),
                 auto_commit_policy=dict(self._meta.auto_commit_policy or {}),
+                outcome_evaluator_results=list(outcome_evaluator_results or []),
+                aig_question=aig_question or "",
             )
             phase1_stage = "phase1_persist"
             try:
@@ -1569,6 +1601,8 @@ class Session:
                 for result in archive_persist_results:
                     if isinstance(result, BaseException):
                         raise result
+                maybe_write_session_archive_attribution(self, archive_uri)
+                maybe_index_session_trajectory(self, task_id)
                 if retention_plan is not None:
                     await self._merge_archive_meta(
                         archive_uri,
@@ -1824,6 +1858,8 @@ class Session:
         if user_config_error is not None:
             user_config_error = str(user_config_error)
 
+        self.outcome_evaluator_results = list(msg.outcome_evaluator_results or [])
+        self.aig_question = msg.aig_question or ""
         await self._run_memory_extraction(
             task_id=msg.task_id,
             archive_uri=msg.archive_uri,
@@ -1950,6 +1986,47 @@ class Session:
         if skills:
             return {"contexts": contexts, "session_skills": skills}
         return contexts
+
+    def _run_post_extraction_causal_seam(self, task_id: str, archive_uri: str = "") -> None:
+        """Phase 2 trajectory index, failure gate, and optional diagnosis.
+
+        No provider and no provider factory means the index hook is not
+        called: Phase 1 already froze the fallback revision, and another
+        provider-less build would spend the trajectory-index budget without
+        changing that view. The failure gate runs after that index so a
+        frozen native revision is on disk. No sink means briefs are not
+        read. Failures are logged; Phase 2 still writes ``.done``.
+        """
+        try:
+            provider = self._extraction_provider
+            factory = self._extraction_provider_factory
+            if provider is not None or factory is not None:
+                maybe_index_session_trajectory(
+                    self,
+                    task_id,
+                    extraction_provider=provider,
+                    extraction_provider_factory=factory,
+                )
+            from openviking.session.failure_gate_wiring import (
+                commit_id_for_archive,
+                maybe_deliver_commit_failure_gate,
+            )
+
+            maybe_deliver_commit_failure_gate(
+                self,
+                task_id=task_id,
+                commit_id=commit_id_for_archive(archive_uri, task_id),
+            )
+            sink = self._diagnosis_sink
+            if sink is None:
+                return
+            from openviking.session.diagnosis_wiring import post_extraction_diagnosis_briefs
+
+            briefs = post_extraction_diagnosis_briefs(self)
+            if briefs:
+                sink(briefs)
+        except Exception:
+            logger.warning("post-extraction causal seam failed", exc_info=True)
 
     @tracer("session.commit.phase2", ignore_result=True, ignore_args=True)
     async def _run_memory_extraction(
@@ -2198,7 +2275,10 @@ class Session:
                         and (long_term_memory_types is None or bool(long_term_memory_types))
                         and bool(long_term_messages)
                     )
-                    if enable_working_memory or (self._session_compressor and long_term_has_work):
+                    post_commit_extraction_ran = bool(
+                        enable_working_memory or (self._session_compressor and long_term_has_work)
+                    )
+                    if post_commit_extraction_ran:
                         logger.info(
                             "Starting post-commit extraction from %s archived messages",
                             len(messages),
@@ -2316,6 +2396,45 @@ class Session:
                                 "(disabled by config or memory_policy)"
                             )
                         await _run_archive_summary()
+
+                    aig_vlm = None
+                    if (
+                        self._vlm_resolver is not None
+                        and self._extraction_provider is None
+                        and self._extraction_provider_factory is None
+                    ):
+                        try:
+                            from openviking.session.causal_mode import is_session_causal
+
+                            if is_session_causal(self):
+                                aig_vlm = await self._get_vlm_config()
+                        except Exception:
+                            logger.warning("commit AIG model resolution failed", exc_info=True)
+                    if aig_vlm is not None:
+                        try:
+                            from openviking.session.aig_commit_wiring import run_commit_four_roles
+
+                            result = await asyncio.to_thread(
+                                run_commit_four_roles,
+                                self,
+                                task_id,
+                                aig_vlm,
+                            )
+                            logger.info(
+                                "commit four-role AIG %s for %s: %s",
+                                result.status,
+                                task_id,
+                                result.reason,
+                            )
+                        except Exception:
+                            logger.warning("commit four-role AIG failed", exc_info=True)
+                    if (
+                        post_commit_extraction_ran
+                        or self._extraction_provider is not None
+                        or self._extraction_provider_factory is not None
+                        or aig_vlm is not None
+                    ):
+                        self._run_post_extraction_causal_seam(task_id, archive_uri)
 
                     # A recovered Phase 2 run may have already completed the
                     # long-term step before a sibling step failed. Reuse its

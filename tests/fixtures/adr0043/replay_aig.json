@@ -1,0 +1,85 @@
+{
+  "schema_version": "aig-native-v2",
+  "object_kind": "replay_aig",
+  "content_hash": "7625f9250b790656558e8c1aeda12a81068ece2a8ec65df281b8000d58f34c9d",
+  "body": {
+    "base_revision_id": "rev-aig-frozen-1",
+    "native_revision": {
+      "schema_version": "aig-native-v2",
+      "object_kind": "native_edge_revision",
+      "content_hash": "168a81f28fa99030a748532e60d4307e53a634943f4cb611461bb2e7ad2a63e9",
+      "body": {
+        "revision_id": "replay-rev:5907f26a239d0a9355e5612c9ff675a8edaa8a58b320c5a7348aec6cb83a2425",
+        "view_id": "replay-view:run-golden",
+        "purpose": "post_run_index",
+        "session_id": "replay-session:run-golden",
+        "task_run_id": "replay-run:run-golden",
+        "blocks": [
+          {
+            "block_id": "blk-replay-action",
+            "role": "agent_action",
+            "participant_id": "agent-a",
+            "segment_ref": {
+              "segment_id": "seg-replay",
+              "session_id": "replay-session:run-golden"
+            },
+            "ao_start_seq": 1,
+            "ao_end_seq": 1,
+            "summary": "blk-replay-action",
+            "input": "in",
+            "output": "out",
+            "authorship": "agent-a",
+            "granularity_reason": "one replay tool call",
+            "source_content_hashes": [
+              "hash-blk-replay-action"
+            ],
+            "source_refs": [
+              {
+                "ao_id": "ao-blk-replay-action",
+                "sequence": 1,
+                "participant_id": "agent-a",
+                "segment_id": "seg-replay",
+                "session_id": "replay-session:run-golden",
+                "content_hash": "hash-blk-replay-action"
+              }
+            ],
+            "block_kind": "tool_call"
+          }
+        ],
+        "edges": [],
+        "coverage": {
+          "total_ao_range": {
+            "start_seq": 1,
+            "end_seq": 1,
+            "segment_id": null
+          },
+          "inspected_refs": [
+            {
+              "ao_id": "ao-blk-replay-action",
+              "sequence": 1,
+              "participant_id": "agent-a",
+              "segment_id": "seg-replay",
+              "session_id": "replay-session:run-golden",
+              "content_hash": "hash-blk-replay-action"
+            }
+          ],
+          "included_ranges": [
+            {
+              "start_seq": 1,
+              "end_seq": 1,
+              "segment_id": "seg-replay"
+            }
+          ],
+          "omitted_ranges": [],
+          "snapshot_watermark": "wm-replay-golden"
+        },
+        "construction_mode": "adaptive",
+        "frozen_at": "2026-10-10T00:00:00.000Z"
+      }
+    },
+    "provenance": "replay",
+    "replay_run_id": "run-golden",
+    "revision_id": "replay-rev:5907f26a239d0a9355e5612c9ff675a8edaa8a58b320c5a7348aec6cb83a2425",
+    "source_fork_id": "fork-overlay-1"
+  }
+}

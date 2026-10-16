@@ -1,0 +1,56 @@
+{
+  "schema_version": "aig-native-v2",
+  "object_kind": "direct_evidence_admission",
+  "content_hash": "21fd3c830c7a29d2d01bef1275ca94c90d34ffdf3b7fbb01cc0fbb20f4831792",
+  "body": {
+    "actual_block_id": "blk-replay-action",
+    "alignment": "equivalent",
+    "alignment_content_hash": "543941453bc3296f093275c2d4c5fc7f59566d5a48bfab6a092c17fa243fd8e5",
+    "base_revision_id": "rev-aig-frozen-1",
+    "branch_imagined_ids": [
+      "img-narrow-retry"
+    ],
+    "depth": "prefix",
+    "equivalence_explanation": null,
+    "expected_intervention_type": "narrow_retry",
+    "expected_required_capabilities": [
+      "replay-sandbox"
+    ],
+    "expected_safety_control_params": {
+      "isolation": "sandbox"
+    },
+    "expected_target_boundary": "blk-action",
+    "first_imagined_node": true,
+    "fork_node_id": "fork-overlay-1",
+    "imagined_node_id": "img-narrow-retry",
+    "intervention_type": "narrow_retry",
+    "replay_block_ids": [
+      "blk-replay-action"
+    ],
+    "replay_revision_id": "replay-rev:5907f26a239d0a9355e5612c9ff675a8edaa8a58b320c5a7348aec6cb83a2425",
+    "replay_run_id": "run-golden",
+    "required_capabilities": [
+      "replay-sandbox"
+    ],
+    "route": "replay",
+    "safety_control_params": {
+      "isolation": "sandbox"
+    },
+    "step_alignments": [
+      {
+        "actual_block_id": "blk-replay-action",
+        "alignment": "equivalent",
+        "imagined_node_id": "img-narrow-retry"
+      }
+    ],
+    "target_boundary": "blk-action",
+    "admission_id": "6f4a97b8945b88127e618ffb67eac69326c110f0bf62ff5260c4aca028341e9b",
+    "evidence_tier": "replay-direct",
+    "first_action_direct": true,
+    "outcome_direct": true,
+    "reasons": [
+      "first_action_direct",
+      "outcome_aligned"
+    ]
+  }
+}
