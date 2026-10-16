@@ -1233,3 +1233,10 @@ results = client.search(
 - [资源](02-resources.md) - 资源管理
 - [会话](05-sessions.md) - 会话上下文
 - [上下文层级](../concepts/03-context-layers.md) - L0/L1/L2
+
+
+## 词法索引状态
+
+**GET /api/v1/search/index_lexical**
+
+仅限 ROOT 或 ADMIN，无需请求体或查询参数。返回标准 `status`/`result` 信封，结果含 `retrieval_mode: "bm25"` 和当前认证账号的索引计数。此接口只读取索引元数据，不调用 embedding 或语言模型。

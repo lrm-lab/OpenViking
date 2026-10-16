@@ -1269,3 +1269,10 @@ results = client.search(
 - [Resources](02-resources.md) - Resource management
 - [Sessions](05-sessions.md) - Session context
 - [Context Layers](../concepts/03-context-layers.md) - L0/L1/L2
+
+
+## Lexical index status
+
+**GET /api/v1/search/index_lexical**
+
+Requires ROOT or ADMIN. No request body or query parameters are needed. Returns the standard `status`/`result` envelope with `retrieval_mode: "bm25"` and index counts for the authenticated account. It reads index metadata; it does not invoke an embedding service or a language model.

@@ -421,6 +421,9 @@ JSON 输出 - 错误：
 | GET | `/api/v1/sessions/{session_id}/archives/{archive_id}` | 获取会话归档 |
 | DELETE | `/api/v1/sessions/{session_id}` | 删除会话 |
 | POST | `/api/v1/sessions/{session_id}/commit` | 归档会话并提取记忆 |
+| POST | `/api/v1/sessions/{session_id}/diagnosis` | 启动或轮询显式四角色归因 |
+| GET | `/api/v1/sessions/{session_id}/diagnosis/{request_id}` | 读取归因请求状态 |
+| POST | `/api/v1/coordinator/diagnose` | 校验协调器归因门控请求 |
 | POST | `/api/v1/sessions/{session_id}/extract` | 提取记忆 |
 | POST | `/api/v1/sessions/{session_id}/messages` | 添加单条消息 |
 | POST | `/api/v1/sessions/{session_id}/messages/batch` | 批量添加消息 |
@@ -434,6 +437,10 @@ JSON 输出 - 错误：
 |------|------|------|
 | POST | `/api/v1/search/find` | 语义搜索 |
 | POST | `/api/v1/search/search` | 上下文感知搜索；`mode="context"` 返回可注入的组装上下文 |
+| POST | `/api/v1/search/index_lexical` | 为共享资源建立 BM25 索引 |
+| GET | `/api/v1/search/index_lexical` | 读取账号词法索引计数 |
+| POST | `/api/v1/search/expand` | 沿已返回的因果链展开 |
+| POST | `/api/v1/search/publish_causal` | 发布获授权的冻结因果图摘要 |
 | POST | `/api/v1/search/grep` | 内容模式搜索 |
 | POST | `/api/v1/search/glob` | 文件模式匹配 |
 

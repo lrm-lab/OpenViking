@@ -426,6 +426,9 @@ This catalog follows the routes actually mounted by the server. Each group headi
 | GET | `/api/v1/sessions/{session_id}/archives/{archive_id}` | Get a session archive |
 | DELETE | `/api/v1/sessions/{session_id}` | Delete a session |
 | POST | `/api/v1/sessions/{session_id}/commit` | Archive a session and extract memory |
+| POST | `/api/v1/sessions/{session_id}/diagnosis` | Start or poll explicit four-role diagnosis |
+| GET | `/api/v1/sessions/{session_id}/diagnosis/{request_id}` | Read diagnosis status |
+| POST | `/api/v1/coordinator/diagnose` | Validate a coordinator diagnosis gate request |
 | POST | `/api/v1/sessions/{session_id}/extract` | Extract memory |
 | POST | `/api/v1/sessions/{session_id}/messages` | Add one message |
 | POST | `/api/v1/sessions/{session_id}/messages/batch` | Add messages in a batch |
@@ -439,6 +442,10 @@ This catalog follows the routes actually mounted by the server. Each group headi
 |--------|------|-------------|
 | POST | `/api/v1/search/find` | Semantic search |
 | POST | `/api/v1/search/search` | Context-aware search; `mode="context"` returns assembled, injection-ready context |
+| POST | `/api/v1/search/index_lexical` | Index shared resources for BM25 |
+| GET | `/api/v1/search/index_lexical` | Read account lexical index counts |
+| POST | `/api/v1/search/expand` | Expand a served causal graph chain |
+| POST | `/api/v1/search/publish_causal` | Publish authorized frozen causal summaries |
 | POST | `/api/v1/search/grep` | Content pattern search |
 | POST | `/api/v1/search/glob` | File pattern matching |
 
