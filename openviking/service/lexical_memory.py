@@ -6,12 +6,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from openviking.session.bm25 import tokenize
+
+_QUOTED_SEGMENT = re.compile(r'"([^"]*)"')
+# Bounded excerpt search: per-term position cap and candidate-window cap keep the
+# scan linear even for pathological documents or queries.
+_EXCERPT_TERM_POSITION_CAP = 50
+_EXCERPT_QUERY_TERMS_CAP = 12
+_EXCERPT_WINDOW = 1600
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -32,6 +40,36 @@ END;
 CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), generation INTEGER NOT NULL);
 INSERT OR IGNORE INTO state VALUES(1,0);
 """
+
+
+def _match_expressions(query: str) -> tuple[str | None, str | None]:
+    """Build (strict, relaxed) FTS5 MATCH expressions from one query string.
+
+    Quoted segments carry adjacency intent: a multi-word segment becomes an
+    FTS5 phrase clause and is required; a single quoted word is required as a
+    plain token. Unquoted tokens stay OR'd bag-of-words exactly as before. The
+    strict expression ANDs the required clauses with the OR pool; the relaxed
+    expression is the legacy pure-OR expression used as an empty-result
+    fallback. ``None`` means the query has no tokens at all.
+    """
+    required: list[str] = []
+    remainder = query
+    for segment in _QUOTED_SEGMENT.findall(query):
+        words = list(dict.fromkeys(tokenize(segment)))
+        if not words:
+            continue
+        required.append('"' + " ".join(words) + '"' if len(words) > 1 else '"' + words[0] + '"')
+    remainder = _QUOTED_SEGMENT.sub(" ", remainder)
+    pool = list(dict.fromkeys(tokenize(remainder)))
+    if not pool and not required:
+        return None, None
+    relaxed = " OR ".join('"' + word + '"' for word in (pool or tokenize(query)))
+    if not required:
+        return relaxed, relaxed
+    strict = " AND ".join(required)
+    if pool:
+        strict += " AND (" + " OR ".join('"' + word + '"' for word in pool) + ")"
+    return strict, relaxed
 
 
 class LexicalMemoryIndex:
@@ -117,23 +155,28 @@ class LexicalMemoryIndex:
         limit: int = 10,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        words = list(dict.fromkeys(tokenize(query)))
-        if not words:
-            return []
         if not 1 <= limit <= 50 or offset < 0:
             raise ValueError("invalid lexical result window")
-        expression = " OR ".join('"' + word.replace('"', '""') + '"' for word in words)
+        strict, relaxed = _match_expressions(query)
         prefix = target_uri.rstrip("/") + "/"
         with self._connection() as connection:
             # Keep ranking and materialization on one snapshot. Sorting full
             # documents here copies gigabytes for broad queries before LIMIT.
             connection.execute("BEGIN")
-            ranked = connection.execute(
-                "SELECT documents.rowid,documents.uri,bm25(terms) AS rank FROM terms JOIN documents ON terms.rowid=documents.rowid "
-                "WHERE terms MATCH ? AND (uri=? OR substr(uri,1,?)=?) "
-                "ORDER BY rank ASC,uri ASC LIMIT ? OFFSET ?",
-                (expression, target_uri, len(prefix), prefix, limit, offset),
-            ).fetchall()
+            def run(expression: str) -> list[sqlite3.Row]:
+                return connection.execute(
+                    "SELECT documents.rowid,documents.uri,bm25(terms) AS rank FROM terms JOIN documents ON terms.rowid=documents.rowid "
+                    "WHERE terms MATCH ? AND (uri=? OR substr(uri,1,?)=?) "
+                    "ORDER BY rank ASC,uri ASC LIMIT ? OFFSET ?",
+                    (expression, target_uri, len(prefix), prefix, limit, offset),
+                ).fetchall()
+            ranked = run(strict)
+            if strict is None:
+                ranked = []
+            elif not ranked and relaxed is not None and relaxed != strict:
+                # Quoted constraints that match nothing degrade to bag-of-words
+                # recall instead of returning an empty page.
+                ranked = run(relaxed)
             return [
                 self._hit(
                     connection.execute(
@@ -148,14 +191,46 @@ class LexicalMemoryIndex:
     @staticmethod
     def _hit(row: sqlite3.Row, query: str, score: float) -> dict[str, Any]:
         text = row["content"]
-        positions = [text.casefold().find(term) for term in tokenize(query)]
-        positions = [position for position in positions if position >= 0]
-        start = max(0, min(positions, default=0) - 200)
+        terms = list(dict.fromkeys(tokenize(query)))[:_EXCERPT_QUERY_TERMS_CAP]
+        positions_by_term: dict[str, list[int]] = {}
+        lowered = text.casefold()
+        for term in terms:
+            hits: list[int] = []
+            position = lowered.find(term)
+            while position >= 0 and len(hits) < _EXCERPT_TERM_POSITION_CAP:
+                hits.append(position)
+                position = lowered.find(term, position + len(term))
+            if hits:
+                positions_by_term[term] = hits
+        start = 0
+        if positions_by_term:
+            # Densest-window excerpt: prefer the window covering the most
+            # distinct query terms, then the most total occurrences, then the
+            # earliest window. First-occurrence excerpts routinely missed every
+            # constraint but one on multi-hop queries.
+            best: tuple[int, int, int] | None = None  # (distinct, total, -start)
+            candidates = sorted({p for hits in positions_by_term.values() for p in hits})
+            for anchor in candidates:
+                window_start = max(0, anchor - 200)
+                window_end = window_start + _EXCERPT_WINDOW
+                distinct = sum(
+                    1 for hits in positions_by_term.values()
+                    if any(window_start <= p < window_end for p in hits)
+                )
+                total = sum(
+                    1 for hits in positions_by_term.values()
+                    for p in hits if window_start <= p < window_end
+                )
+                key = (distinct, total, -window_start)
+                if best is None or key > best:
+                    best = key
+            if best is not None:
+                start = -best[2]
         return {
             "uri": row["uri"],
             "content_hash": row["content_hash"],
             "level": 2,
-            "excerpt": text[start : start + 1600],
+            "excerpt": text[start : start + _EXCERPT_WINDOW],
             "score": score,
             "retrieval_mode": "bm25",
             "metadata": json.loads(row["metadata"]),
