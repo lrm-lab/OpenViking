@@ -431,15 +431,15 @@ def test_quoted_phrase_ranks_adjacent_words_above_scattered_terms(tmp_path):
     assert [h["uri"].rsplit("/", 1)[-1] for h in hits] == ["adjacent.md"]
 
 
-def test_single_quoted_word_filters_and_or_fallback(tmp_path):
+def test_single_quoted_word_stays_or_and_phrase_miss_falls_back(tmp_path):
     index = LexicalMemoryIndex(tmp_path, "account")
     index.upsert("viking://resources/docs/has.md", "actor lawyer usa 1990 debut")
     index.upsert("viking://resources/docs/misses.md", "actor debut movie")
-    # The quoted word is required: only the doc containing it can be returned.
+    # A single quoted word is emphasis, not a constraint: legacy OR recall.
     hits = index.find('actor "lawyer"', target_uri="viking://resources/docs")
-    assert [h["uri"].rsplit("/", 1)[-1] for h in hits] == ["has.md"]
-    # A quoted constraint matching nothing degrades to OR recall, not emptiness.
-    fallback = index.find('"unobtainium" actor', target_uri="viking://resources/docs")
+    assert {h["uri"].rsplit("/", 1)[-1] for h in hits} == {"has.md", "misses.md"}
+    # A multi-word phrase matching nothing degrades to full-query OR, not emptiness.
+    fallback = index.find('"unobtainium meteorite" actor', target_uri="viking://resources/docs")
     assert fallback and {h["uri"].rsplit("/", 1)[-1] for h in fallback} == {"has.md", "misses.md"}
 
 

@@ -45,30 +45,28 @@ INSERT OR IGNORE INTO state VALUES(1,0);
 def _match_expressions(query: str) -> tuple[str | None, str | None]:
     """Build (strict, relaxed) FTS5 MATCH expressions from one query string.
 
-    Quoted segments carry adjacency intent: a multi-word segment becomes an
-    FTS5 phrase clause and is required; a single quoted word is required as a
-    plain token. Unquoted tokens stay OR'd bag-of-words exactly as before. The
-    strict expression ANDs the required clauses with the OR pool; the relaxed
-    expression is the legacy pure-OR expression used as an empty-result
-    fallback. ``None`` means the query has no tokens at all.
+    A multi-word quoted segment carries adjacency intent and becomes an FTS5
+    phrase clause that is required (AND). A single quoted word is stylistic
+    emphasis, not a hard constraint, so it stays in the OR pool. The relaxed
+    expression is the legacy pure-OR expression over every token of the query
+    and runs only when the strict form matches nothing, so recall never drops
+    below legacy. ``None`` means the query has no tokens at all.
     """
     required: list[str] = []
-    remainder = query
     for segment in _QUOTED_SEGMENT.findall(query):
         words = list(dict.fromkeys(tokenize(segment)))
-        if not words:
-            continue
-        required.append('"' + " ".join(words) + '"' if len(words) > 1 else '"' + words[0] + '"')
-    remainder = _QUOTED_SEGMENT.sub(" ", remainder)
-    pool = list(dict.fromkeys(tokenize(remainder)))
-    if not pool and not required:
+        if len(words) > 1:
+            required.append('"' + " ".join(words) + '"')
+    all_words = list(dict.fromkeys(tokenize(query)))
+    if not all_words:
         return None, None
-    relaxed = " OR ".join('"' + word + '"' for word in (pool or tokenize(query)))
+    relaxed = " OR ".join('"' + word + '"' for word in all_words)
     if not required:
         return relaxed, relaxed
-    strict = " AND ".join(required)
-    if pool:
-        strict += " AND (" + " OR ".join('"' + word + '"' for word in pool) + ")"
+    # The OR pool keeps every query token (phrase words included): the phrase
+    # clause subsumes them for matching, but their presence in the expression
+    # measurably improves bm25 ranking of phrase-matching documents.
+    strict = " AND ".join(required) + " AND (" + relaxed + ")"
     return strict, relaxed
 
 
