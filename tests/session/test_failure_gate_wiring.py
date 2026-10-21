@@ -141,7 +141,7 @@ def test_commit_id_prefers_the_archive_directory_name() -> None:
     assert commit_id_for_archive("", TASK) == TASK
 
 
-def test_confirmed_failure_records_outcome_and_does_not_dispatch(
+def test_confirmed_failure_records_fork_without_dispatch(
     tmp_path: Path, causal: None
 ) -> None:
     revision = _seed_native(tmp_path)
@@ -163,7 +163,7 @@ def test_confirmed_failure_records_outcome_and_does_not_dispatch(
     assert result.reason == REASON_EXTERNAL_FAIL
     assert result.action == ACTION_RETAINED
     assert result.deduplicated is False
-    assert result.fork_node_id is None
+    assert result.fork_node_id is not None
     assert result.guidance_content_hash is None
     assert result.child_run_id is None
     assert result.blocked is False
@@ -176,7 +176,7 @@ def test_confirmed_failure_records_outcome_and_does_not_dispatch(
     assert ACTION_RETAINED in kinds
     assert AUDIT_REFUSED not in kinds
     assert _json_count(tmp_path, "failure-gate", "runs") == 1
-    assert _json_count(tmp_path, FORK_NODE_OVERLAY_DIRNAME, "overlays") == 0
+    assert _json_count(tmp_path, FORK_NODE_OVERLAY_DIRNAME, "overlays") == 1
     assert _json_count(tmp_path, GUIDANCE_APPROVAL_DIRNAME, "approvals") == 0
     assert _json_count(tmp_path, REMEDIATION_RUN_DIRNAME, "runs") == 0
     rows = [row for row in _audit_rows(tmp_path) if row["event_kind"] == AUDIT_ADJUDICATED]
