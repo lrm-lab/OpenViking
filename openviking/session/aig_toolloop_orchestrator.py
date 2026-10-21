@@ -20,6 +20,7 @@ from typing import Any
 
 from openviking.session.aig_native_protocol import canonical_dumps, is_safe_id
 from openviking.session.aig_role_chain import MAX_REVISION_ROUNDS, AigConstructionRun
+from openviking.session.aig_structural_repair import repair_structure
 from openviking.session.aig_tool_surface import AigToolSurface, AoSnapshot
 from openviking.session.aig_toolloop_builder import CONSTRUCTION_FALLBACK
 from openviking.session.aig_toolloop_critic import CriticProvider, audit_semantics
@@ -94,6 +95,15 @@ def run_critic_refiner(
     if not isinstance(run, AigConstructionRun) or run.run_id != run_id:
         raise OrchestratorError("run_mismatch")
     trajectory = _Trajectory(_trajectory_path(root, run_id), run_id)
+    # Structural gaps (missing conclusion, unlinked blocks) are fixed by rule
+    # before the first audit so the VLM loop only faces semantic residue.
+    applied, refused = repair_structure(surface, snapshot)
+    if applied or refused:
+        trajectory.append(
+            "structural_repair",
+            0,
+            {"applied": applied, "refused": refused},
+        )
     violations = _audit(surface, critic, trajectory, 0, mode=mode)
     if not violations:
         return _freeze(

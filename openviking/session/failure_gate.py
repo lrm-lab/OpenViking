@@ -152,6 +152,10 @@ class FailureGateDelivery:
     dispositions: tuple[Mapping[str, Any], ...] = ()
     diagnose_request_hash: str | None = None
     auto_remediate: bool = True
+    # Commit-path fork authoring: on confirmed failure persist the Reader's
+    # fork overlay (anchor + branch steps) and stop. No guidance approval, no
+    # child run. ``auto_remediate`` stays the only dispatch door.
+    fork_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -281,7 +285,13 @@ def bind_role_chain_authorizer(
 class FailureGateOrchestrator:
     """Run the post-commit gate against the existing server stores."""
 
-    def __init__(self, root: str | Path, build_revision: FrozenViewBuilder) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        build_revision: FrozenViewBuilder,
+        *,
+        overlay_root: str | Path | None = None,
+    ) -> None:
         if not callable(build_revision):
             raise FailureGateError("builder_required")
         self._root = Path(root)
@@ -289,7 +299,10 @@ class FailureGateOrchestrator:
         self._dir = self._root / FAILURE_GATE_DIRNAME
         self._audit_path = self._dir / "audit.jsonl"
         self._outcomes = OutcomeAssessmentService(OutcomeContractStore(self._root))
-        self._overlays = ForkNodeOverlayStore(self._root)
+        # Retrieval and publish read forks from the user root, not the session.
+        self._overlays = ForkNodeOverlayStore(
+            Path(overlay_root) if overlay_root is not None else self._root
+        )
         self._patterns = StrategyPatternStore(self._root)
         self._precedents = ForkPrecedentService(self._root)
         self._guidance = GuidanceApprovalService(
@@ -410,6 +423,9 @@ class FailureGateOrchestrator:
         if adjudication.decision == DECISION_CONFIRMED_FAILURE:
             if delivery.auto_remediate:
                 return self._remediate(delivery, run_id, binding, adjudication, evidence, kinds)
+            fork_node_id = None
+            if delivery.fork_only:
+                fork_node_id = self._commit_fork(delivery, binding).fork_node_id
             action = ACTION_RETAINED
             self._audit(
                 kinds,
@@ -426,7 +442,7 @@ class FailureGateOrchestrator:
                 adjudication,
                 action=action,
                 blocked=False,
-                fork_node_id=None,
+                fork_node_id=fork_node_id,
                 guidance_content_hash=None,
                 child_run_id=None,
                 kinds=kinds,
@@ -469,46 +485,7 @@ class FailureGateOrchestrator:
     ) -> FailureGateResult:
         if not _script_ready(delivery):
             raise FailureGateError("remediation_script_required")
-        catalog = self._overlays.register_base_revision(
-            binding.revision, acl_labels=delivery.principal_labels
-        )
-        if delivery.anchor_block_id not in catalog.block_ids:
-            raise FailureGateError("anchor_missing")
-        fork_payload = protocol_envelope(
-            SCHEMA_VERSION_AIG_NATIVE_V2,
-            OBJECT_KIND_FORK_PROPOSAL,
-            {
-                "anchor_block_id": delivery.anchor_block_id,
-                "author_role": "reader",
-                "base_revision_block_content_hash": catalog.block_content_hash,
-                "base_revision_id": catalog.base_revision_id,
-                "branch_steps": [dict(step) for step in delivery.branch_steps],
-                "report_hash": binding.revision.content_hash,
-            },
-        )
-        retrieval = self._precedents.retrieve(
-            self._overlays,
-            self._patterns,
-            fork_payload,
-            principal_labels=delivery.principal_labels,
-            session_id=binding.reader_session_id,
-            temporal_cutoff=delivery.temporal_cutoff,
-        )
-        authorizer = bind_role_chain_authorizer(
-            binding.run,
-            reader_report_hash=binding.reader_report_hash,
-            view_content_hash=binding.revision.content_hash,
-        )
-        commit = self._precedents.submit_proposal(
-            self._overlays,
-            fork_payload,
-            retrieval_id=retrieval.retrieval_id,
-            dispositions=[dict(item) for item in delivery.dispositions],
-            principal_labels=delivery.principal_labels,
-            session_id=binding.reader_session_id,
-            recorded_at=delivery.recorded_at,
-            authorize=authorizer,
-        )
+        catalog, commit, retrieval = self._commit_fork_with_catalog(delivery, binding)
         plan = delivery.guidance_plan
         catalog_body = delivery.catalog
         if not isinstance(plan, Mapping) or not isinstance(catalog_body, Mapping):
@@ -597,6 +574,58 @@ class FailureGateOrchestrator:
             child_run_id=child_run_id,
             kinds=kinds,
         )
+
+    def _commit_fork(self, delivery: FailureGateDelivery, binding: _Binding) -> Any:
+        """Persist the Reader's fork overlay and return the stored overlay."""
+        if not isinstance(delivery.anchor_block_id, str) or not delivery.branch_steps:
+            raise FailureGateError("fork_script_required")
+        _catalog, commit, _retrieval = self._commit_fork_with_catalog(delivery, binding)
+        return commit.stored
+
+    def _commit_fork_with_catalog(
+        self, delivery: FailureGateDelivery, binding: _Binding
+    ) -> tuple[Any, Any, Any]:
+        catalog = self._overlays.register_base_revision(
+            binding.revision, acl_labels=delivery.principal_labels
+        )
+        if delivery.anchor_block_id not in catalog.block_ids:
+            raise FailureGateError("anchor_missing")
+        fork_payload = protocol_envelope(
+            SCHEMA_VERSION_AIG_NATIVE_V2,
+            OBJECT_KIND_FORK_PROPOSAL,
+            {
+                "anchor_block_id": delivery.anchor_block_id,
+                "author_role": "reader",
+                "base_revision_block_content_hash": catalog.block_content_hash,
+                "base_revision_id": catalog.base_revision_id,
+                "branch_steps": [dict(step) for step in delivery.branch_steps],
+                "report_hash": binding.revision.content_hash,
+            },
+        )
+        retrieval = self._precedents.retrieve(
+            self._overlays,
+            self._patterns,
+            fork_payload,
+            principal_labels=delivery.principal_labels,
+            session_id=binding.reader_session_id,
+            temporal_cutoff=delivery.temporal_cutoff,
+        )
+        authorizer = bind_role_chain_authorizer(
+            binding.run,
+            reader_report_hash=binding.reader_report_hash,
+            view_content_hash=binding.revision.content_hash,
+        )
+        commit = self._precedents.submit_proposal(
+            self._overlays,
+            fork_payload,
+            retrieval_id=retrieval.retrieval_id,
+            dispositions=[dict(item) for item in delivery.dispositions],
+            principal_labels=delivery.principal_labels,
+            session_id=binding.reader_session_id,
+            recorded_at=delivery.recorded_at,
+            authorize=authorizer,
+        )
+        return catalog, commit, retrieval
 
     def _finish(
         self,
@@ -982,6 +1011,8 @@ def _fingerprint(delivery: FailureGateDelivery) -> str:
         "task_id": delivery.task_id,
         "temporal_cutoff": delivery.temporal_cutoff,
     }
+    if delivery.fork_only:
+        body["fork_only"] = True
     return protocol_content_hash(SCHEMA_VERSION_AIG_NATIVE_V2, "failure_gate_fingerprint", body)
 
 

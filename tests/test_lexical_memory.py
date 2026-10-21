@@ -421,3 +421,39 @@ def test_bm25_ranking_preserves_scope_ties_pages_and_large_document_excerpts(tmp
     assert last[0]["uri"].endswith("/large.md")
     assert first[0]["score"] == second[0]["score"] > last[0]["score"]
     assert "observatory opening" in last[0]["excerpt"]
+
+
+def test_quoted_phrase_ranks_adjacent_words_above_scattered_terms(tmp_path):
+    index = LexicalMemoryIndex(tmp_path, "account")
+    index.upsert("viking://resources/docs/scattered.md", "actor married actress")
+    index.upsert("viking://resources/docs/adjacent.md", "the police commissioner spoke")
+    hits = index.find('"police commissioner"', target_uri="viking://resources/docs")
+    assert [h["uri"].rsplit("/", 1)[-1] for h in hits] == ["adjacent.md"]
+
+
+def test_single_quoted_word_stays_or_and_phrase_miss_falls_back(tmp_path):
+    index = LexicalMemoryIndex(tmp_path, "account")
+    index.upsert("viking://resources/docs/has.md", "actor lawyer usa 1990 debut")
+    index.upsert("viking://resources/docs/misses.md", "actor debut movie")
+    # A single quoted word is emphasis, not a constraint: legacy OR recall.
+    hits = index.find('actor "lawyer"', target_uri="viking://resources/docs")
+    assert {h["uri"].rsplit("/", 1)[-1] for h in hits} == {"has.md", "misses.md"}
+    # A multi-word phrase matching nothing degrades to full-query OR, not emptiness.
+    fallback = index.find('"unobtainium meteorite" actor', target_uri="viking://resources/docs")
+    assert fallback and {h["uri"].rsplit("/", 1)[-1] for h in fallback} == {"has.md", "misses.md"}
+
+
+def test_multiword_quote_and_or_pool_and_with_fallback(tmp_path):
+    index = LexicalMemoryIndex(tmp_path, "account")
+    index.upsert("viking://resources/docs/full.md", "an actor worked seven years as a lawyer")
+    index.upsert("viking://resources/docs/partial.md", "actor lawyer movie")
+    hits = index.find('actor "seven years" movie', target_uri="viking://resources/docs")
+    assert hits and hits[0]["uri"].endswith("/full.md")
+
+
+def test_excerpt_prefers_densest_window_over_first_occurrence(tmp_path):
+    index = LexicalMemoryIndex(tmp_path, "account")
+    text = "alpha intro padding. " + "filler " * 400 + "beta and gamma together here. " + "filler " * 400 + "alpha trailing."
+    index.upsert("viking://resources/docs/dense.md", text)
+    hit = index.find("alpha beta gamma", target_uri="viking://resources/docs")[0]
+    assert "beta and gamma together" in hit["excerpt"]

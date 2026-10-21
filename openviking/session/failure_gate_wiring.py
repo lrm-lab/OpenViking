@@ -32,7 +32,10 @@ Exceptions propagate: the diagnose face must surface them.
 
 from __future__ import annotations
 
+import json
+import threading
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +83,8 @@ _AIG_MODES = frozenset(
     }
 )
 _DEFAULT_CRITERION = "crit-commit"
+_FORK_AUTHORING_LOCK = threading.Lock()
+_IMAGINED_STEP = "img-verify-deliverable-against-task-requirements"
 
 logger = get_logger(__name__)
 
@@ -190,7 +195,15 @@ def maybe_deliver_commit_failure_gate(
             commit_id=commit_id,
             session_dir=session_dir,
         )
-        return FailureGateOrchestrator(session_dir, builder).deliver(delivery)
+        # Forks are user-scoped: overlays live under the user root, where
+        # retrieval and publish_causal read them. Concurrent commits of one
+        # user share that store, so fork authoring is serialised per process.
+        overlay_root = user_root_for_session(session) if delivery.fork_only else None
+        orchestrator = FailureGateOrchestrator(session_dir, builder, overlay_root=overlay_root)
+        if delivery.fork_only:
+            with _FORK_AUTHORING_LOCK:
+                return orchestrator.deliver(delivery)
+        return orchestrator.deliver(delivery)
     except Exception:
         logger.warning("commit failure gate refused", exc_info=True)
         return None
@@ -204,8 +217,28 @@ def build_commit_delivery(
     commit_id: str,
     session_dir: Path,
 ) -> FailureGateDelivery:
-    """Build one commit delivery from the frozen view and session products."""
-    return build_failure_gate_delivery(
+    """Build one commit delivery from the frozen view and session products.
+
+    ``auto_remediate`` stays False: a commit never dispatches a child run.
+    When every external evaluator signal is a unanimous fail, the delivery
+    additionally carries a deterministic fork script (Reader's critical block
+    plus one counterfactual step) so the gate persists the fork overlay.
+    """
+    evaluator_results = _evaluator_results(session)
+    anchor = None
+    branch_steps: tuple[Mapping[str, Any], ...] = ()
+    if _unanimous_signal(evaluator_results) == "fail":
+        anchor = _fork_anchor(session_dir, task_id, revision)
+        if anchor is not None:
+            branch_steps = (
+                {"imagined_node_id": _IMAGINED_STEP, "step_kind": "imagined_node"},
+            )
+    remediation = (
+        {"anchor_block_id": anchor, "branch_steps": list(branch_steps)}
+        if anchor is not None
+        else None
+    )
+    delivery = build_failure_gate_delivery(
         session,
         revision,
         task_id=task_id,
@@ -216,7 +249,11 @@ def build_commit_delivery(
         source_digest=revision.content_hash,
         principal_labels=_principal_labels(session),
         auto_remediate=False,
+        remediation=remediation,
     )
+    if anchor is None:
+        return delivery
+    return replace(delivery, fork_only=True)
 
 
 def build_diagnose_delivery(
@@ -286,8 +323,8 @@ def build_failure_gate_delivery(
 ) -> FailureGateDelivery:
     """Shared constructor for commit and diagnose deliveries."""
     stamp = _stamp(revision.frozen_at)
-    contract = _contract_document(session, session_dir, task_id, stamp)
     evaluator_results = _evaluator_results(session)
+    contract = _contract_document(session, session_dir, task_id, stamp, evaluator_results)
     assessment = getattr(session, "outcome_assessment_body", None)
     if not isinstance(assessment, Mapping):
         assessment = _derived_assessment(contract, evaluator_results, revision)
@@ -316,6 +353,74 @@ def build_failure_gate_delivery(
     )
 
 
+def user_root_for_session(session: Any) -> Path | None:
+    """User root that retrieval and ``publish_causal`` read forks from."""
+    from openviking.core.namespace import canonical_user_root
+
+    viking_fs = getattr(session, "_viking_fs", None)
+    ctx = getattr(session, "ctx", None)
+    if viking_fs is None or ctx is None:
+        return None
+    try:
+        raw = viking_fs._uri_to_path(canonical_user_root(ctx), ctx=ctx)
+    except Exception:
+        return None
+    return Path(raw) if raw else None
+
+
+def _bindings_from_results(
+    results: Sequence[Mapping[str, Any]],
+) -> list[dict[str, str]]:
+    """One contract binding per evaluator result the session already carries.
+
+    The default contract has no task-start bindings, and the outcome policy
+    treats evidence that matches no binding as a conflict. The commit's own
+    explicit evaluator results therefore define the bindings they answer.
+    """
+    bindings: dict[str, dict[str, str]] = {}
+    for item in results:
+        binding_id = item.get("binding_id")
+        kind = item.get("signal_kind")
+        ref = item.get("evidence_ref")
+        if (
+            isinstance(binding_id, str)
+            and binding_id
+            and isinstance(kind, str)
+            and isinstance(ref, str)
+            and ref
+        ):
+            bindings.setdefault(binding_id, {"binding_id": binding_id, "kind": kind, "ref": ref})
+    return [bindings[key] for key in sorted(bindings)]
+
+
+def _unanimous_signal(results: Sequence[Mapping[str, Any]]) -> str | None:
+    signals = [item.get("signal") for item in results]
+    if signals and all(item == signals[0] for item in signals) and signals[0] in {"pass", "fail"}:
+        return str(signals[0])
+    return None
+
+
+def _fork_anchor(
+    session_dir: Path, task_id: str, revision: AigNativeViewRevision
+) -> str | None:
+    """Reader's critical block when it is in the frozen view, else a sane default."""
+    block_ids = [block.block_id for block in revision.blocks]
+    if not block_ids:
+        return None
+    report = session_dir / "aig-paper-audit" / task_id / "reader-report.json"
+    try:
+        payload = json.loads(report.read_text(encoding="utf-8"))
+        critical = payload["report"]["critical_block_id"]
+    except (OSError, ValueError, KeyError, TypeError):
+        critical = None
+    if isinstance(critical, str) and critical in block_ids:
+        return critical
+    for block in reversed(revision.blocks):
+        if getattr(block, "block_kind", "") not in {"task", "conclusion"}:
+            return block.block_id
+    return block_ids[-1]
+
+
 def _principal_labels(session: Any) -> tuple[str, ...]:
     try:
         return (session_owner_label(session),)
@@ -337,6 +442,7 @@ def _contract_document(
     session_dir: Path,
     task_id: str,
     stamp: str,
+    evaluator_results: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     raw = getattr(session, "outcome_contract", None)
     if isinstance(raw, Mapping):
@@ -355,7 +461,7 @@ def _contract_document(
                 }
             ],
             "contract_id": f"contract-{task_id}",
-            "evaluator_bindings": [],
+            "evaluator_bindings": _bindings_from_results(evaluator_results),
             "frozen_at": stamp,
             "goals": ["complete the committed task"],
             "policy_constraints": [],
