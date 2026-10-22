@@ -2253,10 +2253,9 @@ def _contiguous_runs(records: Sequence[SourceRef]) -> list[list[SourceRef]]:
         elif ref.sequence == previous.sequence:
             raise ValueError("fallback AO sequences must be unique within a segment")
         else:
-            raise ValueError(
-                "fallback AO interval within a segment must be contiguous; "
-                f"gap before sequence {ref.sequence}"
-            )
+            # Another participant's AOs (e.g. memory tool calls) can sit between two
+            # stretches of one segment; each stretch becomes its own block.
+            runs.append([ref])
     return runs
 
 
@@ -2409,32 +2408,31 @@ def build_minimal_fallback_view(
         participants = {ref.participant_id for ref in segment_records}
         if len(participants) != 1:
             raise ValueError("fallback segment must belong to a single participant")
-        runs = _contiguous_runs(segment_records)
-        if len(runs) != 1:
-            raise ValueError("fallback segment must be one contiguous AO interval")
-        run = runs[0]
-        start = run[0].sequence
-        end = run[-1].sequence
-        participant_id = run[0].participant_id
-        summary = str(payload.get("summary") or f"segment {segment_id} sequences {start}-{end}")
-        blocks.append(
-            InfluenceBlock(
-                block_id=f"fallback-{segment_id}-{start}-{end}",
-                role="agent_action",
-                participant_id=participant_id,
-                segment_ref=SegmentRef(segment_id=segment_id, session_id=session_id),
-                ao_start_seq=start,
-                ao_end_seq=end,
-                summary=summary,
-                input="",
-                output="",
-                authorship=participant_id,
-                granularity_reason=DETERMINISTIC_FALLBACK_REASON,
-                source_content_hashes=tuple(ref.content_hash for ref in run),
-                source_refs=tuple(run),
+        for run in _contiguous_runs(segment_records):
+            start = run[0].sequence
+            end = run[-1].sequence
+            participant_id = run[0].participant_id
+            summary = str(
+                payload.get("summary") or f"segment {segment_id} sequences {start}-{end}"
             )
-        )
-        included.append(AORange(start_seq=start, end_seq=end, segment_id=segment_id))
+            blocks.append(
+                InfluenceBlock(
+                    block_id=f"fallback-{segment_id}-{start}-{end}",
+                    role="agent_action",
+                    participant_id=participant_id,
+                    segment_ref=SegmentRef(segment_id=segment_id, session_id=session_id),
+                    ao_start_seq=start,
+                    ao_end_seq=end,
+                    summary=summary,
+                    input="",
+                    output="",
+                    authorship=participant_id,
+                    granularity_reason=DETERMINISTIC_FALLBACK_REASON,
+                    source_content_hashes=tuple(ref.content_hash for ref in run),
+                    source_refs=tuple(run),
+                )
+            )
+            included.append(AORange(start_seq=start, end_seq=end, segment_id=segment_id))
 
     included_sorted = tuple(
         sorted(included, key=lambda item: (item.start_seq, item.segment_id or ""))

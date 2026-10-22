@@ -851,3 +851,40 @@ def test_fallback_view_leaves_retrieval_subgraphs_empty() -> None:
     assert any(block.role == "conclusion" for block in diagnosis.blocks)
     assert validate_view(post) == []
     assert validate_view(diagnosis) == []
+
+
+def test_fallback_builder_splits_a_segment_interleaved_with_another_participant() -> None:
+    def rec(seq: int, who: str, seg: str) -> dict:
+        return {
+            "ao_id": f"ao-{seq}",
+            "sequence": seq,
+            "participant_id": who,
+            "segment_id": seg,
+            "content_hash": f"hash-{seq}",
+        }
+
+    session = {
+        "session_id": SESSION,
+        "task_run_id": TASK,
+        "purpose": "post_run_index",
+        "snapshot_watermark": "wm-interleaved",
+        "view_id": "view-il",
+        "revision_id": "rev-il",
+        "frozen_at": "2026-09-24T02:00:00.000Z",
+        "ao_records": [
+            rec(1, "agent-a", "seg-a"),
+            rec(2, "agent-a", "seg-a"),
+            rec(3, "agent-b", "seg-b"),
+            rec(4, "agent-b", "seg-b"),
+            rec(5, "agent-a", "seg-a"),
+            rec(6, "agent-a", "seg-a"),
+        ],
+    }
+    revision = build_minimal_fallback_view(session)
+    assert revision.construction_mode == "fallback"
+    spans = sorted((b.ao_start_seq, b.ao_end_seq, b.participant_id) for b in revision.blocks)
+    assert spans == [(1, 2, "agent-a"), (3, 4, "agent-b"), (5, 6, "agent-a")]
+    assert revision.coverage.omitted_ranges == ()
+    duplicate = dict(session, ao_records=[rec(1, "agent-a", "seg-a"), rec(1, "agent-a", "seg-a")])
+    with pytest.raises(ValueError, match="unique"):
+        build_minimal_fallback_view(duplicate)
