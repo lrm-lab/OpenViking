@@ -193,6 +193,20 @@ def test_card_hook_is_off_by_default_and_needs_a_user_root(tmp_path: Path) -> No
     assert card_hook_for_session(session, object()) is None  # no user root, no hook
 
 
+def test_card_hook_env_opt_in_enables_cards_for_every_session(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from openviking.session import aig_commit_wiring
+
+    monkeypatch.setattr(aig_commit_wiring, "user_root_for_session", lambda session: Path("/root"))
+    monkeypatch.setattr(aig_commit_wiring, "session_owner_label", lambda session: "user:alice")
+    session = SimpleNamespace(session_id="s")
+    monkeypatch.delenv("OPENVIKING_EXPERIENCE_CARDS", raising=False)
+    assert aig_commit_wiring.card_hook_for_session(session, object()) is None
+    monkeypatch.setenv("OPENVIKING_EXPERIENCE_CARDS", "1")
+    assert aig_commit_wiring.card_hook_for_session(session, object()) is not None
+
+
 def test_card_hook_runs_through_a_session_and_writes_under_the_user_root(tmp_path: Path) -> None:
     import asyncio
     import json

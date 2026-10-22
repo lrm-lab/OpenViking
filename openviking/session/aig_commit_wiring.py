@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -85,8 +86,13 @@ def user_root_for_session(session: Any) -> Path | None:
 
 
 def card_hook_for_session(session: Any, vlm_handle: Any) -> Any:
-    """Post-freeze card hook, or None. Off unless the session opts in (ADR-0046)."""
-    if getattr(session, "experience_cards_enabled", False) is not True:
+    """Post-freeze card hook, or None. Off unless the session or the service opts in (ADR-0046).
+
+    ``OPENVIKING_EXPERIENCE_CARDS=1`` is the service-level opt-in: the live commit path never
+    sets ``session.experience_cards_enabled``.
+    """
+    service_opt_in = os.environ.get("OPENVIKING_EXPERIENCE_CARDS") == "1"
+    if getattr(session, "experience_cards_enabled", False) is not True and not service_opt_in:
         return None
     root = user_root_for_session(session)
     if root is None:
