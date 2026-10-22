@@ -209,6 +209,7 @@ class AddMessageRequest(BaseModel):
         Literal["user_query", "assistant_step", "tool_transport", "checkpoint"]
     ] = None
     source_message_ids: Optional[List[str]] = None
+    deliveries: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=64)
     telemetry: TelemetryRequest = False
 
     @field_validator("peer_id")
@@ -827,6 +828,7 @@ async def add_message(
                 "turn_id": request.turn_id,
                 "message_kind": request.message_kind,
                 "source_message_ids": request.source_message_ids,
+                "deliveries": request.deliveries,
             }
         ]
         add_many_async = getattr(session, "add_messages_async", None)
@@ -883,6 +885,7 @@ async def batch_add_messages(
                     "turn_id": msg_request.turn_id,
                     "message_kind": msg_request.message_kind,
                     "source_message_ids": msg_request.source_message_ids,
+                    "deliveries": msg_request.deliveries,
                 }
             )
         add_many_async = getattr(session, "add_messages_async", None)

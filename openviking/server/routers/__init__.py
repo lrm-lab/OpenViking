@@ -12,6 +12,7 @@ from openviking.server.routers.console import router as console_router
 from openviking.server.routers.content import router as content_router
 from openviking.server.routers.coordinator import router as coordinator_router
 from openviking.server.routers.debug import router as debug_router
+from openviking.server.routers.experience_cards import router as experience_cards_router
 from openviking.server.routers.filesystem import router as filesystem_router
 from openviking.server.routers.lexical_memory import router as lexical_memory_router
 from openviking.server.routers.metrics import router as metrics_router
@@ -46,6 +47,7 @@ __all__ = [
     "console_router",
     "search_router",
     "lexical_memory_router",
+    "experience_cards_router",
     "sessions_router",
     "skills_router",
     "snapshot_router",

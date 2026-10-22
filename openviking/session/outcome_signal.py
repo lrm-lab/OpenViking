@@ -26,6 +26,7 @@ ATTRIBUTION_MODES = frozenset({ATTRIBUTION_MODE_FAIL, ATTRIBUTION_MODE_SUCCESS})
 OUTCOME_SOURCE_VERIFIER = "verifier"
 OUTCOME_SOURCE_MODEL_INFERRED = "model_inferred"
 OUTCOME_DIGEST_LIMIT = 200
+OUTCOME_FEEDBACK_LIMIT = 6000
 
 PASS_REWARD_THRESHOLDS: Mapping[str, float] = {
     "browsecomp": 1.0,
@@ -156,14 +157,23 @@ def normalize_verdict(
 
 
 def outcome_overview(outcome: OutcomeSignal) -> dict[str, str]:
-    """Compact read-only summary for ``get_overview``."""
+    """Compact read-only summary for ``get_overview``.
+
+    The optional judge report rides as ``feedback`` (cycle 007 D-007); it is
+    kept out of the 200-character digest so the digest stays one line.
+    """
     if not isinstance(outcome, OutcomeSignal):
         raise OutcomeSignalError("invalid_outcome")
-    return {
-        "digest": outcome_digest(outcome.raw),
+    body = {key: value for key, value in outcome.raw.items() if key != "feedback"}
+    summary = {
+        "digest": outcome_digest(body),
         "signal": outcome.signal,
         "source": outcome.source,
     }
+    feedback = outcome.raw.get("feedback")
+    if isinstance(feedback, str) and feedback.strip():
+        summary["feedback"] = feedback.strip()[:OUTCOME_FEEDBACK_LIMIT]
+    return summary
 
 
 def outcome_digest(raw: Mapping[str, Any]) -> str:

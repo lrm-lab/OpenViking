@@ -84,13 +84,21 @@ READER_OUTPUT_SCHEMA = (
 )
 
 
-def reader_prompt_for_mode(mode: str | None) -> str:
+def _base_reader_prompt_for_mode(mode: str | None) -> str:
     """Fail-closed: None or an unknown mode keeps the fail narrative."""
     if closed_attribution_mode(mode) == "success":
         return READER_SUCCESS_PROMPT
     if mode == "neutral":
         return READER_NEUTRAL_PROMPT
     return READER_SYSTEM_PROMPT
+
+
+READER_JUDGE_REPORT_GUARD = '\n评审报告（get_overview 的 outcome.feedback，若存在）：引用报告中的结论必须有支撑它的 AO 行；没有 AO 支撑的发现标为 judge-only，不得作为 decisive_ao_refs，也不得进入后续经验卡步骤。'
+
+
+def reader_prompt_for_mode(mode: str | None) -> str:
+    """Role prompt for ``mode`` plus the judge-report guardrails (cycle 007 D-007)."""
+    return _base_reader_prompt_for_mode(mode) + READER_JUDGE_REPORT_GUARD
 
 
 READER_VERBS = frozenset(

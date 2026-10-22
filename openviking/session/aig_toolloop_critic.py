@@ -40,7 +40,7 @@ CRITIC_NEUTRAL_PROMPT = CRITIC_SUCCESS_PROMPT.replace(
 )
 
 
-def critic_prompt_for_mode(mode: str | None) -> str:
+def _base_critic_prompt_for_mode(mode: str | None) -> str:
     """Fail-closed: None or an unknown mode keeps the fail narrative."""
     if closed_attribution_mode(mode) == "success":
         return CRITIC_SUCCESS_PROMPT
@@ -48,6 +48,13 @@ def critic_prompt_for_mode(mode: str | None) -> str:
         return CRITIC_NEUTRAL_PROMPT
     return CRITIC_SYSTEM_PROMPT
 
+
+CRITIC_JUDGE_REPORT_GUARD = '\n评审报告（get_overview 的 outcome.feedback，若存在）：先核对图是否忠实于日志；再检查报告中的每条发现能否在图中定位到对应块。找不到轨迹证据的发现，在 note 中标注"无轨迹证据"，不要强行要求某个块承载它。get_overview 的交互 DAG 只是导航，不是应照抄的分块标准。'
+
+
+def critic_prompt_for_mode(mode: str | None) -> str:
+    """Role prompt for ``mode`` plus the judge-report guardrails (cycle 007 D-007)."""
+    return _base_critic_prompt_for_mode(mode) + CRITIC_JUDGE_REPORT_GUARD
 
 CRITIC_VERBS = frozenset(
     {

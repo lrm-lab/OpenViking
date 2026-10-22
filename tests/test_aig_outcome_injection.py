@@ -187,16 +187,16 @@ def test_reader_output_schema_string_is_identical() -> None:
 
 
 def test_prompt_selectors_are_fail_closed() -> None:
-    assert builder_prompt_for_mode("fail") == BUILDER_SYSTEM_PROMPT
-    assert builder_prompt_for_mode("success") == BUILDER_SUCCESS_PROMPT
-    assert builder_prompt_for_mode(None) == BUILDER_SYSTEM_PROMPT
-    assert builder_prompt_for_mode("bogus") == BUILDER_SYSTEM_PROMPT
-    assert critic_prompt_for_mode(None) == CRITIC_SYSTEM_PROMPT
-    assert critic_prompt_for_mode("success") == CRITIC_SUCCESS_PROMPT
-    assert refiner_prompt_for_mode("success") == REFINER_SUCCESS_PROMPT
-    assert refiner_prompt_for_mode("FAIL") == REFINER_SYSTEM_PROMPT
-    assert reader_prompt_for_mode("success") == READER_SUCCESS_PROMPT
-    assert reader_prompt_for_mode(None) == READER_SYSTEM_PROMPT
+    assert builder_prompt_for_mode("fail").startswith(BUILDER_SYSTEM_PROMPT)
+    assert builder_prompt_for_mode("success").startswith(BUILDER_SUCCESS_PROMPT)
+    assert builder_prompt_for_mode(None).startswith(BUILDER_SYSTEM_PROMPT)
+    assert builder_prompt_for_mode("bogus").startswith(BUILDER_SYSTEM_PROMPT)
+    assert critic_prompt_for_mode(None).startswith(CRITIC_SYSTEM_PROMPT)
+    assert critic_prompt_for_mode("success").startswith(CRITIC_SUCCESS_PROMPT)
+    assert refiner_prompt_for_mode("success").startswith(REFINER_SUCCESS_PROMPT)
+    assert refiner_prompt_for_mode("FAIL").startswith(REFINER_SYSTEM_PROMPT)
+    assert reader_prompt_for_mode("success").startswith(READER_SUCCESS_PROMPT)
+    assert reader_prompt_for_mode(None).startswith(READER_SYSTEM_PROMPT)
 
 
 def test_run_toolloop_default_mode_matches_fail_prompt(tmp_path: Path) -> None:
@@ -224,9 +224,9 @@ def test_run_toolloop_default_mode_matches_fail_prompt(tmp_path: Path) -> None:
         run_id="run-success",
         mode="success",
     )
-    assert default_provider.turns[0].system_prompt == BUILDER_SYSTEM_PROMPT
-    assert fail_provider.turns[0].system_prompt == BUILDER_SYSTEM_PROMPT
-    assert success_provider.turns[0].system_prompt == BUILDER_SUCCESS_PROMPT
+    assert default_provider.turns[0].system_prompt.startswith(BUILDER_SYSTEM_PROMPT)
+    assert fail_provider.turns[0].system_prompt.startswith(BUILDER_SYSTEM_PROMPT)
+    assert success_provider.turns[0].system_prompt.startswith(BUILDER_SUCCESS_PROMPT)
     assert default_provider.turns[0].tools == fail_provider.turns[0].tools
     assert default.status == explicit.status == "submitted"
     assert [item.verb for item in default.audit] == [item.verb for item in explicit.audit]
@@ -265,7 +265,7 @@ def test_critic_and_refiner_honor_mode(tmp_path: Path) -> None:
     surface.add_block("conclusion", {"content": "the answer", "step_refs": [1]}, block_id="end-1")
     critic = FakeCriticProvider([{"violations": []}])
     audit_semantics(surface, (), critic, mode="success")
-    assert critic.turns[0].system_prompt == CRITIC_SUCCESS_PROMPT
+    assert critic.turns[0].system_prompt.startswith(CRITIC_SUCCESS_PROMPT)
     surface.submit()
     violation = PaperViolation(
         violation_id="critic:0:semantic:agent-1",
@@ -280,4 +280,4 @@ def test_critic_and_refiner_honor_mode(tmp_path: Path) -> None:
     )
     refiner = FakeRefinerProvider()
     run_refiner_round(RefinerSession(surface, (violation,)), refiner, mode="success")
-    assert refiner.turns[0].system_prompt == REFINER_SUCCESS_PROMPT
+    assert refiner.turns[0].system_prompt.startswith(REFINER_SUCCESS_PROMPT)

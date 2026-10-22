@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from openviking.session.outcome_signal import OUTCOME_FEEDBACK_LIMIT
 from openviking.session.aig_native_protocol import (
     OutcomeContract,
     ProtocolContractError,
@@ -70,6 +71,7 @@ _TELEMETRY_KEYS = frozenset({"summary", "tokens", "telemetry", "telemetry_id"})
 _NAMESPACE = "outcome-contracts"
 _RECORD_CONTRACT = "outcome_contract"
 _RECORD_ASSESSMENT = "task_outcome_assessment"
+
 
 
 class OutcomeContractError(ValueError):
@@ -543,7 +545,21 @@ def _parse_result(item: Any) -> ExternalOutcomeEvidence:
         raise OutcomeContractError("invalid_external_evidence")
     if _TELEMETRY_KEYS.intersection(item):
         raise OutcomeContractError("telemetry_is_not_outcome_evidence")
-    if set(item) != _RESULT_KEYS:
+    # ``reward`` is optional (ADR-0046): the official numeric score for the run.
+    # It is not part of evidence identity and never changes the pass/fail signal.
+    if not _RESULT_KEYS <= set(item) <= _RESULT_KEYS | {"reward", "feedback"}:
+        raise OutcomeContractError("invalid_external_evidence")
+    # ``feedback`` (cycle 007 D-007) is the official judge report text. Optional,
+    # length-capped, not part of evidence identity and never changes the signal.
+    feedback = item.get("feedback")
+    if "feedback" in item and (
+        not isinstance(feedback, str) or len(feedback) > OUTCOME_FEEDBACK_LIMIT
+    ):
+        raise OutcomeContractError("invalid_external_evidence")
+    reward = item.get("reward")
+    if "reward" in item and (
+        isinstance(reward, bool) or not isinstance(reward, (int, float)) or not 0 <= reward <= 1
+    ):
         raise OutcomeContractError("invalid_external_evidence")
     binding_id = item.get("binding_id")
     signal_kind = item.get("signal_kind")
