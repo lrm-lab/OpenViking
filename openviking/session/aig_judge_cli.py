@@ -24,6 +24,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import urllib.request
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -67,8 +68,9 @@ class ChatJudgeProvider:
         base_url: str,
         model: str,
         urlopen: Callable[..., Any] | None = None,
-        timeout: float = 240.0,
-        max_tokens: int = 4096,
+        timeout: float = 600.0,
+        attempts: int = 3,
+        max_tokens: int = 16384,
     ) -> None:
         self._response_text = response_text
         self._key = key
@@ -76,6 +78,7 @@ class ChatJudgeProvider:
         self._model = model
         self._urlopen = urlopen or urllib.request.urlopen
         self._timeout = timeout
+        self._attempts = attempts
         self._max_tokens = max_tokens
 
     def __call__(self, turn: JudgeTurn) -> JudgeInvocation:
@@ -104,6 +107,8 @@ class ChatJudgeProvider:
             + json.dumps(turn.graph, ensure_ascii=False, sort_keys=True)
             + '\n\n可用只读工具（每次回复一个 JSON：{"tool":名,"args":{..}} 或最终裁决）：\n'
             + tools
+            + "\n\n格式要求：decisive_ao_refs 必须是整数行号（read_step 的 index，例如 [1]），"
+            "不是 ao_id 字符串；evidence_block_ids 用图中的块 id；只能引用已读过的行。"
             + f"\n\n剩余工具调用次数：{turn.remaining_calls}\n已读 AO 行：{list(turn.read_ao_refs)}\n"
             + "工具历史：\n"
             + history
@@ -126,12 +131,17 @@ class ChatJudgeProvider:
                 "Content-Type": "application/json",
             },
         )
-        try:
-            with self._urlopen(request, timeout=self._timeout) as response:
-                payload = json.loads(response.read().decode())
-            content = payload["choices"][0]["message"]["content"]
-        except Exception as exc:  # never carry the body or the key in the error
-            raise JudgeError("provider_unavailable") from exc
+        content = None
+        for attempt in range(self._attempts):
+            try:
+                with self._urlopen(request, timeout=self._timeout) as response:
+                    payload = json.loads(response.read().decode())
+                content = payload["choices"][0]["message"]["content"]
+                break
+            except Exception as exc:  # never carry the body or the key in the error
+                if attempt + 1 >= self._attempts:
+                    raise JudgeError("provider_unavailable") from exc
+                time.sleep(min(2.0 * (attempt + 1), 10.0))
         if not isinstance(content, str) or not content.strip():
             raise JudgeError("invalid_provider_result")
         return content
