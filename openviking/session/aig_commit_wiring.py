@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from openviking.session.ao_ledger import AORecord
 from openviking.session.causal_mode import is_session_causal
 from openviking.session.outcome_contract import external_evidence_from_session
 from openviking.session.outcome_signal import OutcomeSignal
+from openviking.session.session_acl import session_owner_label
 from openviking.session.trajectory_index_hook import (
     _page_ao_records,
     _stable_snapshot_watermark,
@@ -31,13 +33,15 @@ def commit_outcome_signal(session: Any) -> OutcomeSignal | None:
     evidence = external_evidence_from_session(evaluator_results=raw)
     if not evidence or len({item.signal for item in evidence}) != 1:
         return None
-    return OutcomeSignal(
-        evidence[0].signal,
-        "verifier",
-        {
-            "evidence_refs": [item.evidence_ref for item in evidence],
-        },
-    )
+    raw_signal: dict[str, Any] = {"evidence_refs": [item.evidence_ref for item in evidence]}
+    rewards = [
+        item["reward"]
+        for item in raw
+        if isinstance(item, dict) and isinstance(item.get("reward"), (int, float))
+    ]
+    if rewards and len(rewards) == len(raw):
+        raw_signal["reward"] = float(min(rewards))  # the weakest evaluator decides
+    return OutcomeSignal(evidence[0].signal, "verifier", raw_signal)
 
 
 def commit_failure_signal(session: Any) -> OutcomeSignal | None:
@@ -56,6 +60,46 @@ def _question(session: Any, records: tuple[AORecord, ...]) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def user_root_for_session(session: Any) -> Path | None:
+    """On-disk user root that holds the overlay and card stores, or None."""
+    from openviking.core.namespace import canonical_user_root
+
+    viking_fs = getattr(session, "_viking_fs", None)
+    ctx = getattr(session, "ctx", None)
+    if viking_fs is None or ctx is None:
+        return None
+    try:
+        raw = viking_fs._uri_to_path(canonical_user_root(ctx), ctx=ctx)
+    except Exception:
+        return None
+    return Path(raw) if raw else None
+
+
+def card_hook_for_session(session: Any, vlm_handle: Any) -> Any:
+    """Post-freeze card hook, or None. Off unless the session opts in (ADR-0046)."""
+    if getattr(session, "experience_cards_enabled", False) is not True:
+        return None
+    root = user_root_for_session(session)
+    if root is None:
+        return None
+    try:
+        label = session_owner_label(session)
+    except ValueError:
+        return None
+    from functools import partial
+
+    from openviking.session.aig_vlm_roles import VLMCardProposer
+    from openviking.session.card_proposer import run_card_proposer
+
+    def hook(revision: Any, snapshot: AoSnapshot, read: Any) -> Any:
+        provider = VLMCardProposer(vlm_handle, time.monotonic() + 60.0)
+        return partial(run_card_proposer, card_root=root, owner_label=label)(
+            revision, snapshot, read, provider
+        )
+
+    return hook
 
 
 def run_commit_four_roles(session: Any, task_id: str, vlm_handle: Any) -> ProductionAigResult:
@@ -86,4 +130,5 @@ def run_commit_four_roles(session: Any, task_id: str, vlm_handle: Any) -> Produc
         root=Path(root),
         task_run_id=task_id,
         providers=providers_for_vlm(vlm_handle),
+        card_hook=card_hook_for_session(session, vlm_handle),
     )

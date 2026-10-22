@@ -119,3 +119,129 @@ def test_low_score_failed_and_bad_proposals_never_change_the_pipeline(tmp_path: 
 
     out = _run(tmp_path / "c", _pass(0.9), boom, tmp_path / "cards-c")
     assert out.status == "frozen" and out.card_ids == ()
+
+
+# ---- commit wiring ------------------------------------------------------
+
+def _result(signal: str = "pass", **extra) -> dict:
+    return {"binding_id": "b1", "signal_kind": "evaluator", "signal": signal,
+            "evidence_ref": "evidence:1", **extra}
+
+
+def test_evaluator_reward_is_optional_validated_and_carried() -> None:
+    import pytest
+
+    from openviking.session.aig_commit_wiring import commit_outcome_signal
+    from openviking.session.outcome_contract import (
+        OutcomeContractError,
+        external_evidence_from_session,
+    )
+    from types import SimpleNamespace
+
+    with_reward = SimpleNamespace(outcome_evaluator_results=[_result(reward=0.8)])
+    signal = commit_outcome_signal(with_reward)
+    assert signal is not None and signal.raw["reward"] == 0.8
+    assert outcome_task_score(signal) == 0.8
+    plain = commit_outcome_signal(SimpleNamespace(outcome_evaluator_results=[_result()]))
+    assert plain is not None and "reward" not in plain.raw
+    assert outcome_task_score(plain) is None
+    two = SimpleNamespace(outcome_evaluator_results=[
+        _result(reward=0.9), {**_result(reward=0.7), "binding_id": "b2"}])
+    assert commit_outcome_signal(two).raw["reward"] == 0.7  # weakest evaluator decides
+    for bad in (1.5, -0.1, True, "0.9"):
+        with pytest.raises(OutcomeContractError):
+            external_evidence_from_session(evaluator_results=[_result(reward=bad)])
+    with pytest.raises(OutcomeContractError):
+        external_evidence_from_session(evaluator_results=[_result(extra=1)])
+
+
+def test_vlm_card_proposer_parses_strictly() -> None:
+    import asyncio
+    import json
+    import time
+
+    import pytest
+
+    from openviking.session.aig_vlm_roles import VLMCardProposer
+
+    class Handle:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+        async def get_completion_async(self, **_kw):
+            await asyncio.sleep(0)
+            return self.content
+
+    turn = ProposerTurn("p", {}, "r", "h", "d", {}, (), "pass", ("skill_card",))
+    ok = VLMCardProposer(Handle(json.dumps({"proposals": [{"kind": "skill_card"}]})),
+                         time.monotonic() + 30)
+    assert ok(turn) == [{"kind": "skill_card"}]
+    for body in ('{"proposals": "x"}', '{"proposals": [1]}', '{"other": []}', "not json"):
+        with pytest.raises(Exception):
+            VLMCardProposer(Handle(body), time.monotonic() + 30)(turn)
+
+
+def test_card_hook_is_off_by_default_and_needs_a_user_root(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from openviking.session.aig_commit_wiring import card_hook_for_session, user_root_for_session
+
+    session = SimpleNamespace(session_id="s", ctx=None, _viking_fs=None)
+    assert card_hook_for_session(session, object()) is None
+    session.experience_cards_enabled = True
+    assert user_root_for_session(session) is None
+    assert card_hook_for_session(session, object()) is None  # no user root, no hook
+
+
+def test_card_hook_runs_through_a_session_and_writes_under_the_user_root(tmp_path: Path) -> None:
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    from openviking.session import aig_vlm_roles
+    from openviking.session.aig_commit_wiring import card_hook_for_session
+
+    user_root = tmp_path / "user-alice"
+    session = SimpleNamespace(
+        session_id="s",
+        ctx=SimpleNamespace(user=SimpleNamespace(user_id="alice")),
+        _viking_fs=SimpleNamespace(_uri_to_path=lambda uri, ctx=None: str(user_root)),
+        experience_cards_enabled=True,
+    )
+    captured: dict = {}
+
+    class Handle:
+        async def get_completion_async(self, **kw):
+            await asyncio.sleep(0)
+            state = json.loads(kw["messages"][1]["content"])
+            captured["state"] = state
+            first, last = list(state["block_aos"])[0], list(state["block_aos"])[-1]
+            return json.dumps({"proposals": [_proposal_from_state(state, first, last)]})
+
+    hook = card_hook_for_session(session, Handle())
+    assert hook is not None and aig_vlm_roles.VLMCardProposer
+    snapshot = replace(_snapshot(), outcome=_pass(0.9))
+    result = run_production_aig(
+        snapshot, root=tmp_path / "session", task_run_id="task-h",
+        frozen_at="2026-10-14T00:00:00Z", providers=_providers(), card_hook=hook,
+    )
+    assert result.status == "frozen" and len(result.card_ids) == 1
+    store = ExperienceCardStore(user_root, ForkNodeOverlayStore(user_root))
+    assert store.read(result.card_ids[0], principal_labels=["user:alice"]) is not None
+    assert captured["state"]["allowed_kinds"] == ["skill_card"]
+
+
+def _proposal_from_state(state: dict, first: str, last: str) -> dict:
+    return {
+        "kind": "skill_card",
+        "base_revision_id": state["base_revision_id"],
+        "base_revision_block_content_hash": state["base_revision_block_content_hash"],
+        "report_hash": state["report_hash"],
+        "boundary": "仅适用于解析器修复",
+        "gamma": {"deliverable": "text", "abstract_text": "修复解析器", "anchors": [first]},
+        "steps": [
+            {"step_id": "s1", "step_kind": "produce", "statement": "定位", "block_id": first},
+            {"step_id": "s2", "step_kind": "verify", "statement": "核对", "block_id": last,
+             "issue_kind": "incorrect", "check_how": "对照输出", "violation_sign": "为零"},
+        ],
+    }

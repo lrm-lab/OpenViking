@@ -177,6 +177,31 @@ class VLMReader(_RoleModel):
         return ReaderInvocation("report", report=result)
 
 
+class VLMCardProposer(_RoleModel):
+    """One call: the frozen graph and facts in, ``{"proposals": [...]}`` out."""
+
+    def __call__(self, turn: Any) -> list[dict[str, Any]]:
+        result = self._ask(
+            turn.system_prompt + '\nOutput {"proposals":[<proposal>, ...]}; an empty list is fine.',
+            {
+                "frozen_graph": turn.graph,
+                "base_revision_id": turn.base_revision_id,
+                "base_revision_block_content_hash": turn.base_revision_block_content_hash,
+                "report_hash": turn.report_hash,
+                "block_aos": turn.block_aos,
+                "read_aos": turn.read_aos,
+                "outcome": turn.outcome_digest,
+                "allowed_kinds": turn.allowed_kinds,
+            },
+        )
+        proposals = result.get("proposals")
+        if set(result) != {"proposals"} or not isinstance(proposals, list):
+            raise ValueError("invalid_card_proposals")
+        if any(not isinstance(item, dict) for item in proposals):
+            raise ValueError("invalid_card_proposals")
+        return proposals
+
+
 def providers_for_vlm(handle: Any) -> AigRoleProviders:
     """Create separate role states on the request's account-scoped model handle."""
     deadline = time.monotonic() + 150.0
