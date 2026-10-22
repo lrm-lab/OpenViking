@@ -186,3 +186,29 @@ def test_find_filters_boosts_and_relaxes(tmp_path: Path) -> None:
     assert res.hits == () and not res.relaxed
     assert cards.find(principal_labels=_OTHER).hits == ()
     assert pdf.card_id != xlsx.card_id
+
+
+def test_http_face_submit_and_find(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from openviking.server.routers.experience_cards import (
+        CardFindRequest,
+        CardSubmitRequest,
+        find_cards,
+        submit_card,
+    )
+
+    _, rev, cat, cards = _setup(tmp_path)
+    ctx = SimpleNamespace(user=SimpleNamespace(user_id="alice"))
+    sub = submit_card(
+        ctx,
+        CardSubmitRequest(
+            proposal=_skill(cat, rev), block_aos={"b-1": ["ao-1"], "b-2": ["ao-2"]}
+        ),
+        store=cards,
+    )
+    assert sub["kind"] == CARD_KIND_SKILL and not sub["deduplicated"]
+    out = find_cards(ctx, CardFindRequest(query="pdf 财务报告", deliverable="pdf"), store=cards)
+    assert out["relaxed"] is False and out["cards"][0]["card_id"] == sub["card_id"]
+    bob = SimpleNamespace(user=SimpleNamespace(user_id="bob"))
+    assert find_cards(bob, CardFindRequest(), store=cards)["cards"] == []
