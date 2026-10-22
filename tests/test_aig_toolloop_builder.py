@@ -104,7 +104,7 @@ def test_fake_provider_inspects_builds_and_submits(tmp_path: Path) -> None:
     assert result.audit[0].verb == "get_overview"
     assert result.audit[0].result_summary == "rows=2"
     assert result.audit[-1].result_summary == "submitted"
-    assert provider.turns[0].system_prompt == BUILDER_SYSTEM_PROMPT
+    assert provider.turns[0].system_prompt.startswith(BUILDER_SYSTEM_PROMPT)
     assert provider.turns[0].tools == TOOL_CATALOG
     assert len(provider.turns[0].tools) == 19
     assert provider.turns[1].history[0]["verb"] == "get_overview"

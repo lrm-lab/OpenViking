@@ -172,7 +172,7 @@ def test_deterministic_reader_freezes_the_role_chain_hash(tmp_path: Path) -> Non
     assert result.reader_report_hash == run.reader_report_hash
     assert run.phase == "SYNTHESIZE_PROPOSE"
     assert result.budget_exhausted is False
-    assert provider.turns[0].system_prompt == READER_SYSTEM_PROMPT
+    assert provider.turns[0].system_prompt.startswith(READER_SYSTEM_PROMPT)
     assert {name for name, _text in provider.turns[0].tools} == READER_VERBS
     assert result.tool_calls >= 2
 

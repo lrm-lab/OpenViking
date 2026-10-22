@@ -105,7 +105,7 @@ def test_catalog_excludes_submit_and_keeps_the_prompt(tmp_path: Path) -> None:
     session = RefinerSession(surface, (_semantic(),))
     provider = FakeRefinerProvider()
     run_refiner_round(session, provider)
-    assert provider.turns[0].system_prompt == REFINER_SYSTEM_PROMPT
+    assert provider.turns[0].system_prompt.startswith(REFINER_SYSTEM_PROMPT)
     assert "violation_id" in REFINER_SYSTEM_PROMPT
 
 

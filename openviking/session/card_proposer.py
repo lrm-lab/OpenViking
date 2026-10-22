@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from openviking.session.aig_toolloop_reader import ReaderNavigationResult
-from openviking.session.aig_tool_surface import AoSnapshot
+from openviking.session.aig_tool_surface import AoSnapshot, _participant
 from openviking.session.experience_cards import (
     CARD_KIND_SKILL,
     EXPERIENCE_CARD_PROPOSER_PROMPT,
@@ -119,6 +119,8 @@ def run_card_proposer(
     store = ExperienceCardStore(card_root, overlays)
     block_aos = block_ao_index(revision)
     read_aos = read_ao_ids(revision, read.read_ao_refs)
+    # Server-bound identity of each cited AO's actor (cycle 006 D-004).
+    ao_participants = {record.ao_id: _participant(record) for record in snapshot.records}
     turn = ProposerTurn(
         system_prompt=EXPERIENCE_CARD_PROPOSER_PROMPT,
         graph=read.graph,
@@ -143,11 +145,19 @@ def run_card_proposer(
             rejected.append(("kind_not_allowed", kind))
             continue
         bound = dict(proposal)
+        # Identity of the frozen revision is bound by the server, not copied by the model.
+        bound["base_revision_id"] = catalog.base_revision_id
+        bound["base_revision_block_content_hash"] = catalog.block_content_hash
+        bound["report_hash"] = document_hash
         bound["author_role"] = "reader"
         bound["task_score"] = score
         try:
             card, _dup = store.submit(
-                bound, principal_labels=labels, block_aos=block_aos, read_aos=read_aos
+                bound,
+                principal_labels=labels,
+                block_aos=block_aos,
+                read_aos=read_aos,
+                ao_participants=ao_participants,
             )
         except ExperienceCardError as exc:
             rejected.append((exc.code, kind))

@@ -36,6 +36,9 @@ _REF_KEYS = (
     "tool_output_storage_uri",
     "storage_uri",
 )
+CHANNEL_SEND_KIND = "channel_message"
+CHANNEL_RECEIVE_KIND = "channel_receive"
+CHANNEL_NOTICE_KIND = "channel_notice"
 _PARAM_KEYS = ("arguments", "params", "parameters", "args", "tool_input")
 _CONTENT_KEYS = ("content", "output", "tool_output", "text")
 
@@ -275,6 +278,14 @@ def _stored_dedup_identity(record: AORecord) -> tuple[str, ...]:
         source_ids = message_ref.get("source_message_ids")
         if isinstance(source_ids, list) and source_ids:
             return ("source_message", *sorted(str(item) for item in source_ids))
+    if message_ref.get("key_kind") == "delivery":
+        return (
+            "delivery",
+            str(message_ref.get("channel") or ""),
+            str(message_ref.get("event_id") or ""),
+            str(record.action.get("participant_id") or ""),
+            str(record.action.get("kind") or ""),
+        )
     if message_ref.get("key_kind") == "fallback" and message_ref.get("dedup_key"):
         return ("fallback", str(message_ref["dedup_key"]))
     primary = _exchange_dedup_key(record.message_ref)
@@ -339,18 +350,40 @@ class AOLedgerRecorder:
         self.duplicate_skip_count = 0
         self._seen_exchange_keys: set[tuple[str, ...]] = set()
         self._dedup_lock = threading.Lock()
+        # Closed segments per participant (cycle 007 D-001/D-002): an agent's
+        # segment opens with its first AO after a send and closes at the send.
+        self._closed_segments: dict[str, int] = {}
         for record in self.ledger.records():
             key = _stored_dedup_identity(record)
             if key:
                 self._seen_exchange_keys.add(key)
+            action = record.action if isinstance(record.action, dict) else {}
+            if action.get("kind") == CHANNEL_SEND_KIND:
+                who = str(action.get("participant_id") or "")
+                if who:
+                    self._closed_segments[who] = self._closed_segments.get(who, 0) + 1
+
+    def _open_segment_id(self, participant: str) -> str:
+        with self._dedup_lock:
+            return f"{participant}#{self._closed_segments.get(participant, 0) + 1}"
+
+    def _close_segment(self, participant: str) -> None:
+        with self._dedup_lock:
+            self._closed_segments[participant] = self._closed_segments.get(participant, 0) + 1
 
     def record_tool_exchange(
         self,
         tool_call: dict[str, Any],
         tool_result: Any,
         message_ref: dict[str, Any] | None = None,
+        *,
+        participant_id: str | None = None,
     ) -> AORecord | None:
         """Append one AO pair.
+
+        ``participant_id`` is bound by the server from the message ``peerId``
+        (cycle 006 D-001); the tool-call AO also joins that participant's
+        open segment (cycle 007 D-002). Model-supplied values are never read.
 
         Dedup prefers ``(message_id, tool_call_id)`` (``tool_call_id`` or the
         session ``tool_id`` alias). When either id is missing, a fallback key
@@ -366,6 +399,7 @@ class AOLedgerRecorder:
             primary = _exchange_dedup_key(message_ref)
             action = _action_from_tool_call(dict(tool_call))
             observation: dict[str, Any] | None = None
+            bound_participant = str(participant_id or "").strip()
             if primary is not None:
                 dedup_key = ("primary", primary[0], primary[1])
             else:
@@ -396,6 +430,9 @@ class AOLedgerRecorder:
             artifact_ref = _extract_artifact_ref(tool_call, tool_result, message_ref)
             if artifact_ref:
                 observation["artifact_ref"] = artifact_ref
+            if bound_participant:
+                action["participant_id"] = bound_participant
+                action["segment_id"] = self._open_segment_id(bound_participant)
             stored_ref = dict(message_ref) if message_ref else None
             if dedup_key[0] == "fallback":
                 stored_ref = dict(stored_ref or {})
@@ -445,44 +482,11 @@ class AOLedgerRecorder:
 
         recorded: list[AORecord] = []
         for message in messages:
-            source_ids = getattr(message, "source_message_ids", None)
-            content = getattr(message, "content", "")
-            if (
-                isinstance(source_ids, list) and source_ids
-                and all(isinstance(item, str) and item for item in source_ids)
-                and isinstance(content, str) and content.strip()
-            ):
-                key = ("source_message", *sorted(source_ids))
-                with self._dedup_lock:
-                    if key in self._seen_exchange_keys:
-                        self.duplicate_skip_count += 1
-                        captured = False
-                    else:
-                        self._seen_exchange_keys.add(key)
-                        captured = True
-                if captured:
-                    try:
-                        participant = getattr(message, "peer_id", None) or getattr(message, "role", "")
-                        record = self.ledger.append(
-                            action={
-                                "kind": "channel_message",
-                                "participant_id": participant,
-                                "segment_id": source_ids[0],
-                                "text": content,
-                            },
-                            observation={"text": content, "delivery": "recorded"},
-                            skill_invocations=[],
-                            message_ref={
-                                "key_kind": "source_message",
-                                "source_message_ids": list(source_ids),
-                                "message_id": getattr(message, "id", None),
-                            },
-                        )
-                        recorded.append(record)
-                    except Exception:
-                        with self._dedup_lock:
-                            self._seen_exchange_keys.discard(key)
-                        logger.warning("AO ledger source message capture failed", exc_info=True)
+            participant = str(
+                getattr(message, "peer_id", None) or getattr(message, "role", "") or ""
+            )
+            # Tool calls come first so they land in the segment that the
+            # message's send AO closes (closed interval, cycle 007 D-002).
             for part in getattr(message, "parts", None) or []:
                 if not _is_tool_part(part) or not _has_tool_result(part):
                     continue
@@ -502,10 +506,103 @@ class AOLedgerRecorder:
                     _tool_call_dict(call_part),
                     _tool_result_payload(part),
                     message_ref or None,
+                    participant_id=participant,
                 )
                 if record is not None:
                     recorded.append(record)
+            source_ids = getattr(message, "source_message_ids", None)
+            content = getattr(message, "content", "")
+            if (
+                isinstance(source_ids, list) and source_ids
+                and all(isinstance(item, str) and item for item in source_ids)
+                and isinstance(content, str) and content.strip()
+            ):
+                key = ("source_message", *sorted(source_ids))
+                with self._dedup_lock:
+                    if key in self._seen_exchange_keys:
+                        self.duplicate_skip_count += 1
+                        captured = False
+                    else:
+                        self._seen_exchange_keys.add(key)
+                        captured = True
+                if captured:
+                    try:
+                        record = self.ledger.append(
+                            action={
+                                "kind": CHANNEL_SEND_KIND,
+                                "participant_id": participant,
+                                "segment_id": self._open_segment_id(participant),
+                                "text": content,
+                            },
+                            observation={"text": content, "delivery": "recorded"},
+                            skill_invocations=[],
+                            message_ref={
+                                "key_kind": "source_message",
+                                "source_message_ids": list(source_ids),
+                                "event_id": source_ids[0],
+                                "message_id": getattr(message, "id", None),
+                            },
+                        )
+                        self._close_segment(participant)
+                        recorded.append(record)
+                    except Exception:
+                        with self._dedup_lock:
+                            self._seen_exchange_keys.discard(key)
+                        logger.warning("AO ledger source message capture failed", exc_info=True)
         return recorded
+
+    def record_channel_delivery(
+        self,
+        *,
+        participant_id: str,
+        event_id: str,
+        text: str,
+        channel: str = "",
+        cutting: bool = True,
+    ) -> AORecord | None:
+        """Record one receiver's side of a delivered channel message.
+
+        ``cutting=True`` is the receive AO written when the agent's consumed
+        cursor covers the message; it opens the receiver's next segment.
+        ``cutting=False`` is the non-cutting notice AO written on a daemon
+        ``notified`` decision (cycle 007 D-004) and never opens a segment.
+        Dedup key: ``{channel, event, participant, direction}``.
+        """
+        participant = str(participant_id or "").strip()
+        event = str(event_id or "").strip()
+        if not participant or not event:
+            raise ValueError("participant_id and event_id are required")
+        kind = CHANNEL_RECEIVE_KIND if cutting else CHANNEL_NOTICE_KIND
+        key = ("delivery", str(channel), event, participant, kind)
+        with self._dedup_lock:
+            if key in self._seen_exchange_keys:
+                self.duplicate_skip_count += 1
+                return None
+            self._seen_exchange_keys.add(key)
+        try:
+            action: dict[str, Any] = {
+                "kind": kind,
+                "participant_id": participant,
+                "text": text,
+            }
+            if cutting:
+                action["segment_id"] = self._open_segment_id(participant)
+            return self.ledger.append(
+                action=action,
+                observation={"text": text, "delivery": "read" if cutting else "notified"},
+                skill_invocations=[],
+                message_ref={
+                    "key_kind": "delivery",
+                    "channel": str(channel),
+                    "event_id": event,
+                    "direction": "receive",
+                },
+            )
+        except Exception:
+            with self._dedup_lock:
+                self._seen_exchange_keys.discard(key)
+            logger.warning("AO ledger channel delivery capture failed", exc_info=True)
+            return None
 
 
 def maybe_record_session_tool_exchanges(session: Any, messages: list[Any]) -> None:

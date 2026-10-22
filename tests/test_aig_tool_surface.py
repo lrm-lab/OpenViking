@@ -183,7 +183,8 @@ def test_catalog_covers_nineteen_verbs() -> None:
 
 def test_overview_full_segment_and_step_bounds(tmp_path: Path) -> None:
     surface, _snapshot = _open(tmp_path, ["alpha", "beta"])
-    overview = surface.get_overview()
+    assert "rows" not in surface.get_overview()
+    overview = surface.call("get_overview", {"include_rows": True})
     assert overview["row_count"] == 2
     assert overview["watermark"] == "wm-1"
     assert overview["rows"][0]["participant"] == "agent-a"
@@ -350,7 +351,7 @@ def test_bulk_reads_truncate_but_read_step_stays_full(tmp_path: Path) -> None:
     step1 = surface.read_step(1)
     assert step1["record"]["action"]["text"] == long_action
 
-    overview = surface.get_overview()
+    overview = surface.call("get_overview", {"include_rows": True})
     assert overview["rows"][0]["size"] > 2 * 2000
 
     matches = surface.call("search", {"pattern": "B{4500}"})

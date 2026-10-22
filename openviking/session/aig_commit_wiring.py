@@ -15,7 +15,7 @@ from openviking.session.aig_vlm_roles import providers_for_vlm
 from openviking.session.ao_ledger import AORecord
 from openviking.session.causal_mode import is_session_causal
 from openviking.session.outcome_contract import external_evidence_from_session
-from openviking.session.outcome_signal import OutcomeSignal
+from openviking.session.outcome_signal import OUTCOME_FEEDBACK_LIMIT, OutcomeSignal
 from openviking.session.session_acl import session_owner_label
 from openviking.session.trajectory_index_hook import (
     _page_ao_records,
@@ -41,6 +41,13 @@ def commit_outcome_signal(session: Any) -> OutcomeSignal | None:
     ]
     if rewards and len(rewards) == len(raw):
         raw_signal["reward"] = float(min(rewards))  # the weakest evaluator decides
+    reports = [
+        item["feedback"].strip()
+        for item in raw
+        if isinstance(item, dict) and isinstance(item.get("feedback"), str) and item["feedback"].strip()
+    ]
+    if reports:
+        raw_signal["feedback"] = "\n\n".join(reports)[:OUTCOME_FEEDBACK_LIMIT]
     return OutcomeSignal(evidence[0].signal, "verifier", raw_signal)
 
 

@@ -93,6 +93,8 @@ class CardStep:
     statement: str
     block_id: str
     ao_refs: tuple[str, ...] = ()
+    # (ao_id, participant_id) per cited AO, bound by the server (cycle 006 D-004).
+    ao_participants: tuple[tuple[str, str], ...] = ()
     issue_kind: str | None = None  # verify: the issue checked
     check_how: str | None = None  # verify only
     violation_sign: str | None = None  # verify only
@@ -148,6 +150,7 @@ def read_card_proposal(
     *,
     block_aos: Mapping[str, Sequence[str]] | None = None,
     read_aos: Sequence[str] | None = None,
+    ao_participants: Mapping[str, str] | None = None,
 ) -> ExperienceCard:
     """Validate a Reader proposal against the registered revision.
 
@@ -170,7 +173,9 @@ def read_card_proposal(
 
     gamma = _parse_gamma(payload.get("gamma"), members)
     boundary = _text(payload.get("boundary"), "boundary")
-    steps = _parse_steps(payload.get("steps"), members, block_aos, read_aos)
+    steps = _parse_steps(
+        payload.get("steps"), members, block_aos, read_aos, ao_participants
+    )
     score = _score(payload.get("task_score"))
 
     fork_node_id = payload.get("fork_node_id")
@@ -243,6 +248,7 @@ def _parse_steps(
     members: frozenset[str],
     block_aos: Mapping[str, Sequence[str]] | None,
     read_aos: Sequence[str] | None,
+    ao_participants: Mapping[str, str] | None = None,
 ) -> tuple[CardStep, ...]:
     if not isinstance(value, list) or not value:
         raise ExperienceCardError("shape", "steps must be a non-empty list")
@@ -294,6 +300,9 @@ def _parse_steps(
                 statement=_text(item.get("statement"), f"{label}.statement"),
                 block_id=block_id,
                 ao_refs=tuple(aos),
+                ao_participants=tuple(
+                    (ao, ao_participants[ao]) for ao in aos if ao_participants and ao in ao_participants
+                ),
                 issue_kind=issue,
                 check_how=check_how,
                 violation_sign=sign,
@@ -388,6 +397,8 @@ def _step_dict(step: CardStep) -> dict[str, Any]:
     }
     if step.ao_refs:
         out["ao_refs"] = list(step.ao_refs)
+    if step.ao_participants:
+        out["ao_participants"] = {ao: who for ao, who in step.ao_participants}
     if step.issue_kind is not None:
         out["issue_kind"] = step.issue_kind
     if step.check_how is not None:
@@ -434,6 +445,7 @@ def _card_from_body(body: Mapping[str, Any]) -> ExperienceCard:
                 statement=s["statement"],
                 block_id=s["block_id"],
                 ao_refs=tuple(s.get("ao_refs", ())),
+                ao_participants=tuple(sorted((s.get("ao_participants") or {}).items())),
                 issue_kind=s.get("issue_kind"),
                 check_how=s.get("check_how"),
                 violation_sign=s.get("violation_sign"),
@@ -487,6 +499,7 @@ class ExperienceCardStore:
         principal_labels: Sequence[str],
         block_aos: Mapping[str, Sequence[str]] | None = None,
         read_aos: Sequence[str] | None = None,
+        ao_participants: Mapping[str, str] | None = None,
     ) -> tuple[ExperienceCard, bool]:
         """Validate and write one card. Returns ``(card, deduplicated)``."""
         stated = payload.get("base_revision_id") if isinstance(payload, Mapping) else None
@@ -497,7 +510,13 @@ class ExperienceCardStore:
             catalog = self._overlays.registered_catalog(stated, principal_labels=sorted(principal))
         except ForkOverlayError as exc:
             raise ExperienceCardError(exc.code) from exc
-        card = read_card_proposal(payload, catalog, block_aos=block_aos, read_aos=read_aos)
+        card = read_card_proposal(
+            payload,
+            catalog,
+            block_aos=block_aos,
+            read_aos=read_aos,
+            ao_participants=ao_participants,
+        )
         try:
             document_hash = self._overlays.registered_document_hash(
                 stated, principal_labels=sorted(principal)
@@ -692,6 +711,16 @@ def _rank(
     return tuple(scored[:limit])
 
 
+_PROMPT_EXAMPLE = (
+    '{"kind":"skill_card","boundary":"只适用于需要按固定章节交付 Word 文档的任务",'
+    '"gamma":{"deliverable":"docx","issue_kind":"missing_section",'
+    '"abstract_text":"按给定章节清单起草结构化文档并逐项核对章节是否齐全","anchors":["b-1"]},'
+    '"steps":[{"step_id":"s1","step_kind":"produce","statement":"按清单起草各章节","block_id":"b-1"},'
+    '{"step_id":"s2","step_kind":"verify","statement":"交付前核对章节","block_id":"b-2",'
+    '"issue_kind":"missing_section","check_how":"逐项对照章节清单","violation_sign":"缺少任一必需章节"}]}'
+)
+
+
 def _prompt() -> str:
     return (
         "经验卡提案（submit_experience_card，参数 {proposal}）。服务端核对后才写入；你只提案。\n"
@@ -706,7 +735,10 @@ def _prompt() -> str:
         "abstract_text 用不含具体实体名的抽象句描述情境，anchors 列出支撑该情境的块。\n"
         "boundary（适用边界）必填：说明什么情况下不要用这张卡。\n"
         "接地：每一步 block_id 必须是冻结图中真实存在的块；ao_refs 可选，写则必须是该块内且你读过的 AO。"
-        "不确定就省略 ao_refs，不要猜。task_score、author_role 由服务端写入，你填的会被覆盖。"
+        "不确定就省略 ao_refs，不要猜。task_score、author_role 由服务端写入，你填的会被覆盖；"
+        "base_revision_id、base_revision_block_content_hash、report_hash 也由服务端写入，不必填。\n"
+        "每个 proposal 是一个平铺 JSON 对象（不要再套一层 skill_card 键），block_id 只能取输入 block_aos 的键。示例：\n"
+        + _PROMPT_EXAMPLE
     )
 
 

@@ -96,8 +96,13 @@ _LINK_KIND_SKIP = "skip"
 TOOL_CATALOG: tuple[tuple[str, str], ...] = (
     (
         "get_overview",
-        "Compact log metadata: row count, participant, segment, and size; "
-        "also the draft's claimed block spans (draft_blocks). "
+        "Interaction map of the log: row_count, watermark, and an interaction DAG "
+        "(segments = one agent's AO interval between two group-chat exchanges, with "
+        "participant, row range, size and tool names; events = chat messages; edges "
+        "local_continuation, emit, deliver). The map is read-only navigation, not a "
+        "partition to copy: a segment may split into several blocks. "
+        "Optional include_rows=true adds the per-row table (index, participant, "
+        "segment, size). Also returns the draft's claimed block spans (draft_blocks). "
         "Call once at the start; re-read it after a step_refs_overlap rejection "
         "to see which spans are already claimed.",
     ),
@@ -216,7 +221,7 @@ TOOL_EXACT_ARGS: Mapping[str, tuple[frozenset[str], frozenset[str]]] = {
     "delete_inheritance_note": (frozenset({"from", "to"}), frozenset({"from", "to"})),
     "delete_skip_attribution": (frozenset({"from", "to"}), frozenset({"from", "to"})),
     "get_graph": (frozenset(), frozenset()),
-    "get_overview": (frozenset(), frozenset()),
+    "get_overview": (frozenset({"include_rows"}), frozenset()),
     "get_question": (frozenset(), frozenset()),
     "get_story": (frozenset(), frozenset()),
     "list_agents": (frozenset(), frozenset()),
@@ -274,7 +279,7 @@ TOOL_SCHEMAS: Mapping[str, dict[str, Any]] = {
         ("from", "to"),
     ),
     "get_graph": _json_object({}),
-    "get_overview": _json_object({}),
+    "get_overview": _json_object({"include_rows": {"type": "boolean"}}),
     "get_question": _json_object({}),
     "get_story": _json_object({}),
     "list_agents": _json_object({}),
@@ -434,6 +439,96 @@ def _lookup(record: AORecord, keys: Sequence[str]) -> str:
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return ""
+
+
+
+_SEND_KIND = "channel_message"
+_RECEIVE_KIND = "channel_receive"
+_NOTICE_KIND = "channel_notice"
+
+
+def _event_id(record: AORecord) -> str:
+    ref = record.message_ref if isinstance(record.message_ref, Mapping) else {}
+    value = ref.get("event_id")
+    if isinstance(value, str) and value:
+        return value
+    ids = ref.get("source_message_ids")
+    if isinstance(ids, list) and ids and isinstance(ids[0], str):
+        return ids[0]
+    return ""
+
+
+def _interaction_dag(records: Sequence[AORecord]) -> dict[str, Any]:
+    """Deterministic L1 fact map: segment and message-event nodes, no model text."""
+    segments: dict[tuple[str, str], dict[str, Any]] = {}
+    events: dict[str, dict[str, Any]] = {}
+    emits: list[tuple[tuple[str, str], str]] = []
+    delivers: list[tuple[str, tuple[str, str]]] = []
+
+    def event(event_id: str) -> dict[str, Any]:
+        return events.setdefault(
+            event_id,
+            {"event_id": event_id, "sender": "", "receivers": {}},
+        )
+
+    for index, record in enumerate(records):
+        participant = _participant(record)
+        key = (participant, _segment(record))
+        node = segments.get(key)
+        kind = record.action.get("kind") if isinstance(record.action, Mapping) else None
+        if kind == _NOTICE_KIND:
+            eid = _event_id(record)
+            if eid:
+                event(eid)["receivers"].setdefault(participant, {"notified": True, "read": False})
+            continue
+        if node is None:
+            node = {
+                "segment": key[1],
+                "participant": participant,
+                "first_row": index,
+                "last_row": index,
+                "row_count": 0,
+                "size": 0,
+                "tools": [],
+                "tool_error": False,
+            }
+            segments[key] = node
+        node["last_row"] = index
+        node["row_count"] += 1
+        node["size"] += len(_step_text(index, record))
+        tool = record.action.get("tool") if isinstance(record.action, Mapping) else None
+        if isinstance(tool, str) and tool and tool not in node["tools"]:
+            node["tools"].append(tool)
+        # Recorded observations carry no status field today; only an explicit
+        # error marker counts, so the flag never guesses from free text.
+        obs = record.observation if isinstance(record.observation, Mapping) else {}
+        if obs.get("error") or obs.get("is_error"):
+            node["tool_error"] = True
+        eid = _event_id(record)
+        if kind == _SEND_KIND and eid:
+            event(eid)["sender"] = participant
+            emits.append((key, eid))
+        elif kind == _RECEIVE_KIND and eid:
+            event(eid)["receivers"][participant] = {"notified": True, "read": True}
+            delivers.append((eid, key))
+    ordered = sorted(segments.items(), key=lambda item: item[1]["first_row"])
+    edges: list[dict[str, str]] = []
+    last: dict[str, tuple[str, str]] = {}
+    for key, node in ordered:
+        previous = last.get(node["participant"])
+        if previous is not None:
+            edges.append(
+                {"kind": "local_continuation", "from": previous[1], "to": key[1],
+                 "participant": node["participant"]}
+            )
+        last[node["participant"]] = key
+    edges.extend({"kind": "emit", "from": key[1], "to": eid} for key, eid in emits)
+    edges.extend({"kind": "deliver", "from": eid, "to": key[1]} for eid, key in delivers)
+    return {
+        "segments": [node for _, node in ordered],
+        "events": [events[eid] for eid in sorted(events)],
+        "edges": edges,
+    }
 
 
 def _participant(record: AORecord) -> str:
@@ -1140,21 +1235,24 @@ class AigToolSurface:
 
     def _get_overview(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         _require_verb_args("get_overview", arguments)
-        rows = []
-        for index, record in enumerate(self._records):
-            rows.append(
+        include_rows = arguments.get("include_rows", False)
+        if not isinstance(include_rows, bool):
+            raise ToolSurfaceError("invalid_args")
+        payload: dict[str, Any] = {
+            "row_count": len(self._records),
+            "watermark": self._watermark,
+            "interaction_dag": _interaction_dag(self._records),
+        }
+        if include_rows:
+            payload["rows"] = [
                 {
                     "index": index,
                     "participant": _participant(record),
                     "segment": _segment(record),
                     "size": len(_step_text(index, record)),
                 }
-            )
-        payload: dict[str, Any] = {
-            "row_count": len(self._records),
-            "watermark": self._watermark,
-            "rows": rows,
-        }
+                for index, record in enumerate(self._records)
+            ]
         if self._snapshot.outcome is not None:
             payload["outcome"] = outcome_overview(self._snapshot.outcome)
         if self._blocks:

@@ -135,6 +135,7 @@ class TForkSurface:
         task_score: float | None = None,
         block_aos: Mapping[str, Sequence[str]] | None = None,
         read_aos: Sequence[str] | None = None,
+        ao_participants: Mapping[str, str] | None = None,
         card_budget: int = DEFAULT_CARD_BUDGET,
     ) -> None:
         if not isinstance(run, AigConstructionRun):
@@ -181,6 +182,7 @@ class TForkSurface:
         self._cards = cards
         self._task_score = task_score
         self._block_aos = block_aos
+        self._ao_participants = ao_participants
         self._read_aos = read_aos
         self._card_budget = card_budget
         self._card_attempts = 0
@@ -491,6 +493,7 @@ class TForkSurface:
                 principal_labels=self._principal,
                 block_aos=self._block_aos,
                 read_aos=self._read_aos,
+                ao_participants=self._ao_participants,
             )
         except ExperienceCardError as exc:
             self._audit(CARD_VERB, ok=False, error=exc.code, detail=str(kind))

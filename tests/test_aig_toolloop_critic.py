@@ -76,7 +76,7 @@ def test_fake_provider_json_is_parsed(tmp_path: Path) -> None:
     assert found[0].evidence_ao_refs == (0,)
     assert found[0].involved_ids == ("agent-1",)
     assert found[0].scope == "objects"
-    assert provider.turns[0].system_prompt == CRITIC_SYSTEM_PROMPT
+    assert provider.turns[0].system_prompt.startswith(CRITIC_SYSTEM_PROMPT)
     assert "step_refs" in CRITIC_SYSTEM_PROMPT
 
 
