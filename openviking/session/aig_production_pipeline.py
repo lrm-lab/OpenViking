@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +41,7 @@ class ProductionAigResult:
     revision_id: str | None = None
     reader_report_hash: str | None = None
     report_path: Path | None = None
+    card_ids: tuple[str, ...] = ()
 
 
 def _failed_provider(providers: AigRoleProviders) -> bool:
@@ -56,6 +58,7 @@ def run_production_aig(
     task_run_id: str,
     providers: AigRoleProviders,
     frozen_at: str | None = None,
+    card_hook: Callable[[Any, AoSnapshot, Any], Any] | None = None,
 ) -> ProductionAigResult:
     """Publish only after Builder, Critic, Refiner and Reader all finish.
 
@@ -149,12 +152,21 @@ def run_production_aig(
         )
         os.replace(temporary, report_path)
         store.write(cycle.revision)
+        card_ids: tuple[str, ...] = ()
+        if card_hook is not None:
+            # ADR-0046: optional post-freeze card proposals. Never alters the result.
+            try:
+                outcome = card_hook(cycle.revision, snapshot, read)
+                card_ids = tuple(getattr(outcome, "card_ids", ()))
+            except Exception as exc:
+                logger.warning("card hook failed: %s", type(exc).__name__)
         return ProductionAigResult(
             "frozen",
             "complete",
             cycle.revision.revision_id,
             read.reader_report_hash,
             report_path,
+            card_ids,
         )
     except Exception as exc:
         logger.warning(
