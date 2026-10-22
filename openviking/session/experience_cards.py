@@ -498,6 +498,14 @@ class ExperienceCardStore:
         except ForkOverlayError as exc:
             raise ExperienceCardError(exc.code) from exc
         card = read_card_proposal(payload, catalog, block_aos=block_aos, read_aos=read_aos)
+        try:
+            document_hash = self._overlays.registered_document_hash(
+                stated, principal_labels=sorted(principal)
+            )
+        except ForkOverlayError as exc:
+            raise ExperienceCardError(exc.code) from exc
+        if card.report_hash != document_hash:
+            raise ExperienceCardError("report_hash_mismatch")
         with self._lock:
             self._check_links(card, principal)
             path = self._path(card.card_id)

@@ -489,6 +489,23 @@ class ForkNodeOverlayStore:
                 raise ForkOverlayError("acl_denied")
             return catalog
 
+    def registered_document_hash(
+        self,
+        base_revision_id: str,
+        *,
+        principal_labels: Sequence[str],
+    ) -> str:
+        """Document content hash of a registered revision, for report binding."""
+        principal = require_label_set(principal_labels, code="acl_denied")
+        with self._lock:
+            loaded = self._load_base(base_revision_id)
+            if loaded is None:
+                raise ForkOverlayError("base_revision_missing")
+            _catalog, acl, document_hash = loaded
+            if not principal.intersection(acl):
+                raise ForkOverlayError("acl_denied")
+            return document_hash
+
     def visible_overlays(
         self, *, principal_labels: Sequence[str]
     ) -> tuple[StoredForkOverlay, ...]:

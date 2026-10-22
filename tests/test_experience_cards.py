@@ -212,3 +212,110 @@ def test_http_face_submit_and_find(tmp_path: Path) -> None:
     assert out["relaxed"] is False and out["cards"][0]["card_id"] == sub["card_id"]
     bob = SimpleNamespace(user=SimpleNamespace(user_id="bob"))
     assert find_cards(bob, CardFindRequest(), store=cards)["cards"] == []
+
+
+# ---- Reader tool surface (submit_experience_card) -------------------------
+
+def _surface_with_cards(tmp_path: Path, *, verdict: str, signal: str, score: float | None):
+    from openviking.session.outcome_contract import (
+        OutcomeAssessmentService,
+        OutcomeContractStore,
+    )
+    from openviking.session.t_fork_surface import TForkSurface
+    from tests.test_guidance_approval import _world
+    from tests.test_outcome_contract import _signal
+
+    world = _world(tmp_path, verdict=verdict)
+    cards = ExperienceCardStore(tmp_path, world.overlays)
+    surface = TForkSurface(
+        tmp_path,
+        run=world.run,
+        session_id=world.sessions["reader"],
+        task_id=world.contract.task_id,
+        report_hash=world.report_hash,
+        principal_labels=("user:carol",),
+        overlays=world.overlays,
+        patterns=world.patterns,
+        precedents=world.precedents,
+        guidance=world.service,
+        outcomes=OutcomeAssessmentService(OutcomeContractStore(tmp_path)),
+        external_evidence=(_signal(signal),),
+        cards=cards,
+        task_score=score,
+        block_aos={"b-1": ["ao-1"], "b-2": ["ao-2"]},
+    )
+    catalog = world.overlays.registered_catalog("rev-guidance-1", principal_labels=["user:carol"])
+    doc = world.overlays.registered_document_hash("rev-guidance-1", principal_labels=["user:carol"])
+    return world, surface, cards, catalog, doc
+
+
+class _Rev:
+    def __init__(self, content_hash: str) -> None:
+        self.content_hash = content_hash
+
+
+def test_surface_gates_cards_by_outcome_and_binds_score(tmp_path: Path) -> None:
+    from openviking.session.t_fork_surface import CARD_VERB, TForkError
+
+    world, surface, cards, cat, doc = _surface_with_cards(
+        tmp_path, verdict="success", signal="pass", score=0.9
+    )
+    assert CARD_VERB in [n for n, _ in surface.catalog()]
+    proposal = _skill(cat, _Rev(doc), task_score=0.1, author_role="critic")
+    out = surface.call(CARD_VERB, {"proposal": proposal})
+    assert out["kind"] == CARD_KIND_SKILL and not out["deduplicated"]
+    stored = cards.read(out["card_id"], principal_labels=["user:carol"])
+    assert stored is not None and stored.task_score == 0.9 and stored.author_role == "reader"
+    again = surface.call(CARD_VERB, {"proposal": proposal})
+    assert again["deduplicated"] is True
+    fork = {**proposal, "kind": CARD_KIND_FORK, "fork_node_id": world.fork_node_id}
+    with pytest.raises(TForkError) as locked:
+        surface.call(CARD_VERB, {"proposal": fork})
+    assert locked.value.code == "phase_locked"  # a fork needs a confirmed failure
+
+
+def test_surface_blocks_low_score_and_wrong_report(tmp_path: Path) -> None:
+    from openviking.session.t_fork_surface import CARD_VERB, TForkError
+
+    _, surface, _, cat, doc = _surface_with_cards(
+        tmp_path, verdict="success", signal="pass", score=0.5
+    )
+    with pytest.raises(TForkError) as low:
+        surface.call(CARD_VERB, {"proposal": _skill(cat, _Rev(doc))})
+    assert low.value.code == "score_gate"
+
+
+def test_surface_rejects_a_proposal_bound_to_another_revision_report(tmp_path: Path) -> None:
+    from openviking.session.t_fork_surface import CARD_VERB, TForkError
+
+    _, surface, _, cat, _doc = _surface_with_cards(
+        tmp_path, verdict="success", signal="pass", score=0.9
+    )
+    with pytest.raises(TForkError) as bad:
+        surface.call(CARD_VERB, {"proposal": _skill(cat, _Rev("f" * 64))})
+    assert bad.value.code == "report_hash_mismatch"
+
+
+def test_surface_fork_card_after_confirmed_failure(tmp_path: Path) -> None:
+    from openviking.session.t_fork_surface import CARD_VERB, TForkError
+
+    world, surface, cards, cat, doc = _surface_with_cards(
+        tmp_path, verdict="failure", signal="fail", score=0.2
+    )
+    base = _skill(cat, _Rev(doc))
+    with pytest.raises(TForkError) as locked:
+        surface.call(CARD_VERB, {"proposal": base})
+    assert locked.value.code == "phase_locked"  # no skill_card from a failed run
+    fork = {
+        "kind": CARD_KIND_FORK, "base_revision_id": cat.base_revision_id,
+        "base_revision_block_content_hash": cat.block_content_hash,
+        "report_hash": doc, "boundary": "仅在缺少章节时",
+        "fork_node_id": world.fork_node_id,
+        "gamma": {"deliverable": "pdf", "abstract_text": "补写缺失章节",
+                  "anchors": [cat.block_ids[-1]]},
+        "steps": [{"step_id": "f1", "step_kind": "produce", "statement": "补写",
+                   "block_id": cat.block_ids[0]}],
+    }
+    out = surface.call(CARD_VERB, {"proposal": fork})
+    assert out["kind"] == CARD_KIND_FORK
+    assert cards.read(out["card_id"], principal_labels=["user:carol"]) is not None

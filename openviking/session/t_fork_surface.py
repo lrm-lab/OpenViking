@@ -52,6 +52,12 @@ from openviking.session.experience_links import (
     ExperienceLinkError,
     ExperienceLinkService,
 )
+from openviking.session.experience_cards import (
+    CARD_KIND_FORK,
+    CARD_KIND_SKILL,
+    ExperienceCardError,
+    ExperienceCardStore,
+)
 from openviking.session.fork_node_overlay import ForkNodeOverlayStore, ForkOverlayError
 from openviking.session.fork_precedent import (
     ForkPrecedent,
@@ -61,6 +67,7 @@ from openviking.session.fork_precedent import (
 from openviking.session.guidance_approval import GuidanceApprovalError, GuidanceApprovalService
 from openviking.session.outcome_contract import (
     DECISION_CONFIRMED_FAILURE,
+    DECISION_SUCCESS,
     ExternalOutcomeEvidence,
     OutcomeAssessmentService,
     OutcomeContractError,
@@ -71,17 +78,29 @@ T_FORK_AUDIT_DIRNAME = "t-fork-audit"
 DEFAULT_SUBMIT_BUDGET = 3
 ACTION_VERBS = ("search_precedents", "submit_fork_proposal", "submit_guidance_plan")
 EXPAND_VERB = "expand_experience_links"
+# ADR-0046: offered only when a card store is bound. Not part of ACTION_VERBS,
+# so surfaces without a card store keep their closed list unchanged.
+CARD_VERB = "submit_experience_card"
+DEFAULT_CARD_BUDGET = 6
+_CARD_KEYS = frozenset({"proposal"})
 _EXPAND_PHASES = frozenset({"READ_VERIFY", "SYNTHESIZE_PROPOSE"})
 _ACTION_TEXT = {
     "search_precedents": "Retrieve tiered precedents for one fork proposal.",
     "submit_fork_proposal": "Submit one fork proposal and its precedent dispositions.",
     "submit_guidance_plan": "Propose guidance for an accepted fork and freeze the selected target.",
     "expand_experience_links": "Read one hop of derived experience-network edges.",
+    "submit_experience_card": (
+        "Propose one skill_card (after a confirmed pass) or one fork card "
+        "(after a confirmed failure). The server checks grounding and writes."
+    ),
 }
 _SEARCH_KEYS = frozenset({"proposal", "temporal_cutoff"})
 _SUBMIT_KEYS = frozenset({"dispositions", "proposal", "recorded_at", "retrieval_id"})
 _GUIDANCE_KEYS = frozenset({"catalog", "proposal"})
 _EXPAND_KEYS = frozenset({"context_id", "link_types", "profile", "subject_id", "unresolved"})
+
+
+_CARD_DECISIONS = frozenset({DECISION_SUCCESS, DECISION_CONFIRMED_FAILURE})
 
 
 class TForkError(ValueError):
@@ -112,6 +131,11 @@ class TForkSurface:
         external_evidence: Sequence[ExternalOutcomeEvidence] = (),
         links: ExperienceLinkService | None = None,
         submit_budget: int = DEFAULT_SUBMIT_BUDGET,
+        cards: ExperienceCardStore | None = None,
+        task_score: float | None = None,
+        block_aos: Mapping[str, Sequence[str]] | None = None,
+        read_aos: Sequence[str] | None = None,
+        card_budget: int = DEFAULT_CARD_BUDGET,
     ) -> None:
         if not isinstance(run, AigConstructionRun):
             raise TForkError("invalid_run")
@@ -152,6 +176,15 @@ class TForkSurface:
             root, overlays=overlays, patterns=patterns, guidance=guidance
         )
         self._budget = submit_budget
+        if cards is not None and not isinstance(cards, ExperienceCardStore):
+            raise TForkError("store_required")
+        self._cards = cards
+        self._task_score = task_score
+        self._block_aos = block_aos
+        self._read_aos = read_aos
+        self._card_budget = card_budget
+        self._card_attempts = 0
+        self._card_results: dict[str, dict[str, Any]] = {}
         self._attempts = 0
         self._accepted: dict[str, dict[str, Any]] = {}
         self._fork_ids: set[str] = set()
@@ -169,6 +202,8 @@ class TForkSurface:
             names.append(EXPAND_VERB)
         if self._actions_open():
             names.extend(ACTION_VERBS)
+        if self._cards is not None and (self._decision() in _CARD_DECISIONS):
+            names.append(CARD_VERB)
         return tuple((name, _ACTION_TEXT[name]) for name in names)
 
     def call(self, verb: str, arguments: Mapping[str, Any] | None = None) -> Any:
@@ -187,6 +222,8 @@ class TForkSurface:
         if verb == EXPAND_VERB:
             self._require_expand()
             return self._expand(args)
+        if verb == CARD_VERB and self._cards is not None:
+            return self._submit_card(args)
         raise TForkError("unknown_verb")
 
     def search_precedents(self, query: Mapping[str, Any]) -> dict[str, Any]:
@@ -402,6 +439,66 @@ class TForkSurface:
             raise TForkError(exc.code) from exc
         self._contexts[profile] = result["context_id"]
         self._audit(EXPAND_VERB, ok=True, error="", detail=subject_id, unresolved=unresolved)
+        return result
+
+    def _decision(self) -> str | None:
+        try:
+            return self._outcomes.adjudicate(
+                task_id=self._task_id,
+                report_hash=self._report_hash,
+                external_evidence=self._evidence,
+            ).decision
+        except OutcomeContractError:
+            return None
+
+    def _submit_card(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        _exact(arguments, _CARD_KEYS)
+        proposal = arguments.get("proposal")
+        if not isinstance(proposal, Mapping):
+            raise TForkError("invalid_args")
+        kind = proposal.get("kind")
+        decision = self._decision()
+        if kind == CARD_KIND_SKILL and decision != DECISION_SUCCESS:
+            self._audit(CARD_VERB, ok=False, error="phase_locked", detail="skill_card")
+            raise TForkError("phase_locked")
+        if kind == CARD_KIND_FORK and decision != DECISION_CONFIRMED_FAILURE:
+            self._audit(CARD_VERB, ok=False, error="phase_locked", detail="fork")
+            raise TForkError("phase_locked")
+        if kind not in (CARD_KIND_SKILL, CARD_KIND_FORK):
+            raise TForkError("invalid_args")
+        # The score and author are bound by the server; the Reader cannot set them.
+        bound = dict(proposal)
+        bound["author_role"] = "reader"
+        if kind == CARD_KIND_SKILL:
+            bound["task_score"] = self._task_score
+        else:
+            bound.pop("task_score", None)
+        key = canonical_dumps(bound)
+        with self._lock:
+            if key in self._card_results:
+                stored = dict(self._card_results[key])
+                stored["deduplicated"] = True
+                self._audit(CARD_VERB, ok=True, error="", detail=stored["card_id"])
+                return stored
+            if self._card_attempts >= self._card_budget:
+                self._audit(CARD_VERB, ok=False, error="submit_budget_exhausted", detail="")
+                raise TForkError("submit_budget_exhausted")
+            self._card_attempts += 1
+        assert self._cards is not None
+        try:
+            card, duplicate = self._cards.submit(
+                bound,
+                principal_labels=self._principal,
+                block_aos=self._block_aos,
+                read_aos=self._read_aos,
+            )
+        except ExperienceCardError as exc:
+            self._audit(CARD_VERB, ok=False, error=exc.code, detail=str(kind))
+            raise TForkError(exc.code) from exc
+        result = {"card_id": card.card_id, "kind": card.kind, "deduplicated": duplicate}
+        with self._lock:
+            self._card_results[key] = dict(result)
+        self._audit(CARD_VERB, ok=True, error="", detail=card.card_id)
         return result
 
     def _actions_open(self) -> bool:
