@@ -53,7 +53,7 @@ class ChatHandle:
         base_url: str,
         model: str,
         urlopen: Callable[..., Any] | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
     ) -> None:
         self._key = key
         self._url = base_url.rstrip("/") + "/chat/completions"
@@ -65,6 +65,17 @@ class ChatHandle:
         return await asyncio.to_thread(self._complete, messages)
 
     def _complete(self, messages: list[dict[str, str]]) -> str:
+        last: Exception | None = None
+        for attempt in range(3):
+            try:
+                return self._complete_once(messages)
+            except Exception as exc:  # transport errors and empty content are transient
+                last = exc
+                time.sleep(1.0 + attempt)
+        assert last is not None
+        raise last
+
+    def _complete_once(self, messages: list[dict[str, str]]) -> str:
         body = json.dumps(
             {"model": self._model, "messages": messages, "max_tokens": self._max_tokens}
         ).encode()
@@ -79,16 +90,100 @@ class ChatHandle:
         content = payload["choices"][0]["message"]["content"]
         if not isinstance(content, str):
             raise ValueError("model_response_missing")
-        return content
+        return _first_object_text(content)
+
+
+def _first_object_text(content: str) -> str:
+    """The first JSON object in ``content``, verbatim, so strict role parsing still applies.
+
+    Chat models often wrap the object in prose or fences, or add a second object.
+    Role parsers stay strict (duplicate keys, non-finite numbers) on what they get.
+    """
+    decoder = json.JSONDecoder()
+    start = content.find("{")
+    while start != -1:
+        try:
+            value, end = decoder.raw_decode(content[start:])
+        except ValueError:
+            start = content.find("{", start + 1)
+            continue
+        if isinstance(value, dict):
+            return content[start : start + end]
+        start = content.find("{", start + 1)
+    return content
+
+
+_ARGUMENT_FORMAT = (
+    "\nArgument formats (use exactly these keys, no others): "
+    'add_block {"block_id":"<id>","kind":"task|orchestrator|agent|conclusion",'
+    '"fields":{<the required fields of that kind, including step_refs>}}; '
+    'add_inheritance_note {"from":"<earlier block id>","to":"<later block id>",'
+    '"inherited":"<text>","effect":"<text>"}; submit {}. '
+    'All block content lives inside "fields"; step_refs are AO row indices. '
+    "You are done only after you call submit {}; do that right after the last note, "
+    "at most one defect mark. Never stop without submit. "
+    "If a tool call is rejected, read the error code in the history and fix the arguments."
+)
+
+
+_CRITIC_FORMAT = (
+    '\nFinish with {"violations":[...]} and no other keys. Each violation has exactly '
+    '{"object_id":"<block id>","kind":"semantic|granularity","severity":"high|low",'
+    '"evidence_ao_refs":[<int AO row indices>],"note":"<why>"}. '
+    'Return {"violations":[]} when the graph is clean. Read steps with '
+    '{"verb":"read_step","arguments":{"index":<int>}} before judging.'
+)
+_READER_FORMAT = (
+    "\nThe final report has exactly these keys: responsible_agent (string), "
+    "decisive_ao_refs (list of int AO row indices you read), reason (string), "
+    "critical_block_id (a block id of the graph), unresolved_areas (list of strings, "
+    "empty when everything is resolved). Read the decisive rows before reporting."
+)
+
+
+class _WithFormat:
+    """Role mixin: the tool catalog does not spell out argument shapes, so say them."""
+
+    FORMAT = _ARGUMENT_FORMAT
+
+    def _ask(self, prompt: str, state: Mapping[str, Any]) -> dict[str, Any]:
+        return super()._ask(prompt + self.FORMAT, state)  # type: ignore[misc]
+
+    def __call__(self, turn: Any) -> Any:
+        """Re-ask when the model breaks the strict reply shape; the turn is unchanged."""
+        last: Exception | None = None
+        for _ in range(3):
+            try:
+                return super().__call__(turn)  # type: ignore[misc]
+            except (ValueError, TimeoutError) as exc:
+                last = exc
+        assert last is not None
+        raise last
+
+
+class _Builder(_WithFormat, VLMBuilder):
+    pass
+
+
+class _Critic(_WithFormat, VLMCritic):
+    FORMAT = _CRITIC_FORMAT
+
+
+class _Refiner(_WithFormat, VLMRefiner):
+    pass
+
+
+class _Reader(_WithFormat, VLMReader):
+    FORMAT = _READER_FORMAT
 
 
 def providers_for(handle: Any, deadline_seconds: float) -> AigRoleProviders:
     deadline = time.monotonic() + deadline_seconds
     return AigRoleProviders(
-        VLMBuilder(handle, deadline),
-        VLMCritic(handle, deadline),
-        VLMRefiner(handle, deadline),
-        VLMReader(handle, deadline),
+        _Builder(handle, deadline),
+        _Critic(handle, deadline),
+        _Refiner(handle, deadline),
+        _Reader(handle, deadline),
     )
 
 
@@ -187,6 +282,7 @@ def main(
         out = request.get("out")
         if not isinstance(out, str) or not out:
             raise BundleError("invalid_request")
+        providers_factory: Callable[[], AigRoleProviders] | None = None
         if providers is None:
             key = env.get("BUNDLE_API_KEY") or env.get("LENOVO_GATEWAY_API_KEY") or ""
             if not key:
@@ -197,9 +293,21 @@ def main(
                 raise BundleError("bundle_not_configured")
             handle = ChatHandle(key=key, base_url=base_url, model=model, urlopen=urlopen)
             deadline = float(env.get("BUNDLE_DEADLINE_SECONDS") or DEFAULT_DEADLINE_SECONDS)
-            providers = providers_for(handle, deadline)
-        with tempfile.TemporaryDirectory(prefix="aig-bundle-") as tmp:
-            bundle = build_bundle(request, providers, root=Path(tmp))
+            providers_factory = lambda: providers_for(handle, deadline)  # noqa: E731
+            providers = providers_factory()
+        attempts = max(1, int(env.get("BUNDLE_ATTEMPTS") or 3))
+        bundle = None
+        for attempt in range(attempts):
+            if attempt:
+                providers = providers_factory() if providers_factory else providers
+            try:
+                with tempfile.TemporaryDirectory(prefix="aig-bundle-") as tmp:
+                    bundle = build_bundle(request, providers, root=Path(tmp))
+                break
+            except BundleError as exc:
+                if attempt + 1 >= attempts or exc.code == "invalid_request":
+                    raise
+        assert bundle is not None
         target = Path(out)
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_suffix(target.suffix + ".tmp")
