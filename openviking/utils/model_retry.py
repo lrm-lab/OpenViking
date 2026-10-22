@@ -148,6 +148,14 @@ TRANSIENT_API_ERROR_PATTERNS = (
     "502",
     "503",
     "504",
+    # Cloudflare-style gateway errors (origin unreachable / timeout / SSL).
+    "520",
+    "521",
+    "522",
+    "523",
+    "524",
+    # Provider returned an error envelope (no choices) instead of a completion.
+    "vlm_provider_response_error",
     "toomanyrequests",
     "ratelimit",
     "requestbursttoofast",

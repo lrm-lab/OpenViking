@@ -21,6 +21,7 @@ from openviking.utils.model_retry import (
     ERROR_CLASS_UNKNOWN,
     classify_api_error,
     extract_metric_error_code,
+    is_retryable_api_error,
     retry_async,
     retry_sync,
 )
@@ -370,3 +371,32 @@ def test_numeric_status_code_with_compact_error_code_context_still_matches():
     assert classify_api_error(RuntimeError("Error code:413-Payload Too Large")) == (
         ERROR_CLASS_INPUT_TOO_LARGE
     )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Error code: 520 - {'error': {'message': 'Provider returned error', 'code': 520}}",
+        "Error code: 522 - origin connection timed out",
+        "vlm_provider_response_error",
+    ],
+)
+def test_classify_gateway_and_provider_envelope_errors_are_transient(message):
+    assert classify_api_error(RuntimeError(message)) == "transient"
+    assert is_retryable_api_error(RuntimeError(message))
+
+
+def test_retry_async_retries_gateway_520_with_backoff():
+    import asyncio
+
+    calls = []
+
+    async def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("Error code: 520 - Provider returned error")
+        return "ok"
+
+    result = asyncio.run(retry_async(flaky, max_retries=3, base_delay=0.001, max_delay=0.01))
+    assert result == "ok"
+    assert len(calls) == 3
