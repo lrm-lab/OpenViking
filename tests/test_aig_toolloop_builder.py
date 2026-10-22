@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from openviking.session.aig_tool_surface import TOOL_CATALOG, AoSnapshot
+from openviking.session import aig_toolloop_builder as builder_module
 from openviking.session.aig_toolloop_builder import (
     BUILDER_SYSTEM_PROMPT,
     CONSTRUCTION_ADAPTIVE_AGENTIC,
@@ -112,7 +113,9 @@ def test_fake_provider_inspects_builds_and_submits(tmp_path: Path) -> None:
     assert provider.turns[1].history[0]["error_code"] is None
 
 
-def test_dead_loop_exhausts_call_budget(tmp_path: Path) -> None:
+def test_dead_loop_exhausts_call_budget(tmp_path: Path, monkeypatch) -> None:
+    # These cases pin the fallback contract; auto-seal is covered separately.
+    monkeypatch.setattr(builder_module, "_AUTOSUBMIT_MAX_ATTEMPTS", 0)
     provider = FakeToolloopProvider()
     result = run_toolloop(
         _snapshot(),
@@ -143,7 +146,9 @@ def test_dead_loop_exhausts_call_budget(tmp_path: Path) -> None:
     assert CONSTRUCTION_FALLBACK == CONSTRUCTION_MODE_FALLBACK
 
 
-def test_wall_clock_budget_stops_the_loop(tmp_path: Path) -> None:
+def test_wall_clock_budget_stops_the_loop(tmp_path: Path, monkeypatch) -> None:
+    # These cases pin the fallback contract; auto-seal is covered separately.
+    monkeypatch.setattr(builder_module, "_AUTOSUBMIT_MAX_ATTEMPTS", 0)
     clock = {"now": 0.0}
 
     def now() -> float:
@@ -237,7 +242,9 @@ def test_repeated_backward_pair_feedback_ignores_note_wording(tmp_path: Path) ->
     assert result.draft["edges"] == []
 
 
-def test_partial_graph_is_not_returned_as_an_aig(tmp_path: Path) -> None:
+def test_partial_graph_is_not_returned_as_an_aig(tmp_path: Path, monkeypatch) -> None:
+    # These cases pin the fallback contract; auto-seal is covered separately.
+    monkeypatch.setattr(builder_module, "_AUTOSUBMIT_MAX_ATTEMPTS", 0)
     provider = FakeToolloopProvider(
         [("add_block", {"kind": "task", "fields": _task([0]), "block_id": "task-1"})]
     )
@@ -278,7 +285,9 @@ def test_invalid_budget_and_question(tmp_path: Path) -> None:
     assert missing.value.code == "question_missing"
 
 
-def test_alternating_redundant_reads_exit_without_spending_whole_budget(tmp_path: Path) -> None:
+def test_alternating_redundant_reads_exit_without_spending_whole_budget(tmp_path: Path, monkeypatch) -> None:
+    # These cases pin the fallback contract; auto-seal is covered separately.
+    monkeypatch.setattr(builder_module, "_AUTOSUBMIT_MAX_ATTEMPTS", 0)
     from benchmark.causal_memory.aig0045_verdict_smoke import synthetic_materials
 
     spec = synthetic_materials()[0]
@@ -289,3 +298,19 @@ def test_alternating_redundant_reads_exit_without_spending_whole_budget(tmp_path
     )
     assert result.status == "no_progress"
     assert len(result.audit) < 20
+
+
+def test_give_up_auto_seals_a_valid_draft(tmp_path: Path) -> None:
+    result = run_toolloop(
+        _snapshot(),
+        "what failed?",
+        FakeToolloopProvider(),
+        root=tmp_path,
+        run_id="run-autoseal",
+        max_calls=3,
+    )
+    assert result.status == "submitted"
+    assert result.construction_mode == CONSTRUCTION_ADAPTIVE_AGENTIC
+    assert result.audit[-1].verb == "submit"
+    assert result.audit[-1].ok is True
+    assert result.draft is not None

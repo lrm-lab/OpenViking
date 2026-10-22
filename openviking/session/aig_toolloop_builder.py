@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -33,13 +33,14 @@ from openviking.session.outcome_signal import closed_attribution_mode
 CONSTRUCTION_ADAPTIVE_AGENTIC = "adaptive_agentic_aig"
 CONSTRUCTION_FALLBACK = CONSTRUCTION_MODE_FALLBACK
 DEFAULT_MAX_CALLS = 64
-DEFAULT_MAX_SECONDS = 120.0
+DEFAULT_MAX_SECONDS = 600.0
 _FALLBACK_VIEW = "build_minimal_fallback_view"
 REPEAT_CALL_CODE = "repeat_call"
 REPEAT_LOOP_REASON = "repeat_loop"
 _REPEAT_TRIP = 3
 _REPEAT_STOP = 5
 _REPEAT_MESSAGE = "identical call repeated; change arguments or proceed"
+_AUTOSUBMIT_MAX_ATTEMPTS = 3
 
 BUILDER_SYSTEM_PROMPT = (
     "你从空图构建一条失败轨迹的自适应影响图。你有一组检查工具（T_log：概览/读整段/读区间/读单步/正则搜索/列智能体/看问题/看当前图）与一组构建工具（T_build）。日志步骤即 AO "
@@ -74,6 +75,12 @@ BUILDER_NEUTRAL_PROMPT = (
     .replace("这次复用如何促成最终正确结果", "这次复用如何影响下游状态或结果")
     .replace("没有促成正确结果的复用就不要加边", "没有日志证实的复用就不要加边")
     .replace("成功轨迹仍可有未达标记录", "任务结果未知也应如实标记未达标记录")
+    .replace(
+        "conclusion=最终答案（唯一汇）",
+        "conclusion=快照末尾真实观察到的状态（唯一汇，不代表任务已完成）。若末行是 openviking:diagnosis-control 的 diagnosis.request，"
+        "该行仅表示服务端已接受诊断请求，可独立作为 conclusion；此前 Task 工作消息保留为 agent。"
+        "不要把控制事件写成 Task 执行或已完成的诊断/修复；不要把用户陈述改写成 Task 行为",
+    )
 )
 
 
@@ -225,10 +232,71 @@ def run_toolloop(
     edge_rejections: dict[str, int] = {}
     stagnant_calls = 0
     seen_information: set[str] = set()
+    seen_states: set[str] = {_state_key(surface.get_graph())}
+    autosubmit_attempts = 0
+
+    def try_autoseal(trigger: str) -> ToolloopResult | None:
+        """Seal the draft via the surface's own validator when giving up.
+
+        A draft that passes the structural invariants is submitted exactly as
+        if the model had called submit; a failed attempt feeds the rejection
+        reason back into the loop history and the loop keeps going.
+        """
+        nonlocal autosubmit_attempts
+        if autosubmit_attempts >= _AUTOSUBMIT_MAX_ATTEMPTS:
+            return None
+        autosubmit_attempts += 1
+        seal_started = now()
+        try:
+            seal_result = surface.call("submit", {})
+        except ToolSurfaceError as exc:
+            _record(
+                audit,
+                history,
+                "submit",
+                {},
+                ok=False,
+                error_code=exc.code,
+                result=getattr(exc, "detail", None),
+                elapsed_ms=_elapsed_ms(seal_started, now()),
+                repeat_count=repeat_count,
+            )
+            return None
+        _record(
+            audit,
+            history,
+            "submit",
+            {},
+            ok=True,
+            error_code=None,
+            result={
+                **(seal_result if isinstance(seal_result, dict) else {}),
+                "auto_sealed": True,
+            },
+            elapsed_ms=_elapsed_ms(seal_started, now()),
+            repeat_count=repeat_count,
+        )
+        _persist_audit(root, run_id, audit, f"auto_submitted:{trigger}")
+        return ToolloopResult(
+            status="submitted",
+            construction_mode=CONSTRUCTION_ADAPTIVE_AGENTIC,
+            draft=surface.get_graph(),
+            audit=tuple(audit),
+            fallback_marker=None,
+        )
+
     while True:
         if stagnant_calls >= 6:
+            sealed = try_autoseal("no_progress")
+            if sealed is not None:
+                return sealed
+            _persist_audit(root, run_id, audit, "no_progress")
             return _fallback(run_id, bound.watermark, audit, reason="no_progress")
         if len(audit) >= max_calls or now() - started >= max_seconds:
+            sealed = try_autoseal("budget_exhausted")
+            if sealed is not None:
+                return sealed
+            _persist_audit(root, run_id, audit, "budget_exhausted")
             return _fallback(run_id, bound.watermark, audit)
         turn = ToolloopTurn(
             system_prompt=system_prompt,
@@ -236,7 +304,11 @@ def run_toolloop(
             history=tuple(_json_copy(item) for item in history),
             draft=surface.get_graph(),
         )
-        invocation = provider(turn)
+        try:
+            invocation = provider(turn)
+        except Exception as exc:
+            _persist_audit(root, run_id, audit, f"provider_error:{type(exc).__name__}")
+            raise
         stagnant_calls += 1
         if not isinstance(invocation, ToolInvocation):
             raise ToolloopError("invalid_provider_result")
@@ -283,6 +355,10 @@ def run_toolloop(
                 repeat_count=repeat_count,
             )
             if repeat_count >= _REPEAT_STOP:
+                sealed = try_autoseal("repeat_loop")
+                if sealed is not None:
+                    return sealed
+                _persist_audit(root, run_id, audit, REPEAT_LOOP_REASON)
                 return _fallback(run_id, bound.watermark, audit, reason=REPEAT_LOOP_REASON)
             continue
         call_started = now()
@@ -340,7 +416,15 @@ def run_toolloop(
             elapsed_ms=elapsed,
             repeat_count=repeat_count,
         )
+        if surface.get_graph() != before_graph:
+            state_key = _state_key(surface.get_graph())
+            if state_key in seen_states:
+                sealed = try_autoseal("state_cycle")
+                if sealed is not None:
+                    return sealed
+            seen_states.add(state_key)
         if invocation.verb == "submit":
+            _persist_audit(root, run_id, audit, "submitted")
             return ToolloopResult(
                 status="submitted",
                 construction_mode=CONSTRUCTION_ADAPTIVE_AGENTIC,
@@ -410,6 +494,36 @@ def _record(
             "result": result,
         }
     )
+
+
+def _state_key(graph: Any) -> str:
+    try:
+        return json.dumps(graph, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return repr(graph)
+
+
+def _persist_audit(
+    root: Path,
+    run_id: str,
+    audit: Sequence[ToolAuditRecord],
+    reason: str,
+) -> None:
+    """Best-effort per-call trace next to the draft; never raises."""
+    try:
+        run_dir = Path(root) / "toolloop-runs" / run_id
+        if not run_dir.is_dir():
+            return
+        payload = {
+            "reason": reason,
+            "calls": [asdict(record) for record in audit],
+        }
+        (run_dir / "audit.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=1) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        return
 
 
 def _repeat_key(verb: str, arguments: Mapping[str, Any]) -> tuple[str, str]:

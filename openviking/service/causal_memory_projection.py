@@ -24,9 +24,10 @@ def causal_memory_projection(
     revisions = {}
     blocks = {}
 
-    def uri(ref: str) -> str:
+    def uri(ref: str, kind: str) -> str:
         return (
             "viking://resources/causal/"
+            + ("forks/" if kind == "fork_overlay" else "")
             + hashlib.sha256(
                 json.dumps([owner_label, ref], separators=(",", ":")).encode()
             ).hexdigest()
@@ -38,7 +39,7 @@ def causal_memory_projection(
         return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
 
     def add(ref: str, kind: str, text: str, status: str):
-        key = uri(ref)
+        key = uri(ref, kind)
         nodes[key] = (
             f"{kind} ({status})\nSource: {ref}\n\n{text}",
             {"kind": kind, "status": status, "source_ref": ref, "links": {}},

@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 from contextlib import nullcontext
@@ -62,6 +63,15 @@ from openviking_cli.utils.config.open_viking_config import OpenVikingConfig
 
 logger = get_logger(__name__)
 EMBEDDING_META_MARKER = "\n\n[openviking.embedding]\n"
+
+
+def embedding_generation_paused() -> bool:
+    """Pause document embedding so the queue does not call the OpenAI embedder."""
+    return os.environ.get("OPENVIKING_PAUSE_EMBEDDING", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 _EMBEDDING_COMPATIBILITY_KEYS = ("provider", "model", "dimension", "model_identity")
 
@@ -731,6 +741,17 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                     self._merge_request_stats(embedding_msg.telemetry_id, processed=1)
                     self._record_request_success(embedding_msg)
                     return ProcessResult.success(data)
+
+                # Pause leaves the memory text on disk and releases the commit waiter.
+                # The OpenAI embedder is not called, and the message is not requeued.
+                if embedding_generation_paused():
+                    logger.info(
+                        "Paused embedding; skipped OpenAI embed for %s",
+                        self._embedding_delivery_log_context(embedding_msg),
+                    )
+                    self._merge_request_stats(embedding_msg.telemetry_id, processed=1)
+                    self._record_request_success(embedding_msg, vector_written=False)
+                    return ProcessResult.success()
 
                 # Circuit breaker: if API is known-broken, re-enqueue and wait
                 provider = self._embedding_provider

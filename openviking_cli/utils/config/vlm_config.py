@@ -58,7 +58,9 @@ def _bind_token_usage_tracker(instance: Any, tracker: Any) -> None:
 class VLMCredential(BaseModel):
     """Single VLM credential configuration for multi-credential failover."""
 
-    id: Optional[str] = RuntimeField(default=None, description="Unique identifier for this credential")
+    id: Optional[str] = RuntimeField(
+        default=None, description="Unique identifier for this credential"
+    )
     provider: Optional[str] = RuntimeField(default=None, description="Provider type")
     model: Optional[str] = RuntimeField(
         default=None,
@@ -816,6 +818,7 @@ class VLMConfig(BaseModel):
         tool_choice: Optional[Any] = None,
         messages: Optional[List[Dict[str, Any]]] = None,
         max_tokens: Optional[int] = None,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> Union[str, Any]:
         """Get LLM completion asynchronously."""
         effective_thinking = self.thinking if thinking is None else thinking
@@ -826,6 +829,7 @@ class VLMConfig(BaseModel):
             tool_choice=tool_choice,
             messages=messages,
             max_tokens=max_tokens,
+            **({"response_format": response_format} if response_format is not None else {}),
         )
 
     def is_available(self) -> bool:

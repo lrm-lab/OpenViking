@@ -11,6 +11,8 @@ import hashlib
 import json
 import os
 import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,41 @@ MAX_ACTIVE_DIAGNOSES = 3
 MAX_RECORDS = 128
 MAX_SNAPSHOT_BYTES = 262144
 _tasks: set[asyncio.Task] = set()
+
+
+CONTROL_PARTICIPANT = "openviking:diagnosis-control"
+
+
+def _capture_request_boundary(
+    rows: list[dict[str, Any]], session_id: str, request_id: str, question: str
+) -> list[dict[str, Any]]:
+    """Capture this actual API admission, separately from Task-authored evidence.
+
+    The event lives in the immutable per-request snapshot, not the source
+    conversation ledger. It records acceptance for analysis, never a Task
+    execution, verdict, or remediation. Retries reuse the saved snapshot.
+    """
+    event = AORecord(
+        ao_id=str(uuid.uuid4()),
+        session_id=session_id,
+        sequence=max(row["sequence"] for row in rows) + 1,
+        action={
+            "participant_id": CONTROL_PARTICIPANT,
+            "segment_id": "diagnosis-control",
+            "tool_name": "diagnosis.request",
+            "request_id": request_id,
+            "question": question,
+        },
+        observation={
+            "status": "accepted",
+            "text": "Diagnosis API request accepted for bounded analysis. Task outcome unknown; no repair performed.",
+        },
+        skill_invocations=[],
+        message_ref=None,
+        created_at=datetime.now(timezone.utc).isoformat(),
+        captured_state="live",
+    )
+    return [*rows, event.to_dict()]
 
 
 def _save(path: Path, value: dict[str, Any]) -> None:
@@ -90,6 +127,12 @@ async def request_diagnosis(session: Any, request_id: str, question: str) -> dic
         raise ValueError("empty_ledger")
     if len(rows) > MAX_RECORDS or len(json.dumps(rows).encode()) > MAX_SNAPSHOT_BYTES:
         raise ValueError("diagnosis_snapshot_budget_exceeded")
+    source_watermark = _stable_snapshot_watermark(
+        session.session_id, [_view_ao_record(row, session.session_id) for row in rows]
+    )
+    rows = _capture_request_boundary(rows, session.session_id, request_id, question)
+    if len(rows) > MAX_RECORDS or len(json.dumps(rows).encode()) > MAX_SNAPSHOT_BYTES:
+        raise ValueError("diagnosis_snapshot_budget_exceeded")
     watermark = _stable_snapshot_watermark(
         session.session_id, [_view_ao_record(row, session.session_id) for row in rows]
     )
@@ -106,6 +149,8 @@ async def request_diagnosis(session: Any, request_id: str, question: str) -> dic
         "watermark": watermark,
         "deadline": time.time() + TIMEOUT_SECONDS,
         "snapshot": rows,
+        "source_watermark": source_watermark,
+        "request_boundary_ao_id": rows[-1]["ao_id"],
     }
     try:
         write_exclusive(path, state)
@@ -137,7 +182,16 @@ async def _run(session: Any, root: Path, path: Path, state: dict, snapshot: AoSn
             state.update(status="failed", reason=result.reason)
         else:
             report = json.loads(result.report_path.read_text(encoding="utf-8"))
-            report["evidence_scope"] = "session AO snapshot; no verified task outcome supplied"
+            attribution = report.get("report", {})
+            refs = attribution.get("decisive_ao_refs", [])
+            if (
+                not attribution.get("responsible_agent")
+                or attribution["responsible_agent"] == CONTROL_PARTICIPANT
+                or not refs
+                or len(snapshot.records) - 1 in refs
+            ):
+                raise ValueError("diagnosis_source_attribution_missing")
+            report["evidence_scope"] = "session AO snapshot plus separately attributed diagnosis API admission; no verified task outcome supplied"
             content = json.dumps(report, ensure_ascii=False, sort_keys=True)
             uri = f"{session._session_uri}/diagnoses/{state['request_id']}/report.json"
             await session._viking_fs.write_file(uri, content, ctx=session.ctx)

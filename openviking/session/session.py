@@ -8,6 +8,7 @@ Session as Context: Sessions integrated into L0/L1/L2 system.
 import asyncio
 import inspect
 import json
+import os
 import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -2407,8 +2408,13 @@ class Session:
                     aig_vlm = None
                     if (
                         self._vlm_resolver is not None
-                        and self._extraction_provider is None
-                        and self._extraction_provider_factory is None
+                        and (
+                            os.environ.get("OPENVIKING_COMMIT_FOUR_ROLE") == "1"
+                            or (
+                                self._extraction_provider is None
+                                and self._extraction_provider_factory is None
+                            )
+                        )
                     ):
                         try:
                             from openviking.session.causal_mode import is_session_causal
@@ -2427,7 +2433,7 @@ class Session:
                                 task_id,
                                 aig_vlm,
                             )
-                            logger.info(
+                            logger.warning(
                                 "commit four-role AIG %s for %s: %s",
                                 result.status,
                                 task_id,

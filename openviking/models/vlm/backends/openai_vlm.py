@@ -373,6 +373,7 @@ class OpenAIVLM(VLMBase):
         tool_choice: Optional[str] = None,
         messages: Optional[List[Dict[str, Any]]] = None,
         max_tokens: Optional[int] = None,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> Union[str, VLMResponse]:
         """Get text completion asynchronously"""
         effective_thinking = self.thinking if thinking is None else thinking
@@ -380,6 +381,15 @@ class OpenAIVLM(VLMBase):
         kwargs = self._build_text_kwargs(
             prompt, tools, tool_choice, messages, effective_thinking, max_tokens=max_tokens
         )
+
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+            # Never route constrained role output to an endpoint that ignores it.
+            if urlparse(self.api_base or "").hostname == "openrouter.ai":
+                extra = kwargs.setdefault("extra_body", {})
+                provider = dict(extra.get("provider") or {})
+                provider["require_parameters"] = True
+                extra["provider"] = provider
 
         async def _call() -> Union[str, VLMResponse]:
             t0 = time.perf_counter()

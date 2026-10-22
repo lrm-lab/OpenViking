@@ -100,7 +100,12 @@ def run_production_aig(
             snapshot, question, providers.builder, root=root, run_id=task_run_id, mode=mode
         )
         if built.status != "submitted" or _failed_provider(providers):
-            return ProductionAigResult("fallback", "builder_incomplete")
+            marker = built.fallback_marker or {}
+            return ProductionAigResult(
+                "fallback",
+                "builder_incomplete:%s:calls=%s"
+                % (marker.get("reason", "?"), marker.get("calls_used", "?")),
+            )
         surface = AigToolSurface(snapshot, root=root, run_id=task_run_id)
         binder = getattr(providers.critic, "bind_view", None)
         if callable(binder):
@@ -137,6 +142,18 @@ def run_production_aig(
             or read.report.unresolved_areas
             or _failed_provider(providers)
         ):
+            # Preserve the rejected report for debugging without registering
+            # an accepted native revision or exposing it as a diagnosis.
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            rejected = {
+                "accepted": False,
+                "reason": "reader_incomplete",
+                "budget_exhausted": read.budget_exhausted,
+                "report": read.report.to_dict(),
+            }
+            (report_path.parent / "reader-rejected.json").write_text(
+                json.dumps(rejected, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+            )
             return ProductionAigResult("fallback", "reader_incomplete")
         report_path.parent.mkdir(parents=True, exist_ok=True)
         payload: dict[str, Any] = {

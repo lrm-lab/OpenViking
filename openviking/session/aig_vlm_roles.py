@@ -3,27 +3,37 @@
 """Account VLM adapters for the four commit-time AIG roles.
 
 The model proposes one JSON action per call. Server role surfaces validate
-and execute every action; malformed output aborts construction.
+and execute every action. Rejected output gets bounded feedback within the
+shared deadline; exhausted retries abort construction without repairing it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
+import re
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from openviking.session.aig_production_pipeline import AigRoleProviders
+from openviking.session.aig_tool_surface import TOOL_SCHEMAS, _REQUIRED_FIELDS, _OPTIONAL_FIELDS
 from openviking.session.aig_toolloop_builder import ToolInvocation, ToolloopTurn
 from openviking.session.aig_toolloop_critic import CriticTurn, CriticView, parse_critic_violations
-from openviking.session.aig_toolloop_reader import ReaderInvocation, ReaderTurn
+from openviking.session.aig_toolloop_reader import READER_NEUTRAL_PROMPT, ReaderInvocation, ReaderTurn, parse_reader_report
 from openviking.session.aig_toolloop_refiner import RefinerAction, RefinerTurn
 
 
 def _json_object(value: Any) -> dict[str, Any]:
     if not isinstance(value, str):
         raise ValueError("model_response_missing")
+
+    fenced = re.fullmatch(
+        r"```json[ \t]*\r?\n(.*?)\r?\n```", value.strip(), re.DOTALL | re.IGNORECASE
+    )
+    if fenced is not None:
+        value = fenced.group(1)
 
     def unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -48,33 +58,236 @@ class _RoleModel:
         self._handle = handle
         self._deadline = deadline
 
-    def _ask(self, prompt: str, state: Mapping[str, Any]) -> dict[str, Any]:
-        remaining = self._deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("aig_role_deadline_exceeded")
+    def _output_schema(self, state: Mapping[str, Any]) -> dict[str, Any]:
+        def obj(properties: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "type": "object",
+                "properties": properties,
+                "required": list(properties),
+                "additionalProperties": False,
+            }
 
-        async def complete():
-            return await asyncio.wait_for(
-                self._handle.get_completion_async(
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": prompt
-                            + "\nReturn exactly one JSON object, without markdown.",
-                        },
-                        {
-                            "role": "user",
-                            "content": json.dumps(state, ensure_ascii=False, default=str),
-                        },
-                    ],
-                    thinking=False,
-                ),
-                timeout=min(45.0, remaining),
+        tools = state.get("tools", [])
+        variants = [
+            obj(
+                {
+                    "verb": {"type": "string", "enum": [tool["name"]]},
+                    "arguments": copy.deepcopy(tool["parameters"]),
+                }
             )
+            for tool in tools
+        ]
+        # add_block has kind-dependent fields. The flat tool schema allows
+        # partial edits; it is not a complete creation contract.
+        for variant in variants:
+            if variant["properties"]["verb"]["enum"] != ["add_block"]:
+                continue
+            base = variant["properties"]["arguments"]
+            branches = []
+            for kind, required in _REQUIRED_FIELDS.items():
+                branch = copy.deepcopy(base)
+                branch["properties"]["kind"] = {"type": "string", "enum": [kind]}
+                fields = branch["properties"]["fields"]
+                allowed = set(required) | set(_OPTIONAL_FIELDS.get(kind, ()))
+                fields["properties"] = {
+                    key: value for key, value in fields["properties"].items() if key in allowed
+                }
+                fields["required"] = list(required)
+                for value in fields["properties"].values():
+                    if value.get("type") == "string":
+                        value["minLength"] = 1
+                branches.append(branch)
+            if isinstance(self, VLMBuilder):
+                rows = next((
+                    entry["result"]["rows"] for entry in reversed(state.get("history", ()))
+                    if entry.get("verb") == "get_overview" and entry.get("ok")
+                    and isinstance(entry.get("result"), dict)
+                    and isinstance(entry["result"].get("rows"), list)
+                ), None)
+                if rows is not None:
+                    blocks = (state.get("draft") or {}).get("blocks", [])
+                    occupied = {
+                        ref for b in blocks if b.get("step_refs")
+                        for ref in range(min(b["step_refs"]), max(b["step_refs"]) + 1)
+                    }
+                    existing_kinds = {b.get("kind") for b in blocks}
+                    groups: dict[tuple[str, str], list[int]] = {}
+                    for row in rows:
+                        if row["index"] not in occupied:
+                            groups.setdefault((row["participant"], row["segment"]), []).append(row["index"])
+                    has_boundary = any(r["participant"] == "openviking:diagnosis-control" for r in rows)
+                    bound_branches = []
+                    for branch in branches:
+                        kind = branch["properties"]["kind"]["enum"][0]
+                        if kind in {"task", "conclusion"} and kind in existing_kinds:
+                            continue
+                        for (participant, _segment), refs in groups.items():
+                            boundary = participant == "openviking:diagnosis-control"
+                            if has_boundary and ((kind == "conclusion") != boundary):
+                                continue
+                            bound = copy.deepcopy(branch)
+                            fields = bound["properties"]["fields"]["properties"]
+                            fields["step_refs"].update({
+                                "minItems": 1, "maxItems": len(refs),
+                                "items": {"type": "integer", "enum": refs},
+                            })
+                            if "agent_name" in fields:
+                                fields["agent_name"]["enum"] = [participant]
+                            bound_branches.append(bound)
+                    branches = bound_branches
+            variant["properties"]["arguments"] = {"anyOf": branches}
+        # No legal unoccupied rows means add_block is unavailable. The model
+        # must link, revise, inspect or submit; the server still validates it.
+        variants = [v for v in variants if v["properties"]["arguments"].get("anyOf") != []]
+        # Empty or invented row references remain invalid at both boundaries.
+        for variant in variants:
+            args = variant["properties"]["arguments"]
+            for branch in args.get("anyOf", [args]):
+                fields = branch.get("properties", {}).get("fields", {})
+                refs = fields.get("properties", {}).get("step_refs")
+                if refs is not None:
+                    refs["minItems"] = 1
+                    refs["items"]["minimum"] = 0
+        if isinstance(self, VLMCritic):
+            variants.append(obj({"violations": {"type": "array", "items": {"type": "object"}}}))
+        elif isinstance(self, VLMRefiner):
+            variants = [
+                obj(
+                    {
+                        "action": {"enum": ["edit"], "type": "string"},
+                        **variant["properties"],
+                        "violation_id": {"type": "string"},
+                    }
+                )
+                for variant in variants
+            ]
+            variants.extend(
+                [
+                    obj({"action": {"enum": ["done"], "type": "string"}}),
+                    obj(
+                        {
+                            "action": {"enum": ["unresolvable"], "type": "string"},
+                            "violation_id": {"type": "string"},
+                            "reason": {"type": "string"},
+                        }
+                    ),
+                ]
+            )
+        elif isinstance(self, VLMReader):
+            # Bind each report branch to one real named work block. This is
+            # validation data, never an inferred attribution or repaired output.
+            graph = state.get("frozen_graph", {})
+            for block in graph.get("blocks", []):
+                name = block.get("agent_name")
+                refs = block.get("step_refs")
+                if (
+                    (state.get("neutral_state_report") and block.get("kind") not in {"agent", "orchestrator"})
+                    or not isinstance(name, str) or not name or not refs
+                    or name == "openviking:diagnosis-control"
+                ):
+                    continue
+                variants.append(obj({
+                    "critical_block_id": {"type": "string", "enum": [block["block_id"]]},
+                    "responsible_agent": {"type": "string", "enum": [name]},
+                    "reason": {"type": "string", "minLength": 1},
+                    "decisive_ao_refs": {"type": "array", "enum": [list(refs)]},
+                    # A usable production report must have fully verified
+                    # author/ref binding. Remaining task work belongs in reason;
+                    # uncertain attribution must choose the abstention branch.
+                    "unresolved_areas": {"type": "array", "maxItems": 0, "items": {"type": "string"}},
+                }))
+            # A provider may explicitly abstain. Production rejects unresolved
+            # reports, including this branch, instead of publishing a diagnosis.
+            variants.append(obj({
+                "critical_block_id": {"type": "string", "enum": [""]},
+                "responsible_agent": {"type": "string", "enum": [""]},
+                "reason": {"type": "string", "minLength": 1},
+                "decisive_ao_refs": {"type": "array", "maxItems": 0, "items": {"type": "integer"}},
+                "unresolved_areas": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+            }))
+        return {"type": "object", "anyOf": variants} if variants else {"type": "object"}
 
-        response = asyncio.run(complete())
-        content = response if isinstance(response, str) else getattr(response, "content", None)
-        return _json_object(content)
+    def _ask(
+        self,
+        prompt: str,
+        state: Mapping[str, Any],
+        validate: Callable[[dict[str, Any]], Any] | None = None,
+    ) -> dict[str, Any]:
+        messages = [
+            {
+                "role": "system",
+                "content": prompt + "\nReturn exactly one JSON object, without markdown.",
+            },
+            {"role": "user", "content": json.dumps(state, ensure_ascii=False, default=str)},
+        ]
+        # The existing shared deadline includes every retry; no budget extension.
+        for attempt in range(3):
+            remaining = self._deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("aig_role_deadline_exceeded")
+
+            async def complete(timeout_seconds: float):
+                options: dict[str, Any] = {}
+                # These model/provider paths are verified by real constrained
+                # requests. Other handles retain strict parsing and bounded
+                # error feedback.
+                if getattr(self._handle, "model", None) in {
+                    "google/gemma-4-31b-it",
+                    "qwen/qwen3.5-27b",
+                }:
+                    options["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "aig_role_output",
+                            "strict": True,
+                            "schema": self._output_schema(state),
+                        },
+                    }
+                return await asyncio.wait_for(
+                    self._handle.get_completion_async(
+                        messages=copy.deepcopy(messages), thinking=False, **options
+                    ),
+                    timeout=min(240.0, timeout_seconds),
+                )
+
+            try:
+                response = asyncio.run(complete(remaining))
+            except TimeoutError:
+                # A single slow request (asyncio.wait_for) must not kill the
+                # whole run; retry while the shared deadline allows it.
+                if attempt == 2 or self._deadline - time.monotonic() <= 0:
+                    raise TimeoutError("aig_role_request_timeout") from None
+                continue
+            content = response if isinstance(response, str) else getattr(response, "content", None)
+            try:
+                result = _json_object(content)
+                if validate is not None:
+                    validate(result)
+                return result
+            except ValueError as exc:
+                if attempt == 2:
+                    raise
+                # Send the rejected output verbatim. Only the model may propose a
+                # replacement; no repair, inferred refs, or attribution is inserted.
+                messages.append({"role": "assistant", "content": content or ""})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Rejected output: {type(exc).__name__}: {exc}. "
+                            "Return a new valid JSON object using the supplied contract. "
+                            "Do not invent evidence, step_refs, or attribution."
+                        ),
+                    }
+                )
+        raise ValueError("aig_role_retry_exhausted")
+
+
+def _tool_contracts(tools: Sequence[tuple[str, str]]) -> list[dict[str, Any]]:
+    return [
+        {"name": name, "description": description, "parameters": TOOL_SCHEMAS[name]}
+        for name, description in tools
+    ]
 
 
 class VLMBuilder(_RoleModel):
@@ -82,8 +295,10 @@ class VLMBuilder(_RoleModel):
         result = self._ask(
             turn.system_prompt + '\nOutput {"verb":"...","arguments":{...}}.',
             {
-                "tools": turn.tools,
+                "tools": _tool_contracts(turn.tools),
                 "history": turn.history,
+                "draft": turn.draft,
+                "edit_contract": "modify_block cannot change kind. To reclassify a mistaken block, delete it and recreate with the correct kind and nonempty real refs; recreate removed edges from evidence. Preserve row authorship exactly.",
             },
         )
         if set(result) != {"verb", "arguments"} or not isinstance(result["arguments"], dict):
@@ -110,7 +325,7 @@ class VLMCritic(_RoleModel):
                 turn.system_prompt + '\nRead with {"verb":"read_step","arguments":{"index":0}} '
                 'or finish with {"violations":[...]}. Never infer a clean audit from a tool error.',
                 {
-                    "tools": turn.tools,
+                    "tools": _tool_contracts(turn.tools),
                     "draft": turn.draft,
                     "structural_violations": turn.structural_violations,
                     "history": history,
@@ -141,7 +356,7 @@ class VLMRefiner(_RoleModel):
             '{"action":"unresolvable","violation_id":"...","reason":"..."}, '
             'or {"action":"edit","verb":"...","arguments":{...},"violation_id":"..."}.',
             {
-                "tools": turn.tools,
+                "tools": _tool_contracts(turn.tools),
                 "draft": turn.draft,
                 "violations": turn.violations,
                 "history": turn.history,
@@ -165,10 +380,47 @@ class VLMRefiner(_RoleModel):
 
 class VLMReader(_RoleModel):
     def __call__(self, turn: ReaderTurn) -> ReaderInvocation:
+        unresolved_attempts = 0
+
+        def validate(result: dict[str, Any]) -> None:
+            if set(result) == {"verb", "arguments"}:
+                if result["verb"] not in {name for name, _ in turn.tools}:
+                    raise ValueError("reader_verb_forbidden")
+                if not isinstance(result["arguments"], dict):
+                    raise ValueError("invalid_reader_arguments")
+                return
+            report = parse_reader_report(result, turn.graph, allow_unresolved=True)
+            if report.critical_block_id and turn.system_prompt == READER_NEUTRAL_PROMPT:
+                block = next(b for b in turn.graph["blocks"] if b["block_id"] == report.critical_block_id)
+                if block.get("kind") not in {"agent", "orchestrator"} or report.responsible_agent == "openviking:diagnosis-control":
+                    raise ValueError("neutral_report_requires_observed_work_block")
+            if not set(report.decisive_ao_refs) <= set(turn.read_ao_refs):
+                raise ValueError("unread_decisive_refs: read the cited AO rows before reporting")
+            if report.unresolved_areas:
+                nonlocal unresolved_attempts
+                unresolved_attempts += 1
+                if unresolved_attempts < 3:
+                    raise ValueError(
+                        "reader_unresolved: production cannot accept this report. Recheck the bounded question and source refs. "
+                        "You are the final Reader producing the current diagnosis, not awaiting a future Memory diagnosis. "
+                        "Do not invent private causes. If the related author or source refs truly cannot be verified, "
+                        "retain unresolved_areas and abstain; the report will remain rejected."
+                    )
+
         result = self._ask(
             turn.system_prompt + '\nRead with {"verb":"...","arguments":{...}} '
             "or return the exact five-field report JSON.",
-            {"tools": turn.tools, "frozen_graph": turn.graph, "history": turn.history},
+            {
+                "tools": _tool_contracts(turn.tools),
+                "frozen_graph": turn.graph,
+                "neutral_state_report": turn.system_prompt == READER_NEUTRAL_PROMPT,
+                "history": turn.history,
+                "read_ao_refs": turn.read_ao_refs,
+                "remaining_calls": turn.remaining_calls,
+                "final_only": turn.final_only,
+                "report_contract": "critical_block_id must exist; responsible_agent must equal that block.agent_name; decisive_ao_refs must equal that block.step_refs, and must already be read. No negative or invented refs.",
+            },
+            validate=validate,
         )
         if set(result) == {"verb", "arguments"} and isinstance(result["arguments"], dict):
             if result["verb"] not in {name for name, _ in turn.tools}:
@@ -204,7 +456,7 @@ class VLMCardProposer(_RoleModel):
 
 def providers_for_vlm(handle: Any) -> AigRoleProviders:
     """Create separate role states on the request's account-scoped model handle."""
-    deadline = time.monotonic() + 150.0
+    deadline = time.monotonic() + 900.0
     return AigRoleProviders(
         VLMBuilder(handle, deadline),
         VLMCritic(handle, deadline),
