@@ -821,6 +821,7 @@ class Session:
             turn_id = spec.get("turn_id")
             message_kind = spec.get("message_kind")
             source_message_ids = spec.get("source_message_ids")
+            deliveries = spec.get("deliveries")
 
             try:
                 peer_id = normalize_peer_id(spec.get("peer_id"))
@@ -842,6 +843,7 @@ class Session:
                         source_message_ids=(
                             list(source_message_ids) if source_message_ids is not None else None
                         ),
+                        deliveries=[dict(d) for d in deliveries] if deliveries else None,
                     )
                     for part in parts
                 ]
@@ -858,6 +860,7 @@ class Session:
                     source_message_ids=(
                         list(source_message_ids) if source_message_ids is not None else None
                     ),
+                    deliveries=[dict(d) for d in deliveries] if deliveries else None,
                 )
                 message_groups.append([msg])
 
@@ -895,6 +898,7 @@ class Session:
         turn_id: Optional[str] = None,
         message_kind: Optional[str] = None,
         source_message_ids: Optional[List[str]] = None,
+        deliveries: Optional[List[dict]] = None,
     ) -> Message:
         """Add a message.
 
@@ -911,6 +915,7 @@ class Session:
                     "turn_id": turn_id,
                     "message_kind": message_kind,
                     "source_message_ids": source_message_ids,
+                    "deliveries": deliveries,
                 }
             ]
         )
@@ -925,6 +930,7 @@ class Session:
         turn_id: Optional[str] = None,
         message_kind: Optional[str] = None,
         source_message_ids: Optional[List[str]] = None,
+        deliveries: Optional[List[dict]] = None,
     ) -> Message:
         """Asynchronously add one message through the authoritative path lock."""
         msgs = await self.add_messages_async(
@@ -937,6 +943,7 @@ class Session:
                     "turn_id": turn_id,
                     "message_kind": message_kind,
                     "source_message_ids": source_message_ids,
+                    "deliveries": deliveries,
                 }
             ]
         )

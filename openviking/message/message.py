@@ -29,6 +29,9 @@ class Message:
         Literal["user_query", "assistant_step", "tool_transport", "checkpoint"]
     ] = None
     source_message_ids: Optional[List[str]] = None
+    # Per-receiver delivery facts for a channel message: dicts with participant_id,
+    # notified, read (cycle 007 D-004). Used only to write receive/notice AOs.
+    deliveries: Optional[List[dict]] = None
 
     @property
     def content(self) -> str:
@@ -94,6 +97,8 @@ class Message:
             data["message_kind"] = self.message_kind
         if self.source_message_ids is not None:
             data["source_message_ids"] = list(self.source_message_ids)
+        if self.deliveries is not None:
+            data["deliveries"] = [dict(item) for item in self.deliveries]
         return data
 
     def _part_to_dict(self, part: Part) -> dict:
@@ -196,6 +201,11 @@ class Message:
             source_message_ids=(
                 list(data.get("source_message_ids"))
                 if isinstance(data.get("source_message_ids"), list)
+                else None
+            ),
+            deliveries=(
+                [dict(item) for item in data.get("deliveries") if isinstance(item, dict)]
+                if isinstance(data.get("deliveries"), list)
                 else None
             ),
         )

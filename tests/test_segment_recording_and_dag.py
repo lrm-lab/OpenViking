@@ -108,3 +108,28 @@ def test_judge_feedback_is_capped_optional_and_outside_digest() -> None:
     assert summary["feedback"] == "KEY FINDINGS: x"
     assert "KEY FINDINGS" not in summary["digest"]
     assert "feedback" not in outcome_overview(OutcomeSignal("fail", "verifier", {"reward": 0.2}))
+
+
+def test_message_deliveries_write_notice_then_receive_and_roundtrip(tmp_path: Path) -> None:
+    recorder = AOLedgerRecorder(tmp_path / "d", "d")
+    message = _turn("alice", "m1", ["t1"], "e1")
+    message.deliveries = [
+        {"participant_id": "bob", "notified": True, "read": True},
+        {"participant_id": "carol", "notified": True, "read": False},
+        {"participant_id": "alice", "notified": True, "read": True},  # sender is skipped
+    ]
+    assert Message.from_dict(message.to_dict()).deliveries == message.deliveries
+    recorder.record_messages([message])
+    kinds = [
+        (r.action.get("participant_id"), r.action.get("kind"))
+        for r in recorder.ledger.records()
+        if r.action.get("kind", "").startswith("channel_")
+    ]
+    assert kinds == [
+        ("alice", "channel_message"),
+        ("bob", "channel_notice"),
+        ("bob", "channel_receive"),
+        ("carol", "channel_notice"),
+    ]
+    recorder.record_messages([message])  # replay is deduplicated
+    assert recorder.ledger.count() == 5

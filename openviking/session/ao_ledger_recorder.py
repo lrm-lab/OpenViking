@@ -545,11 +545,50 @@ class AOLedgerRecorder:
                         )
                         self._close_segment(participant)
                         recorded.append(record)
+                        recorded.extend(
+                            self._record_deliveries(
+                                getattr(message, "deliveries", None),
+                                event_id=source_ids[0],
+                                text=content,
+                                sender=participant,
+                            )
+                        )
                     except Exception:
                         with self._dedup_lock:
                             self._seen_exchange_keys.discard(key)
                         logger.warning("AO ledger source message capture failed", exc_info=True)
         return recorded
+
+    def _record_deliveries(
+        self,
+        deliveries: Any,
+        *,
+        event_id: str,
+        text: str,
+        sender: str,
+    ) -> list[AORecord]:
+        """Write notice then receive AOs for each receiver of one sent message."""
+        written: list[AORecord] = []
+        if not isinstance(deliveries, list):
+            return written
+        for item in deliveries:
+            if not isinstance(item, dict):
+                continue
+            who = str(item.get("participant_id") or "").strip()
+            if not who or who == sender:
+                continue
+            for flag, cutting in (("notified", False), ("read", True)):
+                if item.get(flag) is not True:
+                    continue
+                try:
+                    record = self.record_channel_delivery(
+                        participant_id=who, event_id=event_id, text=text, cutting=cutting
+                    )
+                except ValueError:
+                    continue
+                if record is not None:
+                    written.append(record)
+        return written
 
     def record_channel_delivery(
         self,
