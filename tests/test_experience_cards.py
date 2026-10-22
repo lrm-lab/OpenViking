@@ -319,3 +319,15 @@ def test_surface_fork_card_after_confirmed_failure(tmp_path: Path) -> None:
     out = surface.call(CARD_VERB, {"proposal": fork})
     assert out["kind"] == CARD_KIND_FORK
     assert cards.read(out["card_id"], principal_labels=["user:carol"]) is not None
+
+
+def test_proposer_prompt_names_every_gate_and_vocabulary() -> None:
+    from openviking.session.experience_cards import (
+        DELIVERABLE_KINDS,
+        EXPERIENCE_CARD_PROPOSER_PROMPT as prompt,
+        FAILURE_KINDS,
+    )
+
+    for word in (*DELIVERABLE_KINDS, *FAILURE_KINDS, "skill_card", "fork", "verify", "boundary",
+                 "check_how", "violation_sign", "violates", "ao_refs", "recovery", "task_score"):
+        assert word in prompt

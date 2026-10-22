@@ -690,3 +690,24 @@ def _rank(
         scored.append(CardHit(card=card, score=round(score, 6)))
     scored.sort(key=lambda h: (-h.score, h.card.card_id))
     return tuple(scored[:limit])
+
+
+def _prompt() -> str:
+    return (
+        "经验卡提案（submit_experience_card，参数 {proposal}）。服务端核对后才写入；你只提案。\n"
+        "何时提：确认通过的任务只提 skill_card；确认失败的任务只提 fork。结果未判定时两者都不提。\n"
+        "skill_card：沿成功路径选一串事实块作为 steps，每步 step_kind 为 produce 或 verify。"
+        "至少含一个 verify 步骤（写明 check_how 怎么查、violation_sign 违反表现、issue_kind 检查的问题）"
+        "或一段出错→修复片段（produce 步骤标 recovery=true）。不要提不含检查或修复的纯流水账。\n"
+        "fork：经 fork_node_id 指向已写入的 ForkNode；可带 violates={card_id, step_id}（必须指向已有 skill_card 的 verify 步骤）"
+        "和 diagnosis_report_id（同一事故涉及的多个 fork 共用）。fork 的步骤不能是 verify。\n"
+        f"gamma（触发条件）：deliverable 取 {'/'.join(DELIVERABLE_KINDS)} 之一；"
+        f"issue_kind 取 {'/'.join(FAILURE_KINDS)} 之一；occupation 可选；"
+        "abstract_text 用不含具体实体名的抽象句描述情境，anchors 列出支撑该情境的块。\n"
+        "boundary（适用边界）必填：说明什么情况下不要用这张卡。\n"
+        "接地：每一步 block_id 必须是冻结图中真实存在的块；ao_refs 可选，写则必须是该块内且你读过的 AO。"
+        "不确定就省略 ao_refs，不要猜。task_score、author_role 由服务端写入，你填的会被覆盖。"
+    )
+
+
+EXPERIENCE_CARD_PROPOSER_PROMPT = _prompt()
