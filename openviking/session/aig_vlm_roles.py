@@ -60,6 +60,8 @@ class _RoleModel:
     def __init__(self, handle: Any, deadline: float) -> None:
         self._handle = handle
         self._deadline = deadline
+        # One entry per model attempt, for diagnosis only; never fed back to the model.
+        self.attempts: list[dict[str, Any]] = []
 
     def _output_schema(self, state: Mapping[str, Any]) -> dict[str, Any]:
         def obj(properties: dict[str, Any]) -> dict[str, Any]:
@@ -272,6 +274,7 @@ class _RoleModel:
             except TimeoutError:
                 # A single slow request (asyncio.wait_for) must not kill the
                 # whole run; retry while the shared deadline allows it.
+                self.attempts.append({"attempt": attempt + 1, "result": "timeout"})
                 if attempt == 2 or self._deadline - time.monotonic() <= 0:
                     raise TimeoutError("aig_role_request_timeout") from None
                 continue
@@ -280,8 +283,16 @@ class _RoleModel:
                 result = _json_object(content)
                 if validate is not None:
                     validate(result)
+                self.attempts.append({
+                    "attempt": attempt + 1, "result": "accepted",
+                    "proposals": len(result["proposals"]) if isinstance(result.get("proposals"), list) else None,
+                })
                 return result
             except ValueError as exc:
+                self.attempts.append({
+                    "attempt": attempt + 1, "result": "rejected",
+                    "error": f"{type(exc).__name__}: {exc}"[:300], "raw_head": (content or "")[:300],
+                })
                 logger.warning(
                     "aig role output rejected (attempt %d/3): %s: %s | raw=%s",
                     attempt + 1, type(exc).__name__, exc, (content or "")[:1500],

@@ -42,6 +42,8 @@ class ProductionAigResult:
     reader_report_hash: str | None = None
     report_path: Path | None = None
     card_ids: tuple[str, ...] = ()
+    # Why the card proposer produced what it did (diagnostic only; None without a card hook).
+    card_trace: dict | None = None
 
 
 def _failed_provider(providers: AigRoleProviders) -> bool:
@@ -170,11 +172,13 @@ def run_production_aig(
         os.replace(temporary, report_path)
         store.write(cycle.revision)
         card_ids: tuple[str, ...] = ()
+        card_trace: dict | None = None
         if card_hook is not None:
             # ADR-0046: optional post-freeze card proposals. Never alters the result.
             try:
                 outcome = card_hook(cycle.revision, snapshot, read)
                 card_ids = tuple(getattr(outcome, "card_ids", ()))
+                card_trace = getattr(outcome, "trace", None)
             except Exception as exc:
                 logger.warning("card hook failed: %s", type(exc).__name__)
         return ProductionAigResult(
@@ -184,6 +188,7 @@ def run_production_aig(
             read.reader_report_hash,
             report_path,
             card_ids,
+            card_trace,
         )
     except Exception as exc:
         logger.warning(

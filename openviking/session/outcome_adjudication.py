@@ -93,6 +93,7 @@ async def adjudicate_session(
             "reason": result.reason,
             "revision_id": result.revision_id,
             "card_ids": list(result.card_ids),
+            "card_trace": result.card_trace,
             "signal": evidence[0].signal,
             "reward": reward,
             "evaluator_results": evaluator_results,

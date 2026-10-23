@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +86,7 @@ class CardRunResult:
     reason: str
     card_ids: tuple[str, ...] = ()
     rejected: tuple[tuple[str, str], ...] = ()  # (error code, kind)
+    trace: dict[str, Any] | None = field(default=None, compare=False)
 
 
 def outcome_task_score(outcome: OutcomeSignal | None) -> float | None:
@@ -145,7 +146,7 @@ def run_card_proposer(
     elif outcome_is_fork_eligible(snapshot.outcome):
         kind_allowed = CARD_KIND_FORK
     else:
-        return CardRunResult("skipped", "outcome_not_card_eligible")
+        return CardRunResult("skipped", "outcome_not_card_eligible", trace={"verdict": "outcome_not_card_eligible"})
     outcome = snapshot.outcome
     assert outcome is not None
     reward = _outcome_reward(outcome)
@@ -163,7 +164,7 @@ def run_card_proposer(
             catalog.base_revision_id, principal_labels=labels
         )
     except ForkOverlayError as exc:
-        return CardRunResult("skipped", exc.code)
+        return CardRunResult("skipped", exc.code, trace={"verdict": exc.code, "outcome": digest})
     store = ExperienceCardStore(card_root, overlays)
     block_aos = block_ao_index(revision)
     read_aos = read_ao_ids(revision, read.read_ao_refs)
@@ -181,11 +182,22 @@ def run_card_proposer(
         allowed_kinds=(kind_allowed,),
         outcome_feedback=feedback.strip() if isinstance(feedback, str) else "",
     )
+    attempts = lambda: list(getattr(provider, "attempts", ()))  # noqa: E731
+    trace: dict[str, Any] = {
+        "allowed_kinds": list(turn.allowed_kinds), "outcome": digest, "read_aos": len(read_aos),
+    }
     try:
         proposals = list(provider(turn))
     except Exception as exc:  # a provider fault never changes the pipeline result
         logger.warning("card proposer failed: %s", type(exc).__name__)
-        return CardRunResult("skipped", "provider_error")
+        done = attempts()
+        verdict = (
+            "provider_timeout" if isinstance(exc, TimeoutError)
+            else "retries_exhausted" if done and all(a["result"] == "rejected" for a in done)
+            else "provider_error"
+        )
+        trace.update(verdict=verdict, attempts=done, error=f"{type(exc).__name__}: {exc}"[:300])
+        return CardRunResult("skipped", "provider_error", trace=trace)
     accepted: list[str] = []
     rejected: list[tuple[str, str]] = []
     for proposal in proposals[:MAX_PROPOSALS]:
@@ -221,7 +233,11 @@ def run_card_proposer(
             rejected.append((getattr(exc, "code", type(exc).__name__), kind))
             continue
         accepted.append(card.card_id)
-    return CardRunResult("proposed", "complete", tuple(accepted), tuple(rejected))
+    trace.update(
+        verdict="model_returned_empty" if not proposals else "proposed" if accepted else "proposals_all_rejected",
+        attempts=attempts(), proposals_returned=len(proposals), accepted=len(accepted), rejected=[list(r) for r in rejected],
+    )
+    return CardRunResult("proposed", "complete", tuple(accepted), tuple(rejected), trace)
 
 
 def has_trajectory_evidence(proposal: Any) -> bool:

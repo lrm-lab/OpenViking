@@ -389,3 +389,67 @@ def _proposal_from_state(state: dict, first: str, last: str) -> dict:
              "issue_kind": "incorrect", "check_how": "对照输出", "violation_sign": "为零"},
         ],
     }
+
+
+def _trace_handle(replies: list[str]):
+    import asyncio
+
+    class Handle:
+        def __init__(self) -> None:
+            self.n = 0
+
+        async def get_completion_async(self, **_kw):
+            await asyncio.sleep(0)
+            reply = replies[min(self.n, len(replies) - 1)]
+            self.n += 1
+            return reply
+
+    return Handle()
+
+
+def _trace_turn() -> ProposerTurn:
+    return ProposerTurn("p", {}, "r", "h", "d", {"b": ("ao-0",)}, ("ao-0",), "pass", ("skill_card",))
+
+
+def test_provider_records_every_attempt_and_why_it_was_rejected() -> None:
+    import json
+    import time
+
+    from openviking.session.aig_vlm_roles import VLMCardProposer
+
+    bad = json.dumps({"proposals": [{"kind": "skill_card", "steps": [{"step_id": "s", "block_id": "b"}]}]})
+    empty = json.dumps({"proposals": []})
+    provider = VLMCardProposer(_trace_handle([bad, empty]), time.monotonic() + 30)
+    assert provider(_trace_turn()) == []
+    assert [a["result"] for a in provider.attempts] == ["rejected", "accepted"]
+    assert "no step cites an AO" in provider.attempts[0]["error"]
+    assert provider.attempts[1]["proposals"] == 0
+
+
+def test_run_result_tells_empty_answer_from_exhausted_retries(tmp_path: Path) -> None:
+    import json
+    import time
+
+    from openviking.session.aig_vlm_roles import VLMCardProposer
+
+    def run(replies: list[str]):
+        cycle = run_production_aig(
+            replace(_snapshot(), outcome=_pass(0.9)),
+            root=tmp_path / str(len(list(tmp_path.iterdir()))), task_run_id="t",
+            providers=_providers(),
+            card_hook=lambda rev, snap, read: run_card_proposer(
+                rev, snap, read, VLMCardProposer(_trace_handle(replies), time.monotonic() + 30),
+                card_root=tmp_path / f"cards-{len(replies)}-{replies[0][:3]}", owner_label=_OWNER),
+        )
+        return cycle
+
+    empty = run([json.dumps({"proposals": []})])
+    assert empty.status == "frozen" and empty.card_ids == ()
+    assert empty.card_trace["verdict"] == "model_returned_empty"
+    assert empty.card_trace["attempts"][0]["result"] == "accepted"
+
+    exhausted = run(["not json"])
+    assert exhausted.status == "frozen", (exhausted.status, exhausted.reason)
+    assert exhausted.card_trace["verdict"] == "retries_exhausted"
+    assert [a["result"] for a in exhausted.card_trace["attempts"]] == ["rejected"] * 3
+    assert exhausted.card_trace["error"].startswith("JSONDecodeError")
