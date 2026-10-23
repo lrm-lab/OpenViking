@@ -35,6 +35,12 @@ def _providers() -> AigRoleProviders:
     )
 
 
+def _cite(turn: ProposerTurn, block: str) -> list[str]:
+    """An AO inside ``block`` that the Reader read, or nothing."""
+    read = set(turn.read_aos)
+    return [ao for ao in turn.block_aos[block] if ao in read][:1]
+
+
 def _proposal(turn: ProposerTurn, **over) -> dict:
     blocks = list(turn.block_aos)
     first, last = blocks[0], blocks[-1]
@@ -46,7 +52,8 @@ def _proposal(turn: ProposerTurn, **over) -> dict:
         "boundary": "只适用于修复解析器类任务",
         "gamma": {"deliverable": "text", "abstract_text": "修复解析器并核对输出", "anchors": [first]},
         "steps": [
-            {"step_id": "s1", "step_kind": "produce", "statement": "定位分支", "block_id": first},
+            {"step_id": "s1", "step_kind": "produce", "statement": "定位分支", "block_id": first,
+             "ao_refs": _cite(turn, first)},
             {"step_id": "s2", "step_kind": "verify", "statement": "核对输出", "block_id": last,
              "issue_kind": "incorrect", "check_how": "对照期望输出",
              "violation_sign": "输出为零"},
@@ -94,6 +101,126 @@ def test_pipeline_writes_a_card_and_binds_score(tmp_path: Path) -> None:
     assert card is not None and card.task_score == 0.85 and card.author_role == "reader"
     assert seen[0].allowed_kinds == ("skill_card",)
     assert store.find(principal_labels=["user:bob"]).hits == ()
+
+
+def _fail(source: str = "verifier", **raw) -> OutcomeSignal:
+    return OutcomeSignal(signal="fail", source=source, raw={"reward": 0.1, **raw})
+
+
+def _fork(turn: ProposerTurn, **over) -> dict:
+    blocks = list(turn.block_aos)
+    first = blocks[0]
+    body = {
+        "kind": "fork",
+        "anchor_block_id": first,
+        "base_revision_id": turn.base_revision_id,
+        "base_revision_block_content_hash": turn.base_revision_block_content_hash,
+        "report_hash": turn.report_hash,
+        "boundary": "只适用于解析器类任务",
+        "gamma": {"deliverable": "text", "issue_kind": "incorrect",
+                  "abstract_text": "解析器遇到空输入时直接返回零", "anchors": [blocks[-1]]},
+        "steps": [{"step_id": "f1", "step_kind": "produce", "statement": "先处理空输入再解析",
+                   "block_id": first, "ao_refs": _cite(turn, first)}],
+        # The model does not get to pick these.
+        "fork_node_id": "f" * 64, "violates": {"card_id": "x", "step_id": "y"},
+        "diagnosis_report_id": "d",
+    }
+    body.update(over)
+    return body
+
+
+def test_failed_verifier_run_writes_a_fork_overlay_and_card(tmp_path: Path) -> None:
+    cards = tmp_path / "user-root"
+    seen: list[ProposerTurn] = []
+
+    def provider(turn: ProposerTurn):
+        seen.append(turn)
+        return [_fork(turn)]
+
+    out = _run(tmp_path, _fail(feedback="缺少空输入处理"), provider, cards)
+    assert out.status == "frozen" and len(out.card_ids) == 1
+    turn = seen[0]
+    assert turn.allowed_kinds == ("fork",) and turn.outcome_feedback == "缺少空输入处理"
+    assert turn.outcome_digest.startswith("fail")
+    overlays = ForkNodeOverlayStore(cards)
+    store = ExperienceCardStore(cards, overlays)
+    card = store.read(out.card_ids[0], principal_labels=[_OWNER])
+    assert card is not None and card.kind == "fork" and card.task_score is None
+    assert card.fork_node_id != "f" * 64 and card.violates is None and card.diagnosis_report_id is None
+    assert card.gamma.anchors[-1] == list(turn.block_aos)[0]  # the anchor is added by the server
+    stored = overlays.read_overlay_by_id(card.fork_node_id, principal_labels=[_OWNER])
+    assert stored is not None and stored.overlay.anchor_block_id == list(turn.block_aos)[0]
+    assert [s.imagined_node_id for s in stored.overlay.branch_steps] == ["img-f1"]
+    found = store.find(principal_labels=[_OWNER], kind="fork")
+    assert [h.card.card_id for h in found.hits] == [card.card_id]
+
+
+def test_fork_needs_a_verifier_fail_and_a_skill_needs_a_pass(tmp_path: Path) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def provider(turn: ProposerTurn):
+        calls.append(turn.allowed_kinds)
+        return [_fork(turn), _proposal(turn)]
+
+    inferred = _run(tmp_path / "a", _fail("model_inferred"), provider, tmp_path / "ca")
+    assert inferred.card_ids == () and calls == []
+    failed = _run(tmp_path / "b", _fail(), provider, tmp_path / "cb")
+    # The skill_card in the same list is refused on a failed run; the fork lands.
+    assert len(failed.card_ids) == 1 and calls == [("fork",)]
+    passed = _run(tmp_path / "c", _pass(0.9), provider, tmp_path / "cc")
+    assert len(passed.card_ids) == 1 and calls[-1] == ("skill_card",)
+
+
+def test_card_without_a_cited_ao_or_with_a_bad_anchor_is_not_stored(tmp_path: Path) -> None:
+    def uncited(turn: ProposerTurn):
+        body = _proposal(turn)
+        body["steps"][0].pop("ao_refs")
+        fork = _fork(turn)
+        fork["steps"][0].pop("ao_refs")
+        return [body, fork]
+
+    assert _run(tmp_path / "a", _pass(0.9), uncited, tmp_path / "ca").card_ids == ()
+    assert _run(tmp_path / "b", _fail(), uncited, tmp_path / "cb").card_ids == ()
+
+    def bad_anchor(turn: ProposerTurn):
+        return [_fork(turn, anchor_block_id="no-such-block"), _fork(turn, anchor_block_id=None)]
+
+    cards = tmp_path / "cc"
+    assert _run(tmp_path / "c", _fail(), bad_anchor, cards).card_ids == ()
+    # A refused card leaves no overlay behind.
+    overlay_dir = cards / "fork-node-overlays" / "overlays"
+    assert not overlay_dir.exists() or list(overlay_dir.glob("*.json")) == []
+
+
+def test_vlm_card_proposer_sends_an_uncited_card_back_once(tmp_path: Path) -> None:
+    import asyncio
+    import json
+    import time
+
+    from openviking.session.aig_vlm_roles import VLMCardProposer
+
+    good = {"kind": "skill_card", "steps": [{"step_id": "s1", "block_id": "b", "ao_refs": ["ao-0"]}]}
+    bad = {"kind": "skill_card", "steps": [{"step_id": "s1", "block_id": "b"}]}
+    wrong = {"kind": "skill_card", "steps": [{"step_id": "s1", "block_id": "b", "ao_refs": ["ao-9"]}]}
+
+    class Handle:
+        def __init__(self, replies: list[dict]) -> None:
+            self.replies = replies
+            self.messages: list[list[dict]] = []
+
+        async def get_completion_async(self, **kw):
+            await asyncio.sleep(0)
+            self.messages.append(kw["messages"])
+            return json.dumps({"proposals": [self.replies[len(self.messages) - 1]]})
+
+    turn = ProposerTurn("p", {}, "r", "h", "d", {"b": ("ao-0", "ao-1")}, ("ao-0",), "pass",
+                        ("skill_card",))
+    handle = Handle([bad, good])
+    assert VLMCardProposer(handle, time.monotonic() + 30)(turn) == [good]
+    assert len(handle.messages) == 2 and "no step cites an AO" in handle.messages[1][-1]["content"]
+    handle = Handle([wrong, good])
+    assert VLMCardProposer(handle, time.monotonic() + 30)(turn) == [good]
+    assert "AOs you may cite there: ['ao-0']" in handle.messages[1][-1]["content"]
 
 
 def test_low_score_failed_and_bad_proposals_never_change_the_pipeline(tmp_path: Path) -> None:
@@ -246,6 +373,8 @@ def test_card_hook_runs_through_a_session_and_writes_under_the_user_root(tmp_pat
 
 
 def _proposal_from_state(state: dict, first: str, last: str) -> dict:
+    read = set(state["read_aos"])
+    cite = [ao for ao in state["block_aos"][first] if ao in read][:1]
     return {
         "kind": "skill_card",
         "base_revision_id": state["base_revision_id"],
@@ -254,7 +383,8 @@ def _proposal_from_state(state: dict, first: str, last: str) -> dict:
         "boundary": "仅适用于解析器修复",
         "gamma": {"deliverable": "text", "abstract_text": "修复解析器", "anchors": [first]},
         "steps": [
-            {"step_id": "s1", "step_kind": "produce", "statement": "定位", "block_id": first},
+            {"step_id": "s1", "step_kind": "produce", "statement": "定位", "block_id": first,
+             "ao_refs": cite},
             {"step_id": "s2", "step_kind": "verify", "statement": "核对", "block_id": last,
              "issue_kind": "incorrect", "check_how": "对照输出", "violation_sign": "为零"},
         ],

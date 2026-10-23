@@ -107,7 +107,7 @@ def card_hook_for_session(session: Any, vlm_handle: Any) -> Any:
     from openviking.session.card_proposer import run_card_proposer
 
     def hook(revision: Any, snapshot: AoSnapshot, read: Any) -> Any:
-        provider = VLMCardProposer(vlm_handle, time.monotonic() + 60.0)
+        provider = VLMCardProposer(vlm_handle, time.monotonic() + 150.0)
         return partial(run_card_proposer, card_root=root, owner_label=label)(
             revision, snapshot, read, provider
         )

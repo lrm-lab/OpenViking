@@ -712,12 +712,22 @@ def _rank(
 
 
 _PROMPT_EXAMPLE = (
-    '{"kind":"skill_card","boundary":"只适用于需要按固定章节交付 Word 文档的任务",'
+    '{"kind":"skill_card","boundary":"只适用于输入表格的表头不在第一行的 Excel 报表任务；表头在首行时不需要这样做",'
+    '"gamma":{"deliverable":"xlsx","issue_kind":"incorrect",'
+    '"abstract_text":"输入工作表带标题块，表头不在第一行，直接按列名读取会抛 KeyError",'
+    '"anchors":["b-2"]},'
+    '"steps":[{"step_id":"s1","step_kind":"produce","statement":"按列名读取抛 KeyError 后，先打印前 10 行确认真实表头行号，再用 header=行号 重新加载",'
+    '"block_id":"b-2","ao_refs":["ao-7"],"recovery":true},'
+    '{"step_id":"s2","step_kind":"verify","statement":"加载后核对列名与行数","block_id":"b-3","ao_refs":["ao-9"],'
+    '"issue_kind":"incorrect","check_how":"打印 df.columns 和 len(df)，确认与源表一致","violation_sign":"列名出现 Unnamed 或行数为 0"}]}'
+)
+
+_FORK_EXAMPLE = (
+    '{"kind":"fork","anchor_block_id":"b-2","boundary":"只适用于交付物必须逐条回应输入清单的任务",'
     '"gamma":{"deliverable":"docx","issue_kind":"missing_section",'
-    '"abstract_text":"按给定章节清单起草结构化文档并逐项核对章节是否齐全","anchors":["b-1"]},'
-    '"steps":[{"step_id":"s1","step_kind":"produce","statement":"按清单起草各章节","block_id":"b-1"},'
-    '{"step_id":"s2","step_kind":"verify","statement":"交付前核对章节","block_id":"b-2",'
-    '"issue_kind":"missing_section","check_how":"逐项对照章节清单","violation_sign":"缺少任一必需章节"}]}'
+    '"abstract_text":"输入附件里有逐条编号的要求清单，起草时只按标题概括而没有逐条回应","anchors":["b-2"]},'
+    '"steps":[{"step_id":"f1","step_kind":"produce","statement":"起草前把附件里的编号条目逐条抄成待办清单，每条对应交付物里的一个小节",'
+    '"block_id":"b-2","ao_refs":["ao-4"]}]}'
 )
 
 
@@ -725,20 +735,34 @@ def _prompt() -> str:
     return (
         "经验卡提案（submit_experience_card，参数 {proposal}）。服务端核对后才写入；你只提案。\n"
         "何时提：确认通过的任务只提 skill_card；确认失败的任务只提 fork。结果未判定时两者都不提。\n"
+        "\n"
+        "【什么值得提】只提“换一个任务也用得上、而且这条轨迹里确实发生过”的经验：\n"
+        "- 轨迹里真实遇到的具体问题和被验证有效的处理：某个报错或异常现象 → 实际定位到的原因 → 实际有效的修复；\n"
+        "- 输入文件、格式、工具或库的实际特性（它们在这条轨迹里表现出来的、不显然的特点）；\n"
+        "- 轨迹里一个改变了结果的非显然做法，以及它抓到的真实问题的检查手段。\n"
+        "【什么不提】任何不看这条轨迹、凭常识也能写出来的话，例如“用 Python 库生成 PDF”“交付前核对章节是否齐全”“按要求逐项对照”“先理解需求再动手”。"
+        "自测：换一个没读过这条轨迹的模型，也会写出同样的话，就不要提。宁可返回空 proposals，也不要提这类通用建议。\n"
+        "【来源】内容只能来自这条轨迹（冻结图和你读过的 AO）。不得用你自己的知识补充步骤、原因或最佳实践；轨迹里没有依据的步骤不要写。"
+        "每个提案至少一个步骤带 ao_refs（必填），每个有依据的步骤都应带 ao_refs，写则必须是该步骤 block 内且你读过的 AO。"
+        "评审报告（outcome_feedback）只用来判断重点看哪里，它本身不是来源。\n"
+        "【可迁移】触发情境用“输入的结构、遇到的现象、约束的类型”来描述，去掉公司名、人名、具体数值等一次性实体，"
+        "但保留技术细节（库名、报错信息、文件结构特征）。abstract_text 必须能把这张卡和别的卡区分开："
+        "写出触发它的具体现象，不要只写“生成某类文档”。boundary 说明什么情况下不要用这张卡。\n"
+        "\n"
         "skill_card：沿成功路径选一串事实块作为 steps，每步 step_kind 为 produce 或 verify。"
         "至少含一个 verify 步骤（写明 check_how 怎么查、violation_sign 违反表现、issue_kind 检查的问题）"
-        "或一段出错→修复片段（produce 步骤标 recovery=true）。不要提不含检查或修复的纯流水账。\n"
-        "fork：经 fork_node_id 指向已写入的 ForkNode；可带 violates={card_id, step_id}（必须指向已有 skill_card 的 verify 步骤）"
-        "和 diagnosis_report_id（同一事故涉及的多个 fork 共用）。fork 的步骤不能是 verify。\n"
+        "或一段出错→修复片段（produce 步骤标 recovery=true，必须是轨迹里真的出过错又修好的）。不要提不含检查或修复的纯流水账。\n"
+        "fork：提案里用 anchor_block_id 指出这条轨迹在哪个块上走偏了；steps 写在那里“应该改做什么”（produce 步骤，"
+        "不能是 verify），并说明轨迹里走偏的证据（ao_refs）。服务端为它写入 ForkNode；violates、diagnosis_report_id、"
+        "fork_node_id 由服务端处理，不必填。评审报告里的问题如果轨迹里找不到对应证据，不要写成 fork。\n"
         f"gamma（触发条件）：deliverable 取 {'/'.join(DELIVERABLE_KINDS)} 之一；"
-        f"issue_kind 取 {'/'.join(FAILURE_KINDS)} 之一；occupation 可选；"
-        "abstract_text 用不含具体实体名的抽象句描述情境，anchors 列出支撑该情境的块。\n"
-        "boundary（适用边界）必填：说明什么情况下不要用这张卡。\n"
-        "接地：每一步 block_id 必须是冻结图中真实存在的块；ao_refs 可选，写则必须是该块内且你读过的 AO。"
-        "不确定就省略 ao_refs，不要猜。task_score、author_role 由服务端写入，你填的会被覆盖；"
+        f"issue_kind 取 {'/'.join(FAILURE_KINDS)} 之一；occupation 可选；anchors 列出支撑该情境的块。\n"
+        "接地：每一步 block_id 必须是冻结图中真实存在的块。task_score、author_role 由服务端写入，你填的会被覆盖；"
         "base_revision_id、base_revision_block_content_hash、report_hash 也由服务端写入，不必填。\n"
         "每个 proposal 是一个平铺 JSON 对象（不要再套一层 skill_card 键），block_id 只能取输入 block_aos 的键。示例：\n"
         + _PROMPT_EXAMPLE
+        + "\nfork 示例：\n"
+        + _FORK_EXAMPLE
     )
 
 

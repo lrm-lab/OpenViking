@@ -470,6 +470,15 @@ class VLMCardProposer(_RoleModel):
     """One call: the frozen graph and facts in, ``{"proposals": [...]}`` out."""
 
     def __call__(self, turn: Any) -> list[dict[str, Any]]:
+        def validate(result: dict[str, Any]) -> None:
+            proposals = result.get("proposals")
+            if set(result) != {"proposals"} or not isinstance(proposals, list):
+                raise ValueError("invalid_card_proposals")
+            for item in proposals:
+                if not isinstance(item, dict):
+                    raise ValueError("invalid_card_proposals")
+                _check_card_evidence(item, turn.block_aos, turn.read_aos)
+
         result = self._ask(
             turn.system_prompt + '\nOutput {"proposals":[<proposal>, ...]}; an empty list is fine.',
             {
@@ -480,8 +489,10 @@ class VLMCardProposer(_RoleModel):
                 "block_aos": turn.block_aos,
                 "read_aos": turn.read_aos,
                 "outcome": turn.outcome_digest,
+                "outcome_feedback": getattr(turn, "outcome_feedback", ""),
                 "allowed_kinds": turn.allowed_kinds,
             },
+            validate=validate,
         )
         proposals = result.get("proposals")
         if set(result) != {"proposals"} or not isinstance(proposals, list):
@@ -489,6 +500,46 @@ class VLMCardProposer(_RoleModel):
         if any(not isinstance(item, dict) for item in proposals):
             raise ValueError("invalid_card_proposals")
         return proposals
+
+
+def _check_card_evidence(
+    proposal: Mapping[str, Any],
+    block_aos: Mapping[str, Sequence[str]],
+    read_aos: Sequence[str],
+) -> None:
+    """Send an uncited or mis-cited card back to the model. Nothing is repaired or inferred.
+
+    A card must rest on the trajectory: at least one step cites an AO that sits in the step's
+    block and that the Reader read. With nothing readable there is nothing to cite, so the
+    check does not apply (the server drops such a card on its own).
+    """
+    steps = proposal.get("steps")
+    if not isinstance(steps, list) or not read_aos:
+        return
+    read = set(read_aos)
+    cited = 0
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        refs = step.get("ao_refs") or []
+        if not isinstance(refs, list):
+            raise ValueError(f"steps[{index}].ao_refs must be a list of AO ids")
+        block_id = step.get("block_id")
+        usable = [ao for ao in block_aos.get(block_id, ()) if ao in read] if isinstance(block_id, str) else []
+        for ao in refs:
+            if ao not in usable:
+                raise ValueError(
+                    f"steps[{index}].ao_refs has {ao!r}, which is not an AO you read in block "
+                    f"{step.get('block_id')!r}; AOs you may cite there: {usable}"
+                )
+        cited += bool(refs)
+    if not cited:
+        raise ValueError(
+            "no step cites an AO. Every card must rest on this trajectory: add ao_refs "
+            "(AO ids from read_aos that are inside the step's block) to the steps the "
+            "trajectory supports, and drop steps it does not support. "
+            "Return an empty proposals list if nothing in this trajectory is worth keeping."
+        )
 
 
 def providers_for_vlm(handle: Any) -> AigRoleProviders:
