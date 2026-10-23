@@ -89,6 +89,34 @@ async def explicit_session_diagnosis(
     return Response(status="ok", result=result).model_dump(exclude_none=True)
 
 
+class AdjudicateRequest(BaseModel):
+    outcome_evaluator_results: List[Dict[str, Any]] = Field(min_length=1, max_length=8)
+    aig_question: Optional[str] = Field(default=None, min_length=1, max_length=8192)
+
+    model_config = {"extra": "forbid"}
+
+
+@router.post("/{session_id}/adjudicate")
+async def adjudicate_session_outcome(
+    session_id: str,
+    body: AdjudicateRequest,
+    ctx: RequestContext = Depends(get_session_request_context),
+):
+    """Attach an official outcome to a committed session and rebuild its four-role AIG."""
+    from openviking.session.outcome_adjudication import adjudicate_session
+
+    session = await _diagnosis_session(session_id, ctx)
+    try:
+        result = await adjudicate_session(
+            session, body.outcome_evaluator_results, aig_question=body.aig_question
+        )
+    except ValueError as exc:
+        from openviking_cli.exceptions import InvalidArgumentError
+
+        raise InvalidArgumentError(str(exc)) from exc
+    return Response(status="ok", result=result).model_dump(exclude_none=True)
+
+
 class TextPartRequest(BaseModel):
     """Text part request model."""
 
