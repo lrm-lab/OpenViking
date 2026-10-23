@@ -34,6 +34,19 @@ def adjudication_run_id(evaluator_results: list[dict[str, Any]]) -> str:
     return "adj-" + hashlib.sha256(blob.encode()).hexdigest()[:24]
 
 
+def _fresh_run_id(root: Path, base_id: str) -> str:
+    """A fallback leaves its toolloop run dir (with a submitted draft) behind; reusing the same
+    run id would make the builder see ``already_submitted`` and rebuild nothing. Retry under a
+    new attempt-suffixed id instead."""
+    runs = root / "toolloop-runs"
+    if not (runs / base_id).exists():
+        return base_id
+    n = 2
+    while (runs / f"{base_id}-r{n}").exists():
+        n += 1
+    return f"{base_id}-r{n}"
+
+
 def _public(record: dict[str, Any]) -> dict[str, Any]:
     keys = ("task_run_id", "status", "reason", "revision_id", "card_ids", "signal", "reward")
     return {key: record[key] for key in keys if key in record}
@@ -55,8 +68,8 @@ async def adjudicate_session(
     root = session_directory(session)
     if root is None or not is_session_causal(session):
         raise ValueError("causal_session_required")
-    run_id = adjudication_run_id(evaluator_results)
-    path = Path(root) / "adjudications" / f"{run_id}.json"
+    base_id = adjudication_run_id(evaluator_results)
+    path = Path(root) / "adjudications" / f"{base_id}.json"
     lock = _locks.setdefault(str(path), asyncio.Lock())
     async with lock:
         if path.exists():  # same evaluator results already adjudicated: terminal, idempotent
@@ -64,6 +77,7 @@ async def adjudicate_session(
         model = await session._get_vlm_config()
         if model is None:
             raise ValueError("adjudication_model_unavailable")
+        run_id = _fresh_run_id(Path(root), base_id)
         session.outcome_evaluator_results = list(evaluator_results)
         if aig_question is not None:
             session.aig_question = aig_question.strip()
@@ -74,6 +88,7 @@ async def adjudicate_session(
         )
         record = {
             "task_run_id": run_id,
+            "adjudication_id": base_id,
             "status": result.status,
             "reason": result.reason,
             "revision_id": result.revision_id,

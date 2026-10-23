@@ -71,3 +71,13 @@ def test_bad_or_ambiguous_results_are_refused(monkeypatch, tmp_path, results):
     _patch(monkeypatch, tmp_path, [], ProductionAigResult("frozen", "complete"))
     with pytest.raises(ValueError):
         asyncio.run(adj.adjudicate_session(_session(tmp_path), results))
+
+
+def test_fresh_run_id_skips_leftover_run_dir(tmp_path):
+    from openviking.session.outcome_adjudication import _fresh_run_id
+
+    assert _fresh_run_id(tmp_path, "adj-x") == "adj-x"
+    (tmp_path / "toolloop-runs" / "adj-x").mkdir(parents=True)
+    assert _fresh_run_id(tmp_path, "adj-x") == "adj-x-r2"
+    (tmp_path / "toolloop-runs" / "adj-x-r2").mkdir()
+    assert _fresh_run_id(tmp_path, "adj-x") == "adj-x-r3"
