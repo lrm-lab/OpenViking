@@ -81,3 +81,36 @@ def test_fresh_run_id_skips_leftover_run_dir(tmp_path):
     assert _fresh_run_id(tmp_path, "adj-x") == "adj-x-r2"
     (tmp_path / "toolloop-runs" / "adj-x-r2").mkdir()
     assert _fresh_run_id(tmp_path, "adj-x") == "adj-x-r3"
+
+
+def test_critic_bad_object_id_is_sent_back_and_retried():
+    import asyncio
+    import json
+    import time
+    from types import SimpleNamespace
+
+    from openviking.session.aig_vlm_roles import VLMCritic
+
+    bad = {"violations": [{"object_id": ["a", "b"], "kind": "granularity", "severity": "low",
+                           "evidence_ao_refs": [0], "note": "overlap"}]}
+    good = {"violations": [{"object_id": "a", "kind": "granularity", "severity": "low",
+                            "evidence_ao_refs": [0], "note": "overlap with b"}]}
+    replies = [json.dumps(bad), json.dumps(good)]
+    seen = []
+
+    class Handle:
+        async def get_completion_async(self, **kw):
+            seen.append(kw["messages"])
+            await asyncio.sleep(0)
+            return replies.pop(0)
+
+    view = SimpleNamespace(call=lambda verb, args=None: {"row_count": 3})
+    critic = VLMCritic(Handle(), time.monotonic() + 30)
+    critic.bind_view(view)
+    turn = SimpleNamespace(system_prompt="p", tools=(), structural_violations=(),
+                           draft={"blocks": [{"block_id": "a"}, {"block_id": "b"}]})
+    assert critic(turn) == good
+    assert len(seen) == 2 and "Rejected output" in seen[1][-1]["content"]
+    schema = critic._output_schema({"tools": [], "draft": turn.draft})
+    item = schema["anyOf"][-1]["properties"]["violations"]["items"]
+    assert item["properties"]["object_id"]["enum"] == ["a", "b"]

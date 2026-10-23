@@ -49,7 +49,7 @@ def _base_critic_prompt_for_mode(mode: str | None) -> str:
     return CRITIC_SYSTEM_PROMPT
 
 
-CRITIC_JUDGE_REPORT_GUARD = '\n评审报告（get_overview 的 outcome.feedback，若存在）：先核对图是否忠实于日志；再检查报告中的每条发现能否在图中定位到对应块。找不到轨迹证据的发现，在 note 中标注"无轨迹证据"，不要强行要求某个块承载它。get_overview 的交互 DAG 只是导航，不是应照抄的分块标准。'
+CRITIC_JUDGE_REPORT_GUARD = '\n评审报告（get_overview 的 outcome.feedback，若存在）：先核对图是否忠实于日志；再检查报告中的每条发现能否在图中定位到对应块。找不到轨迹证据的发现，在 note 中标注"无轨迹证据"，不要强行要求某个块承载它。get_overview 的交互 DAG 只是导航，不是应照抄的分块标准。\n每条违规的 object_id 只能是一个已存在的 block_id（单个字符串，不要列表或拼接）；若违规涉及多个块，选最主要的一个填 object_id，其余块名写进 note。'
 
 
 def critic_prompt_for_mode(mode: str | None) -> str:

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -23,6 +24,8 @@ from openviking.session.aig_toolloop_builder import ToolInvocation, ToolloopTurn
 from openviking.session.aig_toolloop_critic import CriticTurn, CriticView, parse_critic_violations
 from openviking.session.aig_toolloop_reader import READER_NEUTRAL_PROMPT, ReaderInvocation, ReaderTurn, parse_reader_report
 from openviking.session.aig_toolloop_refiner import RefinerAction, RefinerTurn
+
+logger = logging.getLogger(__name__)
 
 
 def _json_object(value: Any) -> dict[str, Any]:
@@ -149,7 +152,21 @@ class _RoleModel:
                     refs["minItems"] = 1
                     refs["items"]["minimum"] = 0
         if isinstance(self, VLMCritic):
-            variants.append(obj({"violations": {"type": "array", "items": {"type": "object"}}}))
+            block_ids = [
+                b["block_id"] for b in (state.get("draft") or {}).get("blocks", ())
+                if isinstance(b, dict) and isinstance(b.get("block_id"), str)
+            ]
+            item: dict[str, Any] = {"type": "object"}
+            if block_ids:
+                # One violation names exactly one existing block; others go in ``note``.
+                item = obj({
+                    "object_id": {"type": "string", "enum": block_ids},
+                    "kind": {"type": "string", "enum": ["semantic", "granularity"]},
+                    "severity": {"type": "string", "enum": ["high", "low"]},
+                    "evidence_ao_refs": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+                    "note": {"type": "string", "minLength": 1},
+                })
+            variants.append(obj({"violations": {"type": "array", "items": item}}))
         elif isinstance(self, VLMRefiner):
             variants = [
                 obj(
@@ -265,6 +282,10 @@ class _RoleModel:
                     validate(result)
                 return result
             except ValueError as exc:
+                logger.warning(
+                    "aig role output rejected (attempt %d/3): %s: %s | raw=%s",
+                    attempt + 1, type(exc).__name__, exc, (content or "")[:1500],
+                )
                 if attempt == 2:
                     raise
                 # Send the rejected output verbatim. Only the model may propose a
@@ -320,6 +341,25 @@ class VLMCritic(_RoleModel):
         if self._view is None:
             raise ValueError("critic_view_missing")
         history: list[dict[str, Any]] = []
+        block_ids = {block["block_id"] for block in turn.draft.get("blocks", [])}
+        row_count = self._view.call("get_overview")["row_count"]
+
+        def validate(output: dict[str, Any]) -> None:
+            # A malformed audit is sent back to the model with the exact reason (bounded
+            # by _ask's retries) instead of failing the whole four-role construction.
+            if set(output) == {"violations"}:
+                try:
+                    parse_critic_violations(output, block_ids=block_ids, row_count=row_count)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"{exc}. Each violation must be exactly "
+                        "{object_id, kind, severity, evidence_ao_refs, note}; object_id is ONE "
+                        f"existing block_id from {sorted(block_ids)} (a string, never a list or "
+                        "a joined string; mention other blocks in note); kind is semantic or "
+                        "granularity; severity is high or low; evidence_ao_refs are integer "
+                        f"row indexes in [0, {row_count - 1}]; note is non-empty."
+                    ) from exc
+
         for _ in range(9):
             result = self._ask(
                 turn.system_prompt + '\nRead with {"verb":"read_step","arguments":{"index":0}} '
@@ -330,13 +370,10 @@ class VLMCritic(_RoleModel):
                     "structural_violations": turn.structural_violations,
                     "history": history,
                 },
+                validate=validate,
             )
             if set(result) == {"violations"}:
-                overview = self._view.call("get_overview")
-                block_ids = {block["block_id"] for block in turn.draft.get("blocks", [])}
-                parse_critic_violations(
-                    result, block_ids=block_ids, row_count=overview["row_count"]
-                )
+                parse_critic_violations(result, block_ids=block_ids, row_count=row_count)
                 return result
             if set(result) != {"verb", "arguments"} or not isinstance(result["arguments"], dict):
                 raise ValueError("invalid_critic_action")
