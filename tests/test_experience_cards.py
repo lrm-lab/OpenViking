@@ -331,3 +331,12 @@ def test_proposer_prompt_names_every_gate_and_vocabulary() -> None:
     for word in (*DELIVERABLE_KINDS, *FAILURE_KINDS, "skill_card", "fork", "verify", "boundary",
                  "check_how", "violation_sign", "violates", "ao_refs", "recovery", "task_score"):
         assert word in prompt
+
+
+def test_proposer_prompt_requires_ao_refs_like_the_server() -> None:
+    from openviking.session.card_proposer import has_trajectory_evidence
+    from openviking.session.experience_cards import EXPERIENCE_CARD_PROPOSER_PROMPT as prompt
+
+    assert "ao_refs（必填）" in prompt
+    assert "可选" not in prompt.split("ao_refs")[1][:40]
+    assert not has_trajectory_evidence({"steps": [{"step_id": "s1", "block_id": "b-1"}]})

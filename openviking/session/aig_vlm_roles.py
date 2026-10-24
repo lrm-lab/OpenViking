@@ -27,6 +27,15 @@ from openviking.session.aig_toolloop_refiner import RefinerAction, RefinerTurn
 
 logger = logging.getLogger(__name__)
 
+# Models whose strict ``json_schema`` output was verified with real constrained requests.
+# ``gemma-4-31b-it`` is the id the account VLM config uses for the Gemma pool; verified
+# 2026-10-24 on that pool (conforming output even when the prompt asks for markdown).
+CONSTRAINED_JSON_MODELS = frozenset({
+    "google/gemma-4-31b-it",
+    "gemma-4-31b-it",
+    "qwen/qwen3.5-27b",
+})
+
 
 def _json_object(value: Any) -> dict[str, Any]:
     if not isinstance(value, str):
@@ -62,6 +71,8 @@ class _RoleModel:
         self._deadline = deadline
         # One entry per model attempt, for diagnosis only; never fed back to the model.
         self.attempts: list[dict[str, Any]] = []
+        # Raw text of the latest model reply, for diagnosis only.
+        self.last_raw = ""
 
     def _output_schema(self, state: Mapping[str, Any]) -> dict[str, Any]:
         def obj(properties: dict[str, Any]) -> dict[str, Any]:
@@ -250,10 +261,7 @@ class _RoleModel:
                 # These model/provider paths are verified by real constrained
                 # requests. Other handles retain strict parsing and bounded
                 # error feedback.
-                if getattr(self._handle, "model", None) in {
-                    "google/gemma-4-31b-it",
-                    "qwen/qwen3.5-27b",
-                }:
+                if getattr(self._handle, "model", None) in CONSTRAINED_JSON_MODELS:
                     options["response_format"] = {
                         "type": "json_schema",
                         "json_schema": {
@@ -279,6 +287,7 @@ class _RoleModel:
                     raise TimeoutError("aig_role_request_timeout") from None
                 continue
             content = response if isinstance(response, str) else getattr(response, "content", None)
+            self.last_raw = content or ""
             try:
                 result = _json_object(content)
                 if validate is not None:
@@ -387,6 +396,12 @@ class VLMCritic(_RoleModel):
                 parse_critic_violations(result, block_ids=block_ids, row_count=row_count)
                 return result
             if set(result) != {"verb", "arguments"} or not isinstance(result["arguments"], dict):
+                # Diagnosis only: the shape is rejected exactly as before, but the model's
+                # reply is no longer lost (this path runs after the reply was accepted).
+                self.attempts.append({"result": "invalid_action", "raw_head": self.last_raw[:300]})
+                logger.warning(
+                    "aig critic action rejected: invalid_critic_action | raw=%s", self.last_raw[:1500]
+                )
                 raise ValueError("invalid_critic_action")
             if result["verb"] not in {name for name, _ in turn.tools}:
                 raise ValueError("critic_verb_forbidden")

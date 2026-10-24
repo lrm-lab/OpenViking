@@ -13,8 +13,9 @@ share one schema:
   so its content hash and idempotency keys stay valid.
 
 Grounding: block anchors are mandatory and must exist in the registered base
-revision. ``ao_refs`` on a step are optional. When present, the caller-supplied
-block-to-AO index must contain them. Cards are written only by the server
+revision. The store accepts steps without ``ao_refs``; when present, the caller-supplied
+block-to-AO index must contain them. The card proposer additionally requires at least one
+step with ``ao_refs`` (``has_trajectory_evidence``), and its prompt says so. Cards are written only by the server
 after this validation; the Reader only proposes.
 """
 
