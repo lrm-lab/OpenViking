@@ -1,0 +1,108 @@
+{
+  "domain": "swe",
+  "adjudication_id": "adj-854d343e7437fb228a729f94",
+  "source": "experiments/evo-kw-rerun-20261020/local-state/evo-swe-d-20261025/user/eval-admin/sessions/coforge-quiet-01a171c2-c27f-737c-8406-b52917350df3-01a171c2-dd86-721b-8495-48e59d84caa1/adjudications/adj-854d343e7437fb228a729f94.json",
+  "sha256": "ab803574aab75bdac4f541b0862f638b77392282dac50f070a0e59b0ffb1c9f5",
+  "verdict": "model_returned_empty",
+  "rejected": [],
+  "recorded_read_aos": 0,
+  "raw_read_lower_bound": [
+    9
+  ],
+  "records": [
+    {
+      "ao_id": "a7b56ff778834f3c8005292d60fe9326",
+      "sequence": 1
+    },
+    {
+      "ao_id": "da88feed7840430593dabf35e77054ce",
+      "sequence": 2
+    },
+    {
+      "ao_id": "71bbb62f20154313b09a45769d509a07",
+      "sequence": 3
+    },
+    {
+      "ao_id": "46acf960a54649a6a115ee6c48a8c212",
+      "sequence": 4
+    },
+    {
+      "ao_id": "8c955028f629458b8a501efe6b5ebbbc",
+      "sequence": 5
+    },
+    {
+      "ao_id": "00e3ad6c3dc8457da77ddf1ab2530acb",
+      "sequence": 6
+    },
+    {
+      "ao_id": "18bbe7443ff343f1933ad97389b43bcb",
+      "sequence": 7
+    },
+    {
+      "ao_id": "1695ef5c029a41528ef4c28de5c550ae",
+      "sequence": 8
+    },
+    {
+      "ao_id": "58ecf839ffdf40d0a140d03fb7bada44",
+      "sequence": 9
+    },
+    {
+      "ao_id": "23eb8e223d034357b158a99b8dcfbd60",
+      "sequence": 10
+    },
+    {
+      "ao_id": "6b184b7503c5486d85654af5b5fbb608",
+      "sequence": 11
+    },
+    {
+      "ao_id": "1c85e479b4f649d0a255338b46e32e87",
+      "sequence": 12
+    }
+  ],
+  "blocks": [
+    {
+      "block_id": "task-0",
+      "source_refs": [
+        {
+          "ao_id": "a7b56ff778834f3c8005292d60fe9326",
+          "sequence": 1
+        }
+      ]
+    },
+    {
+      "block_id": "orch-0",
+      "source_refs": [
+        {
+          "ao_id": "46acf960a54649a6a115ee6c48a8c212",
+          "sequence": 4
+        },
+        {
+          "ao_id": "8c955028f629458b8a501efe6b5ebbbc",
+          "sequence": 5
+        },
+        {
+          "ao_id": "00e3ad6c3dc8457da77ddf1ab2530acb",
+          "sequence": 6
+        }
+      ]
+    },
+    {
+      "block_id": "agent-0",
+      "source_refs": [
+        {
+          "ao_id": "23eb8e223d034357b158a99b8dcfbd60",
+          "sequence": 10
+        }
+      ]
+    },
+    {
+      "block_id": "conclusion-0",
+      "source_refs": [
+        {
+          "ao_id": "1c85e479b4f649d0a255338b46e32e87",
+          "sequence": 12
+        }
+      ]
+    }
+  ]
+}

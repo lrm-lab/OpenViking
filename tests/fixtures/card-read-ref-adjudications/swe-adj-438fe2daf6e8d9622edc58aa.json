@@ -1,0 +1,87 @@
+{
+  "domain": "swe",
+  "adjudication_id": "adj-438fe2daf6e8d9622edc58aa",
+  "source": "experiments/evo-kw-rerun-20261020/local-state/evo-swe-d-20261025/user/eval-admin/sessions/coforge-quiet-01a1718d-099e-7779-bb26-5c662654bb66-01a1718d-2974-745d-9ac6-3b784a8b17e3/adjudications/adj-438fe2daf6e8d9622edc58aa.json",
+  "sha256": "bf94dfa660484afc41de1c45616f1156b3e573caf60b90429ce0ae393257addb",
+  "verdict": "model_returned_empty",
+  "rejected": [],
+  "recorded_read_aos": 0,
+  "raw_read_lower_bound": [
+    8
+  ],
+  "records": [
+    {
+      "ao_id": "ca0af8c4cabb422cb4e105cd47a69c3a",
+      "sequence": 1
+    },
+    {
+      "ao_id": "43375ba9cabe4275aae517fc683d01ff",
+      "sequence": 2
+    },
+    {
+      "ao_id": "a3479c67b14243d2ba20a98a24690328",
+      "sequence": 3
+    },
+    {
+      "ao_id": "ff916db3de23447386b9393e6983311d",
+      "sequence": 4
+    },
+    {
+      "ao_id": "2c47228dd595414280c8e27f5cbec34a",
+      "sequence": 5
+    },
+    {
+      "ao_id": "89dbd999c72f46c7aa047001e9b42f63",
+      "sequence": 6
+    },
+    {
+      "ao_id": "d0282ae658914846aa9864d4ceec1bc1",
+      "sequence": 7
+    },
+    {
+      "ao_id": "cfa9afd712d54e7a9351e4eee7b4f1e0",
+      "sequence": 8
+    },
+    {
+      "ao_id": "84a3aad54b11400193cf2033dce01ac6",
+      "sequence": 9
+    }
+  ],
+  "blocks": [
+    {
+      "block_id": "task_1",
+      "source_refs": [
+        {
+          "ao_id": "ca0af8c4cabb422cb4e105cd47a69c3a",
+          "sequence": 1
+        }
+      ]
+    },
+    {
+      "block_id": "mem_1",
+      "source_refs": [
+        {
+          "ao_id": "ff916db3de23447386b9393e6983311d",
+          "sequence": 4
+        },
+        {
+          "ao_id": "2c47228dd595414280c8e27f5cbec34a",
+          "sequence": 5
+        },
+        {
+          "ao_id": "89dbd999c72f46c7aa047001e9b42f63",
+          "sequence": 6
+        }
+      ]
+    },
+    {
+      "block_id": "conclusion_1",
+      "source_refs": [
+        {
+          "ao_id": "84a3aad54b11400193cf2033dce01ac6",
+          "sequence": 9
+        }
+      ]
+    }
+  ]
+}

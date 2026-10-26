@@ -1,0 +1,88 @@
+{
+  "domain": "swe",
+  "adjudication_id": "adj-c75501eefc31c4c379d22fb5",
+  "source": "experiments/evo-kw-rerun-20261020/local-state/evo-swe-d-20261025/user/eval-admin/sessions/coforge-quiet-01a1715e-72e4-703d-94ec-b67c9e9997d1-01a1715e-9206-7453-ac34-6a24db4e4fa3/adjudications/adj-c75501eefc31c4c379d22fb5.json",
+  "sha256": "b7b87091f7003f90c81388c7536b5e85659f44eab5302bbb1c127fa9733c0296",
+  "verdict": "proposals_all_rejected",
+  "rejected": [
+    [
+      "ao_not_read",
+      "skill_card"
+    ]
+  ],
+  "recorded_read_aos": 0,
+  "raw_read_lower_bound": [
+    7
+  ],
+  "records": [
+    {
+      "ao_id": "721f92b044d34fbeb98ae8c26d3dc1c1",
+      "sequence": 1
+    },
+    {
+      "ao_id": "aecd505afedd4287808673647685c9b5",
+      "sequence": 2
+    },
+    {
+      "ao_id": "d017c1944755495e99928f1e67ec8dfe",
+      "sequence": 3
+    },
+    {
+      "ao_id": "430b0defdee048e3a76fc34f419dc478",
+      "sequence": 4
+    },
+    {
+      "ao_id": "a56e087e21c643e683256e75abb4d0b8",
+      "sequence": 5
+    },
+    {
+      "ao_id": "68df9b7bb9214e9280293aeec7e1fa63",
+      "sequence": 6
+    },
+    {
+      "ao_id": "37052a3d48ce478c8b5091152410aa62",
+      "sequence": 7
+    },
+    {
+      "ao_id": "19de1521077b433bbac6ad00ba43951f",
+      "sequence": 8
+    }
+  ],
+  "blocks": [
+    {
+      "block_id": "b-0",
+      "source_refs": [
+        {
+          "ao_id": "721f92b044d34fbeb98ae8c26d3dc1c1",
+          "sequence": 1
+        }
+      ]
+    },
+    {
+      "block_id": "b-1",
+      "source_refs": [
+        {
+          "ao_id": "430b0defdee048e3a76fc34f419dc478",
+          "sequence": 4
+        },
+        {
+          "ao_id": "a56e087e21c643e683256e75abb4d0b8",
+          "sequence": 5
+        },
+        {
+          "ao_id": "68df9b7bb9214e9280293aeec7e1fa63",
+          "sequence": 6
+        }
+      ]
+    },
+    {
+      "block_id": "b-2",
+      "source_refs": [
+        {
+          "ao_id": "19de1521077b433bbac6ad00ba43951f",
+          "sequence": 8
+        }
+      ]
+    }
+  ]
+}

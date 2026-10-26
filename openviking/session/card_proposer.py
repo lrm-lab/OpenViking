@@ -25,6 +25,7 @@ Failures never change the pipeline result.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -119,8 +120,23 @@ def block_ao_index(revision: AigNativeViewRevision) -> dict[str, tuple[str, ...]
     return {b.block_id: tuple(ref.ao_id for ref in b.source_refs) for b in revision.blocks}
 
 
-def read_ao_ids(revision: AigNativeViewRevision, read_sequences: Sequence[int]) -> tuple[str, ...]:
-    """AO ids whose sequence the Reader read (Reader refs are AO sequences)."""
+def read_ao_ids(
+    revision: AigNativeViewRevision,
+    read_sequences: Sequence[int],
+    *,
+    snapshot: AoSnapshot | None = None,
+) -> tuple[str, ...]:
+    """Map raw Reader positions by snapshot identity; preserve legacy matching by default."""
+    if os.environ.get("OPENVIKING_CARD_READ_REF_ZERO_BASED") == "1":
+        if snapshot is None:
+            raise ValueError("raw_read_snapshot_required")
+        read_ids: set[str] = set()
+        for index in read_sequences:
+            if type(index) is not int or not 0 <= index < len(snapshot.records):
+                raise ValueError("invalid_raw_read_index")
+            read_ids.add(snapshot.records[index].ao_id)
+        block_ids = {ref.ao_id for block in revision.blocks for ref in block.source_refs}
+        return tuple(sorted(read_ids & block_ids))
     wanted = set(read_sequences)
     found = {
         ref.ao_id
@@ -156,6 +172,11 @@ def run_card_proposer(
         else "fail" + (f" reward={reward}" if reward is not None else "")
     )
     feedback = outcome.raw.get("feedback")
+    # Validate all raw positions before registering a revision or invoking a provider.
+    read_aos = (
+        read_ao_ids(revision, read.read_ao_refs, snapshot=snapshot)
+        if os.environ.get("OPENVIKING_CARD_READ_REF_ZERO_BASED") == "1" else None
+    )
     overlays = ForkNodeOverlayStore(card_root)
     labels = [owner_label]
     try:
@@ -167,7 +188,8 @@ def run_card_proposer(
         return CardRunResult("skipped", exc.code, trace={"verdict": exc.code, "outcome": digest})
     store = ExperienceCardStore(card_root, overlays)
     block_aos = block_ao_index(revision)
-    read_aos = read_ao_ids(revision, read.read_ao_refs)
+    if read_aos is None:
+        read_aos = read_ao_ids(revision, read.read_ao_refs)
     # Server-bound identity of each cited AO's actor (cycle 006 D-004).
     ao_participants = {record.ao_id: _participant(record) for record in snapshot.records}
     turn = ProposerTurn(

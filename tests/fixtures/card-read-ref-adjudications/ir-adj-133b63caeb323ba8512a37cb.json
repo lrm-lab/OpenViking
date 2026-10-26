@@ -1,0 +1,191 @@
+{
+  "domain": "ir",
+  "adjudication_id": "adj-133b63caeb323ba8512a37cb",
+  "source": "experiments/evo-kw-rerun-20261020/local-state/evo-ir-d-20261024/user/eval-admin/sessions/coforge-quiet-01a16e1f-4dbb-766b-9d40-d84aa4e3f7db-01a16e1f-5ef5-7047-b73c-6aacb6174b1e/adjudications/adj-133b63caeb323ba8512a37cb.json",
+  "sha256": "9990ac40211c020fab4b443b4fd8ee2327563f51bccd8b8be753851102e758fe",
+  "verdict": "proposals_all_rejected",
+  "rejected": [
+    [
+      "ao_not_read",
+      "fork"
+    ]
+  ],
+  "recorded_read_aos": 0,
+  "raw_read_lower_bound": [
+    20
+  ],
+  "records": [
+    {
+      "ao_id": "dcb068eb01314b528055f4d0e8062686",
+      "sequence": 1
+    },
+    {
+      "ao_id": "c9bacbf06bed4f8490de30d07bdf9bf6",
+      "sequence": 2
+    },
+    {
+      "ao_id": "b7b5c5410e584a47b6ec2c6caf1e4eb9",
+      "sequence": 3
+    },
+    {
+      "ao_id": "fbbdbfa86711441dbe03584679cda210",
+      "sequence": 4
+    },
+    {
+      "ao_id": "6857ecd9c9ac4cda9aedc3afbaacfa7f",
+      "sequence": 5
+    },
+    {
+      "ao_id": "4927b25b636b44a680427779c7c5a4a3",
+      "sequence": 6
+    },
+    {
+      "ao_id": "a49808f7cdc948969a38150b4f8fa735",
+      "sequence": 7
+    },
+    {
+      "ao_id": "d9737840db0546578fb998b456fc4232",
+      "sequence": 8
+    },
+    {
+      "ao_id": "f84859b81abf47b0bbe3aa6dfb396dc6",
+      "sequence": 9
+    },
+    {
+      "ao_id": "0400deb9cd5341ee8d795973bd8a2d73",
+      "sequence": 10
+    },
+    {
+      "ao_id": "8ce80e53ebd74c189c327fe6cbd287b6",
+      "sequence": 11
+    },
+    {
+      "ao_id": "dc7935eb053e4f49b86cbe1d8b98e049",
+      "sequence": 12
+    },
+    {
+      "ao_id": "3c962c2ed6cd4c21818f5b8c05141e80",
+      "sequence": 13
+    },
+    {
+      "ao_id": "5c352a6d947e4e04b3f67fd79bcbec9c",
+      "sequence": 14
+    },
+    {
+      "ao_id": "b40a6605fe5a441092041a843f4fe90f",
+      "sequence": 15
+    },
+    {
+      "ao_id": "e83d73db08904debad86b92c9aba3178",
+      "sequence": 16
+    },
+    {
+      "ao_id": "aea63b3f496f4534958c3200bdaed498",
+      "sequence": 17
+    },
+    {
+      "ao_id": "ac4fc69284d94a068f85ee77151b8520",
+      "sequence": 18
+    },
+    {
+      "ao_id": "39f12b2d29f2475b813b7e71e1a20ca1",
+      "sequence": 19
+    },
+    {
+      "ao_id": "2db562d133424e339ea596132fd0dfe1",
+      "sequence": 20
+    },
+    {
+      "ao_id": "62abdc56237249d497d846f9f7d1f27d",
+      "sequence": 21
+    }
+  ],
+  "blocks": [
+    {
+      "block_id": "b-0",
+      "source_refs": [
+        {
+          "ao_id": "dcb068eb01314b528055f4d0e8062686",
+          "sequence": 1
+        }
+      ]
+    },
+    {
+      "block_id": "b-1",
+      "source_refs": [
+        {
+          "ao_id": "b7b5c5410e584a47b6ec2c6caf1e4eb9",
+          "sequence": 3
+        }
+      ]
+    },
+    {
+      "block_id": "b-2",
+      "source_refs": [
+        {
+          "ao_id": "a49808f7cdc948969a38150b4f8fa735",
+          "sequence": 7
+        },
+        {
+          "ao_id": "d9737840db0546578fb998b456fc4232",
+          "sequence": 8
+        },
+        {
+          "ao_id": "f84859b81abf47b0bbe3aa6dfb396dc6",
+          "sequence": 9
+        },
+        {
+          "ao_id": "0400deb9cd5341ee8d795973bd8a2d73",
+          "sequence": 10
+        },
+        {
+          "ao_id": "8ce80e53ebd74c189c327fe6cbd287b6",
+          "sequence": 11
+        }
+      ]
+    },
+    {
+      "block_id": "b-3",
+      "source_refs": [
+        {
+          "ao_id": "3c962c2ed6cd4c21818f5b8c05141e80",
+          "sequence": 13
+        },
+        {
+          "ao_id": "5c352a6d947e4e04b3f67fd79bcbec9c",
+          "sequence": 14
+        },
+        {
+          "ao_id": "b40a6605fe5a441092041a843f4fe90f",
+          "sequence": 15
+        }
+      ]
+    },
+    {
+      "block_id": "b-4",
+      "source_refs": [
+        {
+          "ao_id": "aea63b3f496f4534958c3200bdaed498",
+          "sequence": 17
+        },
+        {
+          "ao_id": "ac4fc69284d94a068f85ee77151b8520",
+          "sequence": 18
+        },
+        {
+          "ao_id": "39f12b2d29f2475b813b7e71e1a20ca1",
+          "sequence": 19
+        }
+      ]
+    },
+    {
+      "block_id": "b-10",
+      "source_refs": [
+        {
+          "ao_id": "62abdc56237249d497d846f9f7d1f27d",
+          "sequence": 21
+        }
+      ]
+    }
+  ]
+}

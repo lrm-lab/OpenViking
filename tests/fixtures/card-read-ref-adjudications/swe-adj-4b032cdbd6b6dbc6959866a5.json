@@ -1,0 +1,96 @@
+{
+  "domain": "swe",
+  "adjudication_id": "adj-4b032cdbd6b6dbc6959866a5",
+  "source": "experiments/evo-kw-rerun-20261020/local-state/evo-swe-d-20261025/user/eval-admin/sessions/coforge-quiet-01a171b6-105a-7409-a607-486772114507-01a171b6-1e6d-715c-82b8-975580acdfa9/adjudications/adj-4b032cdbd6b6dbc6959866a5.json",
+  "sha256": "a14a7efc9fd21505861e10e41ce8de6a128e90ed20839f54361ace851347fa2b",
+  "verdict": "proposals_all_rejected",
+  "rejected": [
+    [
+      "ao_not_read",
+      "skill_card"
+    ]
+  ],
+  "recorded_read_aos": 0,
+  "raw_read_lower_bound": [
+    9
+  ],
+  "records": [
+    {
+      "ao_id": "eec24697fad040baa3c2efc72d86c8b2",
+      "sequence": 1
+    },
+    {
+      "ao_id": "a8656374ca004ebf9f6fa55d8e922519",
+      "sequence": 2
+    },
+    {
+      "ao_id": "696297f32caa4c13b4dadd8b0fbe931a",
+      "sequence": 3
+    },
+    {
+      "ao_id": "bf9a85cc36d84e848cc91b3411cd90c1",
+      "sequence": 4
+    },
+    {
+      "ao_id": "c55fd031bd364780b596a5c9b19ad4b5",
+      "sequence": 5
+    },
+    {
+      "ao_id": "e4bd80dbcda243e4b05db835d1b22573",
+      "sequence": 6
+    },
+    {
+      "ao_id": "0cd5c31b44d040c5ab0c3372f275ccf1",
+      "sequence": 7
+    },
+    {
+      "ao_id": "ede9830983514af6a763a2c3d786d583",
+      "sequence": 8
+    },
+    {
+      "ao_id": "59c6161b23f34c4cbebb7c4013b95446",
+      "sequence": 9
+    },
+    {
+      "ao_id": "f969869b309b462597741160b2544267",
+      "sequence": 10
+    }
+  ],
+  "blocks": [
+    {
+      "block_id": "b-0",
+      "source_refs": [
+        {
+          "ao_id": "eec24697fad040baa3c2efc72d86c8b2",
+          "sequence": 1
+        }
+      ]
+    },
+    {
+      "block_id": "b-1",
+      "source_refs": [
+        {
+          "ao_id": "bf9a85cc36d84e848cc91b3411cd90c1",
+          "sequence": 4
+        },
+        {
+          "ao_id": "c55fd031bd364780b596a5c9b19ad4b5",
+          "sequence": 5
+        },
+        {
+          "ao_id": "e4bd80dbcda243e4b05db835d1b22573",
+          "sequence": 6
+        }
+      ]
+    },
+    {
+      "block_id": "b-5",
+      "source_refs": [
+        {
+          "ao_id": "f969869b309b462597741160b2544267",
+          "sequence": 10
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,88 @@
+{
+  "domain": "swe",
+  "adjudication_id": "adj-fe10f75faf757898ea8f99ee",
+  "source": "experiments/evo-kw-rerun-20261020/local-state/evo-swe-d-20261025/user/eval-admin/sessions/coforge-quiet-01a17202-1b8e-726a-a53f-046f5767d17e-01a17202-387f-74e9-aa97-dcc2b1191fc1/adjudications/adj-fe10f75faf757898ea8f99ee.json",
+  "sha256": "69a5d2bf43ba286a449bc4c50103646302b037f484f7eebaf30b2f8ed770b55b",
+  "verdict": "proposals_all_rejected",
+  "rejected": [
+    [
+      "ao_not_read",
+      "fork"
+    ]
+  ],
+  "recorded_read_aos": 0,
+  "raw_read_lower_bound": [
+    7
+  ],
+  "records": [
+    {
+      "ao_id": "8ac504d4c7e345b9a2d9749816092afd",
+      "sequence": 1
+    },
+    {
+      "ao_id": "c9e18f4b6f2a444a993902756e2168d0",
+      "sequence": 2
+    },
+    {
+      "ao_id": "d8a63af351604a39a1e0f671dea6105c",
+      "sequence": 3
+    },
+    {
+      "ao_id": "11b9ce0806cd459fa74d2140e0786c21",
+      "sequence": 4
+    },
+    {
+      "ao_id": "3bfeeaf7a78545b4bfe6fac44ca0430b",
+      "sequence": 5
+    },
+    {
+      "ao_id": "0a264c58bb78483b8b6f7ce5ecd1cca8",
+      "sequence": 6
+    },
+    {
+      "ao_id": "42103a830664448ebdd49e8e5ac52066",
+      "sequence": 7
+    },
+    {
+      "ao_id": "dd7a1839ad5b466b9117848d6ba3c591",
+      "sequence": 8
+    }
+  ],
+  "blocks": [
+    {
+      "block_id": "b-0",
+      "source_refs": [
+        {
+          "ao_id": "8ac504d4c7e345b9a2d9749816092afd",
+          "sequence": 1
+        }
+      ]
+    },
+    {
+      "block_id": "b-1",
+      "source_refs": [
+        {
+          "ao_id": "11b9ce0806cd459fa74d2140e0786c21",
+          "sequence": 4
+        },
+        {
+          "ao_id": "3bfeeaf7a78545b4bfe6fac44ca0430b",
+          "sequence": 5
+        },
+        {
+          "ao_id": "0a264c58bb78483b8b6f7ce5ecd1cca8",
+          "sequence": 6
+        }
+      ]
+    },
+    {
+      "block_id": "b-4",
+      "source_refs": [
+        {
+          "ao_id": "dd7a1839ad5b466b9117848d6ba3c591",
+          "sequence": 8
+        }
+      ]
+    }
+  ]
+}

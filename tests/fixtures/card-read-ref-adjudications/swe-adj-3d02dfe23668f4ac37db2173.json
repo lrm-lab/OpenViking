@@ -1,0 +1,146 @@
+{
+  "domain": "swe",
+  "adjudication_id": "adj-3d02dfe23668f4ac37db2173",
+  "source": "experiments/evo-kw-rerun-20261020/local-state/evo-swe-d-20261025/user/eval-admin/sessions/coforge-quiet-01a17184-4982-7013-a9fd-38657e2fd316-01a17184-6c58-778f-b6f5-f36723315a5d/adjudications/adj-3d02dfe23668f4ac37db2173.json",
+  "sha256": "5ac74f5846a8fe37032bd2af437481faed30c3c287b794cb7884686ca3ca47c0",
+  "verdict": "proposals_all_rejected",
+  "rejected": [
+    [
+      "ao_not_read",
+      "skill_card"
+    ]
+  ],
+  "recorded_read_aos": 0,
+  "raw_read_lower_bound": [
+    15
+  ],
+  "records": [
+    {
+      "ao_id": "525dc9d598cc46f0af0c97ca737a1fb5",
+      "sequence": 1
+    },
+    {
+      "ao_id": "f62bce5f026a4cabbbe1ad45e3aefad2",
+      "sequence": 2
+    },
+    {
+      "ao_id": "81ea49b73d3f44ecab6d2f0ae3ca561e",
+      "sequence": 3
+    },
+    {
+      "ao_id": "219a1c26009546ffad68b03e6fc69a8e",
+      "sequence": 4
+    },
+    {
+      "ao_id": "529009f51b9b4974a90e2f13f051dc49",
+      "sequence": 5
+    },
+    {
+      "ao_id": "aab5ac96ab154e699cfd3113ed361822",
+      "sequence": 6
+    },
+    {
+      "ao_id": "09521cc83ba342c7a8739729fb6c6fd3",
+      "sequence": 7
+    },
+    {
+      "ao_id": "85ac90af21ea4865bcee53775cf7232e",
+      "sequence": 8
+    },
+    {
+      "ao_id": "315db2a197c2486992e29373c8d327b6",
+      "sequence": 9
+    },
+    {
+      "ao_id": "cc61d5fcf3e7411f8dcdef335cb9a68b",
+      "sequence": 10
+    },
+    {
+      "ao_id": "a846a75aacbd4bbcba96a6a211d73bda",
+      "sequence": 11
+    },
+    {
+      "ao_id": "8266c2c0d94548f5a395aec4614d2eb1",
+      "sequence": 12
+    },
+    {
+      "ao_id": "c8a06e5593ce4cd9948fc2513b6ca6d8",
+      "sequence": 13
+    },
+    {
+      "ao_id": "f61695c282394aa3aa353b56457dd3e7",
+      "sequence": 14
+    },
+    {
+      "ao_id": "1189708d01f5444f97fa9831c1f9479f",
+      "sequence": 15
+    },
+    {
+      "ao_id": "cb726cbb73544e4a9a61a0c749acf888",
+      "sequence": 16
+    }
+  ],
+  "blocks": [
+    {
+      "block_id": "task_1",
+      "source_refs": [
+        {
+          "ao_id": "525dc9d598cc46f0af0c97ca737a1fb5",
+          "sequence": 1
+        }
+      ]
+    },
+    {
+      "block_id": "orch_1",
+      "source_refs": [
+        {
+          "ao_id": "aab5ac96ab154e699cfd3113ed361822",
+          "sequence": 6
+        }
+      ]
+    },
+    {
+      "block_id": "b-2",
+      "source_refs": [
+        {
+          "ao_id": "85ac90af21ea4865bcee53775cf7232e",
+          "sequence": 8
+        },
+        {
+          "ao_id": "315db2a197c2486992e29373c8d327b6",
+          "sequence": 9
+        },
+        {
+          "ao_id": "cc61d5fcf3e7411f8dcdef335cb9a68b",
+          "sequence": 10
+        }
+      ]
+    },
+    {
+      "block_id": "b-4",
+      "source_refs": [
+        {
+          "ao_id": "8266c2c0d94548f5a395aec4614d2eb1",
+          "sequence": 12
+        },
+        {
+          "ao_id": "c8a06e5593ce4cd9948fc2513b6ca6d8",
+          "sequence": 13
+        },
+        {
+          "ao_id": "f61695c282394aa3aa353b56457dd3e7",
+          "sequence": 14
+        }
+      ]
+    },
+    {
+      "block_id": "conclusion_1",
+      "source_refs": [
+        {
+          "ao_id": "cb726cbb73544e4a9a61a0c749acf888",
+          "sequence": 16
+        }
+      ]
+    }
+  ]
+}
